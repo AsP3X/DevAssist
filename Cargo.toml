@@ -1,0 +1,17 @@
+[package]
+name = "artcraft-repos"
+version = "0.2.0"
+edition = "2024"
+description = "Mouse and keyboard manager for local GitHub repositories"
+
+[dependencies]
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-width = "0.2"
+ureq = "2.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
