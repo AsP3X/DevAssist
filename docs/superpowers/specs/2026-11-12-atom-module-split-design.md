@@ -67,7 +67,6 @@ src/
       paths.rs    home_dir, same_path, push_path
     task/
       job.rs      Job, Item, JobEvent (today's job.rs)
-      queue.rs    queued requests, one running at a time
       worker.rs   background thread + message channel
   features/
     repos/
@@ -121,12 +120,14 @@ This is the pattern `pathprompt::Outcome` and `settings::Outcome` already use; t
 
 ### Task atom
 
-`job.rs` moves as it is. The queue (`Queued`, `VecDeque`) and the worker channel (`tx` / `rx`, `Msg`) leave `App`:
+*Revised 2026-11-12 while planning this step; see `docs/superpowers/plans/2026-11-12-task-atom.md`.*
 
-- `queue` is generic over the request type; each feature defines its own request enum.
-- `worker` gives a feature a sender it can clone into threads and a `drain()` that returns that feature's messages.
+- `job` holds `Job`, `Item` and `JobEvent`, made generic: a job reads progress through a `Reader` function it is given. Git's phase table and wording move out to `src/gitprogress.rs` (later `features/repos`).
+- `worker` owns the channel that is `tx` / `rx` in `App` today: `spawn` runs work on a thread, `drain()` returns what the threads reported.
 
-A feature that needs queued background work with progress gets it by owning a `Queue<Req>` and a `Worker<Msg>`.
+There is no `queue` atom. The queue is a plain `VecDeque` of a feature's own request enum, and a wrapper would add nothing. The rule for *when* the next request starts depends on shell state (`Mode`, the hidden-dialog flag), so it is separated in step 4, when `App` is split.
+
+A feature that needs background work with progress gets it by owning a `Worker<Msg>` and building `Job`s.
 
 ## Feature contract
 
@@ -162,7 +163,8 @@ With one feature registered, the switcher is hidden and the app looks exactly as
 |---|---|
 | `mode` for global dialogs (Help), `should_quit`, `restart`, `tick`, `mouse`, `pointer`, `screen`, `copy_note`, `hits`, `status` | shell / `Ctx` |
 | `update`, `update_quiet`, `update_check` | `features/update` |
-| `queue`, `job`, `tx`, `rx`, `busy` | `atoms/task`, owned by the repos feature |
+| `job`, `tx`, `rx` | `atoms/task` (`Job`, `Worker`), owned by the repos feature |
+| `queue`, `busy` | `features/repos/state.rs` |
 | everything else (checkouts, groups, remotes, filters, selection, lookups, …) | `features/repos/state.rs` |
 
 ## Order of work
@@ -170,7 +172,7 @@ With one feature registered, the switcher is hidden and the app looks exactly as
 Each step is a separate change that compiles and passes `cargo test` with no behaviour change.
 
 1. **System atoms.** Create `atoms/sys`; move `process`, `http`, `open`, `encode`, `paths`, `clipboard`; delete the duplicates.
-2. **Task atom.** Move `job.rs`; extract `queue` and `worker` from `App`.
+2. **Task atom.** Move `job.rs` and make it generic; extract `worker` from `App`.
 3. **UI atoms.** One at a time, in this order: `table`, `hits`, `progress`, `dialog`, `input`, `list`, `menu`, `confirm`, `path`. After each, the dialogs that used the old code use the atom.
 4. **Shell and feature trait.** Add `shell/`; move terminal setup out of `main.rs`; split `App` per the table above; `repos` and `update` implement `Feature`.
 5. **Proof.** The Docker spec is written against this structure. If it needs something no atom provides, that becomes a new atom, not feature-local code.
