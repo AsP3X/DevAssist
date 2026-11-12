@@ -6,6 +6,16 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-12
+
+A maintenance release that continues preparing the code for new features.
+
+### Changed
+
+- Reorganised the internals further: progress tracking and background work
+  are now shared building blocks that no longer assume git. Nothing changes
+  in how the app looks or behaves.
+
 ## [0.3.2] - 2026-11-12
 
 A maintenance release that prepares the code for new features.
@@ -81,7 +91,8 @@ a list of clones that can be anywhere on disk.
 The first version, as artcraft-repos: a terminal app that adds, updates and
 removes GitHub clones in one folder.
 
-[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/AsP3X/DevAssist/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/AsP3X/DevAssist/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/AsP3X/DevAssist/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/AsP3X/DevAssist/releases/tag/v0.3.0
