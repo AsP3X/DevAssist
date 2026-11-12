@@ -112,15 +112,29 @@ pub fn run(mut cmd: Command, mut on_line: impl FnMut(&str, bool)) -> Result<(), 
     }
 }
 
+/// Runs `cmd` to the end and returns what it printed. A failure carries
+/// the last line of its error output. `kill_active` and `request_cancel`
+/// leave it alone.
+pub fn capture(mut cmd: Command) -> Result<String, RunError> {
+    cmd.stdin(Stdio::null());
+    let output = cmd.output().map_err(RunError::Start)?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let errors = String::from_utf8_lossy(&output.stderr);
+    match errors.lines().map(str::trim).rfind(|line| !line.is_empty()) {
+        Some(line) => Err(RunError::Failed(line.to_string())),
+        None => Err(RunError::Exit(output.status)),
+    }
+}
+
 /// A long-running program whose lines arrive as they are printed.
-#[allow(dead_code)]
 pub struct Stream {
     pid: u32,
     /// Set by `stop`, and when the program has ended by itself.
     stopped: Arc<AtomicBool>,
 }
 
-#[allow(dead_code)]
 impl Stream {
     /// Starts `cmd` and returns at once. `on_line` hears every line the
     /// program prints, as an error or not, on a thread of its own.
@@ -362,6 +376,27 @@ mod tests {
     fn a_silent_failure_reports_the_exit_status() {
         let err = run(shell("exit 3"), |_, _| {}).unwrap_err();
         assert!(matches!(err, RunError::Exit(status) if status.code() == Some(3)));
+    }
+
+    #[test]
+    fn capture_returns_the_output_or_the_last_line_of_the_error() {
+        let out = capture(shell("echo one&& echo two")).unwrap();
+        let lines: Vec<&str> = out.lines().map(str::trim).collect();
+        assert_eq!(lines, ["one", "two"]);
+
+        let script = if cfg!(windows) {
+            "echo first 1>&2& echo boom 1>&2& exit 3"
+        } else {
+            "echo first 1>&2; echo boom 1>&2; exit 3"
+        };
+        let err = capture(shell(script)).unwrap_err();
+        assert!(matches!(err, RunError::Failed(text) if text == "boom"));
+
+        let err = capture(shell("exit 3")).unwrap_err();
+        assert!(matches!(err, RunError::Exit(status) if status.code() == Some(3)));
+
+        let err = capture(Command::new("devassist-no-such-program")).unwrap_err();
+        assert!(matches!(err, RunError::Start(_)));
     }
 
     #[test]

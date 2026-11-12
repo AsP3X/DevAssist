@@ -4,6 +4,7 @@ mod shell;
 
 use std::io::{self, IsTerminal};
 
+use features::docker::Docker;
 use features::repos::app::App;
 use ratatui::crossterm::terminal::disable_raw_mode;
 use shell::{Feature, Options, config};
@@ -49,7 +50,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             config::print_help();
             Ok(())
         }
-        config::Startup::Run(settings) if settings.doctor => features::repos::doctor(&settings),
+        config::Startup::Run(settings) if settings.doctor => {
+            features::docker::doctor();
+            features::repos::doctor(&settings)
+        }
         config::Startup::Run(settings) => {
             if !io::stdout().is_terminal() {
                 eprintln!("devassist is a full-screen terminal app.");
@@ -61,7 +65,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 look_for_update: settings.update_check_now,
             };
             shell::run(options, move || {
-                vec![Box::new(App::new(*settings)) as Box<dyn Feature>]
+                vec![
+                    Box::new(App::new(*settings)) as Box<dyn Feature>,
+                    Box::new(Docker::new()),
+                ]
             })
         }
     }

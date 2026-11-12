@@ -23,6 +23,11 @@ impl<M: Send + 'static> Worker<M> {
         thread::spawn(move || work(&tx));
     }
 
+    /// A sender for something that reports on its own, such as a stream.
+    pub fn sender(&self) -> Sender<M> {
+        self.tx.clone()
+    }
+
     /// Everything reported since the last call, oldest first. Never waits.
     pub fn drain(&self) -> Vec<M> {
         let mut messages = Vec::new();
