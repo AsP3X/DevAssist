@@ -5,7 +5,7 @@ use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::config;
+use crate::atoms::sys::paths;
 use crate::github::RemoteRepo;
 
 /// How many completion candidates the dialog keeps to show.
@@ -136,7 +136,7 @@ fn expand_home(text: &str) -> PathBuf {
         Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => rest,
         _ => return PathBuf::from(text),
     };
-    match config::home_dir() {
+    match paths::home_dir() {
         Some(home) => home.join(rest.trim_start_matches(['/', '\\'])),
         None => PathBuf::from(text),
     }
@@ -230,7 +230,7 @@ mod tests {
         );
         fs::write(root.join("file.txt"), "x").unwrap();
         assert!(resolve(&root.join("file.txt").display().to_string()).is_err());
-        if let Some(home) = config::home_dir() {
+        if let Some(home) = paths::home_dir() {
             assert_eq!(resolve("~").unwrap(), home);
             assert_eq!(resolve("~/dev").unwrap(), home.join("dev"));
         }
@@ -293,7 +293,7 @@ mod tests {
             format!("{}{MAIN_SEPARATOR}work{MAIN_SEPARATOR}", root.display())
         );
         match prompt.on_key(key(KeyCode::Enter)) {
-            Outcome::Accept(folder) => assert!(config::same_path(&folder, &root.join("work"))),
+            Outcome::Accept(folder) => assert!(paths::same_path(&folder, &root.join("work"))),
             _ => panic!("the folder should be accepted"),
         }
         assert!(matches!(prompt.on_key(key(KeyCode::Esc)), Outcome::Close));

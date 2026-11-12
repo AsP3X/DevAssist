@@ -9,6 +9,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 
+use crate::atoms::sys::paths;
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
@@ -652,7 +653,7 @@ impl App {
             repo.group = self
                 .placement
                 .iter()
-                .find(|(path, _)| config::same_path(path, &repo.path))
+                .find(|(path, _)| paths::same_path(path, &repo.path))
                 .map(|(_, group)| group.clone())
                 .unwrap_or_default();
         }
@@ -1386,7 +1387,7 @@ impl App {
                     .map(|repo| repo.path.clone())
                     .collect();
                 self.placement
-                    .retain(|(path, _)| !paths.iter().any(|moved| config::same_path(moved, path)));
+                    .retain(|(path, _)| !paths.iter().any(|moved| paths::same_path(moved, path)));
                 if !name.is_empty() {
                     self.placement
                         .extend(paths.into_iter().map(|path| (path, name.clone())));
@@ -1562,7 +1563,7 @@ impl App {
             Purpose::Clone(remotes) => {
                 self.add_marked.clear();
                 // The next clone is offered the same folder.
-                if !config::same_path(&self.clone_dir, &folder) {
+                if !paths::same_path(&self.clone_dir, &folder) {
                     self.clone_dir = folder.clone();
                     self.save_config();
                 }
@@ -1616,7 +1617,7 @@ impl App {
             .map(|repo| repo.path.clone())
             .collect();
         self.checkouts
-            .retain(|path| !paths.iter().any(|gone| config::same_path(gone, path)));
+            .retain(|path| !paths.iter().any(|gone| paths::same_path(gone, path)));
         self.installed
             .retain(|repo| !folders.contains(&repo.folder));
         self.snap_visible_selection();
@@ -1644,7 +1645,7 @@ impl App {
         }
         let mut added = 0;
         for path in found {
-            added += usize::from(config::push_path(&mut self.checkouts, path));
+            added += usize::from(paths::push_path(&mut self.checkouts, path));
         }
         if added > 0 {
             self.save_config();
@@ -1679,7 +1680,7 @@ impl App {
         }
         let before = self.checkouts.len();
         self.checkouts.retain(|path| {
-            path.exists() || !removing.iter().any(|gone| config::same_path(gone, path))
+            path.exists() || !removing.iter().any(|gone| paths::same_path(gone, path))
         });
         if self.checkouts.len() != before {
             self.save_config();
@@ -3088,7 +3089,7 @@ impl App {
                 }
             }
             Msg::Cloned(path) => {
-                if config::push_path(&mut self.checkouts, path) {
+                if paths::push_path(&mut self.checkouts, path) {
                     self.save_config();
                 }
             }
@@ -3328,11 +3329,11 @@ mod tests {
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.mode == Mode::List);
         assert!(app.add_marked.is_empty());
-        assert!(config::same_path(&app.clone_dir, &root.join("second")));
+        assert!(paths::same_path(&app.clone_dir, &root.join("second")));
         match app.queue.front() {
             Some(Queued::Clone(remotes, dir)) => {
                 assert_eq!(remotes.len(), 2);
-                assert!(config::same_path(dir, &root.join("second")));
+                assert!(paths::same_path(dir, &root.join("second")));
             }
             _ => panic!("the clone should be queued"),
         }

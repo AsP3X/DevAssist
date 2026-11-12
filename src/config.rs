@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::atoms::sys::paths::{env_dir, home_dir, push_path, same_path};
 use crate::github::{self, RepoSpec};
 use crate::gitops::{self, Protocol};
 
@@ -520,39 +521,6 @@ fn user_config_path() -> PathBuf {
         Some(base) => base.join(folder).join(FILE_NAME),
         None => exe_dir().unwrap_or_default().join(FILE_NAME),
     }
-}
-
-fn env_dir(key: &str) -> Option<PathBuf> {
-    std::env::var_os(key)
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-}
-
-pub fn home_dir() -> Option<PathBuf> {
-    env_dir(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-}
-
-/// Windows does not tell `C:\Dev` from `c:\dev\`.
-pub fn same_path(left: &Path, right: &Path) -> bool {
-    let plain = |path: &Path| {
-        let text = path.to_string_lossy().replace('\\', "/");
-        let text = text.trim_end_matches('/').to_string();
-        if cfg!(windows) {
-            text.to_lowercase()
-        } else {
-            text
-        }
-    };
-    plain(left) == plain(right)
-}
-
-/// Adds `path` unless it is listed already. True when it was added.
-pub fn push_path(list: &mut Vec<PathBuf>, path: PathBuf) -> bool {
-    if list.iter().any(|item| same_path(item, &path)) {
-        return false;
-    }
-    list.push(path);
-    true
 }
 
 pub fn save(path: &Path, saved: &Saved) -> Result<(), String> {

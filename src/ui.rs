@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
+use crate::atoms::sys::paths;
 use crate::gitops::LocalRepo;
 use crate::job::{ItemState, clock, split_progress};
 use crate::pathprompt::Purpose;
@@ -209,10 +210,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 fn locations(app: &App) -> String {
     let mut parents: Vec<&std::path::Path> = Vec::new();
     for parent in app.checkouts.iter().filter_map(|path| path.parent()) {
-        if !parents
-            .iter()
-            .any(|known| crate::config::same_path(known, parent))
-        {
+        if !parents.iter().any(|known| paths::same_path(known, parent)) {
             parents.push(parent);
         }
     }

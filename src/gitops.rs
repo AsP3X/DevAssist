@@ -10,6 +10,8 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::atoms::sys::paths;
+
 static PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
@@ -788,7 +790,7 @@ pub fn remove_checkout(path: &Path) -> Result<(), String> {
     let dest = path
         .canonicalize()
         .map_err(|_| format!("{} is not there anymore", path.display()))?;
-    let home = crate::config::home_dir().and_then(|home| home.canonicalize().ok());
+    let home = paths::home_dir().and_then(|home| home.canonicalize().ok());
     if dest.parent().is_none() || home.as_deref() == Some(dest.as_path()) {
         return Err(format!("refusing to delete {}", path.display()));
     }
