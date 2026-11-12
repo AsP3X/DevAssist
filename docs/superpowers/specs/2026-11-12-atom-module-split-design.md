@@ -129,6 +129,8 @@ A feature that needs background work with progress gets it by owning a `Worker<M
 
 ## Feature contract
 
+*Revised 2026-11-12: the trait starts with the five methods that have a caller. `name`, `hints` and `doctor` below are added in step 4b with their first caller; an unused trait method is a compile error under the project's lint settings.*
+
 ```rust
 pub trait Feature {
     fn name(&self) -> &'static str;
@@ -174,7 +176,9 @@ Each step is a separate change that compiles and passes `cargo test` with no beh
 3. **UI atoms.** In two parts, each with its own plan:
    - *Drawing* (`text`, `hits`, `progress`, `dialog`): pure functions leave `ui.rs`; no state moves. Plan: `docs/superpowers/plans/2026-11-12-ui-atoms-drawing.md`.
    - *Stateful* (`input`, `list`, `menu`, `path`): key handling leaves `App`, one atom at a time. Plan: `docs/superpowers/plans/2026-11-12-ui-atoms-stateful.md`.
-4. **Shell and feature trait.** Add `shell/`; move terminal setup out of `main.rs`; split `App` per the table above; `repos` and `update` implement `Feature`.
+4. **Shell and feature trait.** In two parts:
+   - *4a, structure:* add `shell/` and the `Feature` trait with the five methods the main loop calls today (`on_event`, `drain`, `waiting`, `draw`, `request`); move the repository code to `features/repos/`; `App` implements `Feature` whole. Plan: `docs/superpowers/plans/2026-11-12-shell-and-feature.md`.
+   - *4b, shared chrome:* take what two features share out of `App` (header, footer, status line, help, text selection, the update dialog), add a key to switch features, and settle where `config.rs` and `update.rs` live. Done together with the first second feature, because what is shared depends on what that feature needs.
 5. **Proof.** The Docker spec is written against this structure. If it needs something no atom provides, that becomes a new atom, not feature-local code.
 
 Steps 1–3 can ship independently; the app is better after each even if step 4 is delayed.
