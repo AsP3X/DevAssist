@@ -11,6 +11,7 @@ use ratatui::layout::Rect;
 
 use crate::atoms::sys::open;
 use crate::atoms::sys::paths;
+use crate::atoms::sys::process;
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
@@ -2380,7 +2381,7 @@ impl App {
             let mut current = skipped;
             let mut failed = Vec::new();
             for (index, item) in work.iter().enumerate() {
-                if gitops::was_cancelled() {
+                if process::was_cancelled() {
                     return Err("cancelled".into());
                 }
                 if item.gone {
@@ -2399,7 +2400,7 @@ impl App {
                         send(tx, JobEvent::Done(index, "updated".into()));
                     }
                     Err(err) => {
-                        if gitops::was_cancelled() {
+                        if process::was_cancelled() {
                             return Err(err);
                         }
                         failed.push(item.folder.clone());
@@ -2478,7 +2479,7 @@ impl App {
             let mut removed = 0;
             let mut failed = Vec::new();
             for (folder, path) in &targets {
-                if gitops::was_cancelled() {
+                if process::was_cancelled() {
                     return Err("cancelled".into());
                 }
                 match remove_or_gone(path) {
@@ -2594,7 +2595,7 @@ impl App {
             let mut branches = 0;
             let mut failed = Vec::new();
             for (index, (owner, name, url)) in jobs.iter().enumerate() {
-                if gitops::was_cancelled() {
+                if process::was_cancelled() {
                     return Err("cancelled".into());
                 }
                 let id = format!("{owner}/{name}");
@@ -2642,7 +2643,7 @@ impl App {
                         send(tx, JobEvent::Done(index, "cloned".into()));
                     }
                     Err(err) => {
-                        if single || gitops::was_cancelled() {
+                        if single || process::was_cancelled() {
                             return Err(err);
                         }
                         send(tx, JobEvent::Failed(index, err));
@@ -2756,7 +2757,7 @@ impl App {
 
     fn cancel_work(&mut self) {
         if self.busy || self.fetching {
-            gitops::request_cancel();
+            process::request_cancel();
             if let Some(job) = self.job.as_mut().filter(|job| job.running()) {
                 job.cancelling = true;
             }
@@ -2775,7 +2776,7 @@ impl App {
         // Stop git only if this app started some. The cancel flag is shared
         // by everything in the process, so it is not raised without need.
         if self.busy || self.fetching || self.status_pending > 0 {
-            gitops::request_cancel();
+            process::request_cancel();
         }
         self.should_quit = true;
     }
@@ -2819,7 +2820,7 @@ impl App {
     where
         F: FnOnce(&Sender<Msg>) -> Result<String, String> + Send + 'static,
     {
-        gitops::clear_cancel();
+        process::clear_cancel();
         self.busy = true;
         self.job_close_at = None;
         if let Some(job) = job {
@@ -2842,7 +2843,7 @@ impl App {
             self.notice("Wait for the current Git command to finish.", true);
             return;
         }
-        gitops::clear_cancel();
+        process::clear_cancel();
         self.generation += 1;
         self.fetching = fetch;
         self.fetch_after_read = false;
@@ -2868,7 +2869,7 @@ impl App {
         std::mem::take(&mut self.fetch_after_read)
             && !self.busy
             && !self.installed.is_empty()
-            && !gitops::was_cancelled()
+            && !process::was_cancelled()
     }
 
     /// Fetches every repository in the background. The rows keep what
@@ -2928,7 +2929,7 @@ impl App {
                     let Some((folder, path)) = next else {
                         break;
                     };
-                    let fetch_this = fetch && !gitops::was_cancelled();
+                    let fetch_this = fetch && !process::was_cancelled();
                     let check = gitops::check(&path, fetch_this, token.as_deref());
                     if tx
                         .send(Msg::Status {
@@ -2975,8 +2976,8 @@ impl App {
                         return;
                     }
                     self.fetching = false;
-                    if gitops::was_cancelled() {
-                        gitops::clear_cancel();
+                    if process::was_cancelled() {
+                        process::clear_cancel();
                         if !self.busy {
                             self.notice("Cancelled.".to_string(), false);
                         }
@@ -3096,7 +3097,7 @@ impl App {
             }
             Msg::JobFinished(result) => {
                 self.busy = false;
-                let cancelled = result.is_err() && gitops::was_cancelled();
+                let cancelled = result.is_err() && process::was_cancelled();
                 if let Some(job) = self.job.as_mut().filter(|job| job.running()) {
                     job.finish(result.clone(), cancelled);
                     if self.mode == Mode::Progress && result.is_ok() {
@@ -3108,7 +3109,7 @@ impl App {
                     Ok(message) => self.notice(message, false),
                     Err(err) => self.notice(err, true),
                 }
-                gitops::clear_cancel();
+                process::clear_cancel();
                 self.generation += 1;
                 self.fetching = false;
                 self.settle_removed();

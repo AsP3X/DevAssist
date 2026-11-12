@@ -581,11 +581,7 @@ fn gh_cli_token() -> Option<String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .env("GH_PROMPT_DISABLED", "1");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+    crate::atoms::sys::process::quiet(&mut cmd);
     let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;

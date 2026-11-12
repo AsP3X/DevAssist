@@ -1,19 +1,11 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use crate::atoms::sys::paths;
-
-static PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-static CANCELLED: AtomicBool = AtomicBool::new(false);
+use crate::atoms::sys::process::{self, RunError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -469,7 +461,7 @@ pub fn check(path: &Path, fetch_remote: bool, token: Option<&str>) -> RepoCheck 
     if fetch_remote {
         match fetch(path, token) {
             Ok(()) => fetched = true,
-            Err(_) if was_cancelled() => {}
+            Err(_) if process::was_cancelled() => {}
             Err(err) => warning = Some(err),
         }
     }
@@ -538,7 +530,7 @@ pub fn update(
         OsString::from("--recurse-submodules=no"),
     ]);
     run_git(args, &mut on_line)?;
-    if was_cancelled() {
+    if process::was_cancelled() {
         return Err("cancelled".into());
     }
     bring_in(path, true, on_line, on_steps)
@@ -798,26 +790,6 @@ pub fn remove_checkout(path: &Path) -> Result<(), String> {
         return Err(format!("{} is not a git checkout", path.display()));
     }
     remove_tree(&dest)
-}
-
-pub fn request_cancel() {
-    CANCELLED.store(true, Ordering::SeqCst);
-    kill_active();
-}
-
-pub fn clear_cancel() {
-    CANCELLED.store(false, Ordering::SeqCst);
-}
-
-pub fn was_cancelled() -> bool {
-    CANCELLED.load(Ordering::SeqCst)
-}
-
-pub fn kill_active() {
-    let pids: Vec<u32> = pids().clone();
-    for pid in pids {
-        kill_pid(pid);
-    }
 }
 
 pub fn parse_status(text: &str) -> StatusInfo {
@@ -1291,47 +1263,6 @@ fn auth_header(token: Option<&str>) -> Option<String> {
     ))
 }
 
-fn pids() -> std::sync::MutexGuard<'static, Vec<u32>> {
-    PIDS.lock().unwrap_or_else(|err| err.into_inner())
-}
-
-fn track_start(pid: u32) {
-    pids().push(pid);
-}
-
-fn track_end(pid: u32) {
-    pids().retain(|item| *item != pid);
-}
-
-struct PidGuard(u32);
-
-impl Drop for PidGuard {
-    fn drop(&mut self) {
-        track_end(self.0);
-    }
-}
-
-fn kill_pid(pid: u32) {
-    let pid = pid.to_string();
-    #[cfg(windows)]
-    let mut cmd = Command::new("taskkill");
-    #[cfg(windows)]
-    {
-        cmd.args(["/PID", &pid, "/T", "/F"]);
-    }
-    #[cfg(not(windows))]
-    let mut cmd = Command::new("kill");
-    #[cfg(not(windows))]
-    {
-        cmd.args(["-TERM", &pid]);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    hide_window(&mut cmd);
-    let _ = cmd.status();
-}
-
 fn git_command() -> Command {
     let mut cmd = Command::new("git");
     cmd.stdin(Stdio::null())
@@ -1339,143 +1270,21 @@ fn git_command() -> Command {
         .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "Never");
-    hide_window(&mut cmd);
+    process::quiet(&mut cmd);
     cmd
-}
-
-fn hide_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let _ = cmd;
 }
 
 fn run_git(
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
-    mut on_line: impl FnMut(&str, bool),
+    on_line: impl FnMut(&str, bool),
 ) -> Result<(), String> {
-    let mut child = git_command()
-        .args(args)
-        .spawn()
-        .map_err(|err| format!("could not start git ({err}). Is Git installed?"))?;
-    let pid_guard = PidGuard(child.id());
-    track_start(pid_guard.0);
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let (tx, rx) = mpsc::channel::<(bool, String)>();
-    if let Some(pipe) = stdout {
-        pump(pipe, tx.clone());
-    }
-    if let Some(pipe) = stderr {
-        pump(pipe, tx.clone());
-    }
-    drop(tx);
-
-    let mut pending: Option<String> = None;
-    let mut failure_text = String::new();
-    let mut last_progress = Instant::now() - Duration::from_secs(1);
-    let flush_progress = |pending: &mut Option<String>,
-                          last_progress: &mut Instant,
-                          on_line: &mut dyn FnMut(&str, bool)| {
-        if last_progress.elapsed() >= Duration::from_millis(80)
-            && let Some(line) = pending.take()
-        {
-            on_line(&line, true);
-            *last_progress = Instant::now();
-        }
-    };
-
-    let status = loop {
-        match rx.recv_timeout(Duration::from_millis(40)) {
-            Ok((true, text)) => {
-                pending = Some(text);
-                flush_progress(&mut pending, &mut last_progress, &mut on_line);
-            }
-            Ok((false, text)) => {
-                if let Some(line) = pending.take() {
-                    on_line(&line, true);
-                }
-                failure_text = text.clone();
-                on_line(&text, false);
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                flush_progress(&mut pending, &mut last_progress, &mut on_line);
-                if let Ok(Some(status)) = child.try_wait() {
-                    while let Ok(item) = rx.try_recv() {
-                        match item {
-                            (true, text) => pending = Some(text),
-                            (false, text) => {
-                                if let Some(line) = pending.take() {
-                                    on_line(&line, true);
-                                }
-                                failure_text = text.clone();
-                                on_line(&text, false);
-                            }
-                        }
-                    }
-                    if let Some(line) = pending.take() {
-                        on_line(&line, true);
-                    }
-                    break status;
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                if let Some(line) = pending.take() {
-                    on_line(&line, true);
-                }
-                break child.wait().map_err(|err| err.to_string())?;
-            }
-        }
-    };
-    if status.success() {
-        Ok(())
-    } else if !failure_text.is_empty() {
-        Err(failure_text)
-    } else if let Some(line) = pending {
-        Err(line)
-    } else {
-        Err(format!("git exited with {status}"))
-    }
-}
-
-fn pump(reader: impl Read + Send + 'static, tx: mpsc::Sender<(bool, String)>) {
-    thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 2048];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(size) => {
-                    buf.extend_from_slice(&chunk[..size]);
-                    while let Some(pos) =
-                        buf.iter().position(|byte| *byte == b'\n' || *byte == b'\r')
-                    {
-                        let line: Vec<u8> = buf.drain(..=pos).collect();
-                        let separator = *line.last().unwrap_or(&b'\n');
-                        let text = String::from_utf8_lossy(&line[..line.len() - 1])
-                            .trim()
-                            .to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let progress = separator == b'\r';
-                        if tx.send((progress, text)).is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        if !buf.is_empty() {
-            let text = String::from_utf8_lossy(&buf).trim().to_string();
-            if !text.is_empty() {
-                let _ = tx.send((false, text));
-            }
-        }
-    });
+    let mut cmd = git_command();
+    cmd.args(args);
+    process::run(cmd, on_line).map_err(|err| match err {
+        RunError::Start(err) => format!("could not start git ({err}). Is Git installed?"),
+        RunError::Wait(text) | RunError::Failed(text) => text,
+        RunError::Exit(status) => format!("git exited with {status}"),
+    })
 }
 
 fn remove_tree(path: &Path) -> Result<(), String> {

@@ -140,7 +140,7 @@ fn doctor(settings: &config::Settings) -> Result<(), Box<dyn std::error::Error>>
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>, Box<dyn std::error::Error>> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        gitops::kill_active();
+        atoms::sys::process::kill_active();
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         hook(info);
