@@ -2,9 +2,9 @@
 
 use std::io::{BufReader, Read};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,98 @@ pub fn run(mut cmd: Command, mut on_line: impl FnMut(&str, bool)) -> Result<(), 
         Err(RunError::Failed(line))
     } else {
         Err(RunError::Exit(status))
+    }
+}
+
+/// A long-running program whose lines arrive as they are printed.
+#[allow(dead_code)]
+pub struct Stream {
+    pid: u32,
+    /// Set by `stop`, and when the program has ended by itself.
+    stopped: Arc<AtomicBool>,
+}
+
+#[allow(dead_code)]
+impl Stream {
+    /// Starts `cmd` and returns at once. `on_line` hears every line the
+    /// program prints, as an error or not, on a thread of its own.
+    /// `on_end` runs once when the program ends by itself: with nothing
+    /// when it succeeded, otherwise with the last line it printed or,
+    /// when it printed none, its exit status. It does not run for a
+    /// stream that was stopped.
+    ///
+    /// `kill_active` and `request_cancel` leave a stream alone.
+    pub fn start(
+        mut cmd: Command,
+        mut on_line: impl FnMut(&str) + Send + 'static,
+        on_end: impl FnOnce(Result<(), String>) + Send + 'static,
+    ) -> Result<Stream, RunError> {
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(RunError::Start)?;
+        let pid = child.id();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel::<(bool, String)>();
+        if let Some(pipe) = child.stdout.take() {
+            pump(pipe, tx.clone());
+        }
+        if let Some(pipe) = child.stderr.take() {
+            pump(pipe, tx.clone());
+        }
+        drop(tx);
+
+        let flag = Arc::clone(&stopped);
+        thread::spawn(move || {
+            let mut last = String::new();
+            let mut hear = |text: String| {
+                if !flag.load(Ordering::SeqCst) {
+                    on_line(&text);
+                    last = text;
+                }
+            };
+            let status = loop {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok((_, text)) => hear(text),
+                    // The program can be gone while something it started
+                    // still holds its output open.
+                    Err(RecvTimeoutError::Timeout) => {
+                        if let Ok(Some(status)) = child.try_wait() {
+                            while let Ok((_, text)) = rx.try_recv() {
+                                hear(text);
+                            }
+                            break Ok(status);
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break child.wait(),
+                }
+            };
+            // From here on `stop` has nothing left to stop.
+            if flag.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            on_end(match status {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) if last.is_empty() => Err(status.to_string()),
+                Ok(_) => Err(last),
+                Err(err) => Err(err.to_string()),
+            });
+        });
+        Ok(Stream { pid, stopped })
+    }
+
+    /// Stops the program and what it started. Does nothing the second
+    /// time, or when the program has already ended.
+    pub fn stop(&mut self) {
+        if !self.stopped.swap(true, Ordering::SeqCst) {
+            kill_pid(self.pid);
+        }
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -276,5 +368,112 @@ mod tests {
     fn a_program_that_does_not_exist_cannot_start() {
         let err = run(Command::new("devassist-no-such-program"), |_, _| {}).unwrap_err();
         assert!(matches!(err, RunError::Start(_)));
+    }
+
+    /// Long enough for a slow machine, short enough to end a stuck test.
+    const WAIT: Duration = Duration::from_secs(20);
+
+    /// A command that prints `up` and then runs for half a minute.
+    fn long_running() -> Command {
+        shell(if cfg!(windows) {
+            "echo up&& ping -n 30 127.0.0.1 >nul"
+        } else {
+            "echo up; exec sleep 30"
+        })
+    }
+
+    type Lines = mpsc::Receiver<String>;
+    type End = mpsc::Receiver<Result<(), String>>;
+
+    /// Starts a stream that passes its lines and its end on.
+    fn stream(cmd: Command) -> Result<(Stream, Lines, End), RunError> {
+        let (line_tx, line_rx) = mpsc::channel();
+        let (end_tx, end_rx) = mpsc::channel();
+        let stream = Stream::start(
+            cmd,
+            move |line| {
+                let _ = line_tx.send(line.to_string());
+            },
+            move |result| {
+                let _ = end_tx.send(result);
+            },
+        )?;
+        Ok((stream, line_rx, end_rx))
+    }
+
+    #[test]
+    fn a_stream_hands_over_every_line_and_then_its_end() {
+        let (_stream, lines, end) = stream(shell("echo one&& echo two")).unwrap();
+        assert_eq!(end.recv_timeout(WAIT), Ok(Ok(())));
+        let lines: Vec<String> = lines.try_iter().collect();
+        assert_eq!(lines, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn a_stream_hears_what_is_printed_as_an_error_too() {
+        let (_stream, lines, end) = stream(shell("echo out&& echo err 1>&2")).unwrap();
+        assert_eq!(end.recv_timeout(WAIT), Ok(Ok(())));
+        let mut lines: Vec<String> = lines.try_iter().collect();
+        lines.sort();
+        assert_eq!(lines, vec!["err".to_string(), "out".to_string()]);
+    }
+
+    #[test]
+    fn a_stream_that_fails_ends_with_the_last_line_or_the_exit_status() {
+        let script = if cfg!(windows) {
+            "echo boom& exit 3"
+        } else {
+            "echo boom; exit 3"
+        };
+        let (_stream, _lines, end) = stream(shell(script)).unwrap();
+        assert_eq!(end.recv_timeout(WAIT), Ok(Err("boom".to_string())));
+
+        let (_stream, _lines, end) = stream(shell("exit 3")).unwrap();
+        let result = end.recv_timeout(WAIT).unwrap();
+        assert!(matches!(result, Err(text) if text.contains('3')));
+    }
+
+    #[test]
+    fn stopping_a_stream_ends_its_program_without_calling_on_end() {
+        let (mut stream, lines, end) = stream(long_running()).unwrap();
+        assert_eq!(lines.recv_timeout(WAIT), Ok("up".to_string()));
+        let started = Instant::now();
+        stream.stop();
+        // The end is not reported; its channel closes once the program is
+        // gone and the stream has let go of it.
+        assert_eq!(end.recv_timeout(WAIT), Err(RecvTimeoutError::Disconnected));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // Stopping again does nothing.
+        stream.stop();
+    }
+
+    #[test]
+    fn dropping_a_stream_stops_it() {
+        let (stream, lines, end) = stream(long_running()).unwrap();
+        assert_eq!(lines.recv_timeout(WAIT), Ok("up".to_string()));
+        let started = Instant::now();
+        drop(stream);
+        assert_eq!(end.recv_timeout(WAIT), Err(RecvTimeoutError::Disconnected));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_stream_of_a_program_that_does_not_exist_cannot_start() {
+        let result = stream(Command::new("devassist-no-such-program"));
+        assert!(matches!(result, Err(RunError::Start(_))));
+    }
+
+    #[test]
+    fn kill_active_does_not_stop_a_stream() {
+        // Calling `kill_active` here would also stop what other tests are
+        // running, so this looks at the list it works from.
+        let (stream, lines, end) = stream(long_running()).unwrap();
+        assert_eq!(lines.recv_timeout(WAIT), Ok("up".to_string()));
+        assert!(!pids().contains(&stream.pid));
+        assert!(!stream.stopped.load(Ordering::SeqCst));
+        assert_eq!(
+            end.recv_timeout(Duration::from_millis(300)),
+            Err(RecvTimeoutError::Timeout)
+        );
     }
 }
