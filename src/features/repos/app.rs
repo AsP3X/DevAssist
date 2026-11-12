@@ -17,13 +17,11 @@ use crate::atoms::ui::input::{self, Alt};
 use crate::atoms::ui::list;
 use crate::atoms::ui::menu;
 use crate::atoms::ui::path::{self as pathprompt, PathPrompt};
-use crate::atoms::ui::select::{PointerEffect, PointerEvent};
-use crate::config::{self, Settings};
 use crate::features::repos::github::{self, AccountQuery, RemoteRepo};
 use crate::features::repos::gitops::{self, LocalRepo};
 use crate::features::repos::gitprogress;
 use crate::features::repos::settings::{Form, Outcome};
-use crate::update::{self, Release};
+use crate::shell::config::{self, Settings};
 
 /// How long the Add search waits after the last key before asking GitHub.
 const LOOKUP_DELAY: Duration = Duration::from_millis(350);
@@ -66,9 +64,6 @@ pub enum Mode {
     Group,
     /// The actions for the chosen repositories, opened with Enter.
     Menu,
-    /// The version dialog: look for an update, install it, restart.
-    Update,
-    Help,
     Settings,
     Progress,
 }
@@ -185,25 +180,6 @@ impl Row<'_> {
     }
 }
 
-/// What is known about a newer version.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UpdateState {
-    /// Nobody has looked yet.
-    Unknown,
-    Checking,
-    /// The running version is the latest.
-    Current,
-    Available(Release),
-    Installing {
-        release: Release,
-        done: u64,
-        total: u64,
-    },
-    /// This version was put in place. It runs after a restart.
-    Installed(String),
-    Failed(String),
-}
-
 /// One line of the actions menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
@@ -293,10 +269,6 @@ enum Msg {
         result: Result<Vec<RemoteRepo>, String>,
     },
     Login(Option<String>),
-    /// The answer to "is there a newer version?".
-    Update(Result<Option<Release>, String>),
-    UpdateProgress(u64, u64),
-    UpdateDone(Result<(), String>),
     Job(JobEvent),
     /// A clone landed here, or a checkout that was already here was found.
     Cloned(PathBuf),
@@ -365,18 +337,9 @@ pub struct App {
     pub fetching: bool,
     pub tick: u64,
     pub mouse: Option<(u16, u16)>,
-    pub pointer: crate::atoms::ui::select::Pointer,
-    pub screen: Vec<Vec<String>>,
-    pub copy_note: Option<String>,
-    pub copy_failed: bool,
     pub hits: Hits<Action>,
     pub should_quit: bool,
-    /// Start the program again after quitting: an update was installed.
-    pub restart: bool,
-    pub update: UpdateState,
-    /// A failed look at startup stays quiet; one the user asked for says why.
-    update_quiet: bool,
-    /// Look for a newer version at startup, as the settings file says.
+    /// Look for a newer version at startup: the setting, kept to be saved.
     update_check: bool,
     generation: u64,
     remote_generation: u64,
@@ -396,12 +359,7 @@ impl App {
     pub fn new(settings: Settings) -> Self {
         let first_run = settings.first_run;
         let unsaved = settings.unsaved;
-        let look_for_update = settings.update_check_now;
         let mut app = Self::empty(settings);
-        update::clean_up();
-        if look_for_update {
-            app.check_for_update(true);
-        }
         app.reload_lists(false, false);
         app.fetch_after_read = true;
         if unsaved {
@@ -473,15 +431,8 @@ impl App {
             fetching: false,
             tick: 0,
             mouse: None,
-            pointer: crate::atoms::ui::select::Pointer::default(),
-            screen: Vec::new(),
-            copy_note: None,
-            copy_failed: false,
             hits: Hits::default(),
             should_quit: false,
-            restart: false,
-            update: UpdateState::Unknown,
-            update_quiet: false,
             update_check: settings.update_check,
             generation: 0,
             remote_generation: 0,
@@ -515,10 +466,6 @@ impl App {
             || self.lookup_running.is_some()
             || self.job_close_at.is_some()
             || !self.queue.is_empty()
-            || matches!(
-                self.update,
-                UpdateState::Checking | UpdateState::Installing { .. }
-            )
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -527,35 +474,14 @@ impl App {
             Event::Paste(text) => self.paste(text),
             Event::Mouse(mouse) => {
                 self.mouse = Some((mouse.column, mouse.row));
-                let at = (mouse.column, mouse.row);
                 match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        self.copy_note = None;
-                        self.copy_failed = false;
-                        self.pointer.on(PointerEvent::Down, at);
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        self.pointer.on(PointerEvent::Drag, at);
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        match self.pointer.on(PointerEvent::Up, at) {
-                            PointerEffect::Click(x, y) => self.click(x, y),
-                            PointerEffect::Copy => self.copy_selection(),
-                            PointerEffect::None => {}
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Right) => {
-                        self.dismiss_selection();
+                    // The shell passes on a release only for a click.
+                    MouseEventKind::Up(MouseButton::Left)
+                    | MouseEventKind::Down(MouseButton::Right) => {
                         self.click(mouse.column, mouse.row);
                     }
-                    MouseEventKind::ScrollUp => {
-                        self.dismiss_selection();
-                        self.wheel(-3);
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.dismiss_selection();
-                        self.wheel(3);
-                    }
+                    MouseEventKind::ScrollUp => self.wheel(-3),
+                    MouseEventKind::ScrollDown => self.wheel(3),
                     _ => {}
                 }
             }
@@ -902,31 +828,16 @@ impl App {
     fn on_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
-            if self.pointer.selection.is_some() {
-                self.copy_selection();
-            } else {
-                self.quit();
-            }
+            self.quit();
             return;
-        }
-        if key.code == KeyCode::Esc && self.pointer.selection.is_some() {
-            self.dismiss_selection();
-            return;
-        }
-        if self.pointer.selection.is_some() || self.copy_note.is_some() {
-            self.pointer.selection = None;
-            self.copy_note = None;
-            self.copy_failed = false;
         }
         match self.mode.clone() {
-            Mode::Help => self.on_help_key(key),
             Mode::Settings => self.on_settings_key(key),
             Mode::Progress => self.on_progress_key(key),
             Mode::ConfirmRemove { .. } => self.on_confirm_key(key),
             Mode::Path => self.on_path_key(key),
             Mode::Group => self.on_group_key(key),
             Mode::Menu => self.on_menu_key(key),
-            Mode::Update => self.on_update_key(key),
             Mode::Add => self.on_add_key(key, ctrl),
             Mode::Filter => self.on_filter_key(key),
             Mode::List => self.on_list_key(key, ctrl),
@@ -957,9 +868,7 @@ impl App {
             KeyCode::Char('i') | KeyCode::Char('I') => self.open_import(),
             KeyCode::Char('c') | KeyCode::Char(',') | KeyCode::F(2) => self.open_settings(false),
             KeyCode::Char('l') | KeyCode::Char('L') => self.show_job(),
-            KeyCode::Char('v') | KeyCode::Char('V') => self.open_update(),
             KeyCode::Char('q') => self.quit(),
-            KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('/') => {
                 self.mode = Mode::Filter;
                 self.list_filter.clear();
@@ -1050,77 +959,6 @@ impl App {
             Some(group) if self.marked.is_empty() => self.toggle_group(&group),
             _ => self.open_menu(),
         }
-    }
-
-    /// Asks GitHub for a newer version, on a thread of its own.
-    fn check_for_update(&mut self, quiet: bool) {
-        if matches!(
-            self.update,
-            UpdateState::Checking | UpdateState::Installing { .. } | UpdateState::Installed(_)
-        ) {
-            return;
-        }
-        self.update = UpdateState::Checking;
-        self.update_quiet = quiet;
-        self.worker.spawn(move |tx| {
-            let token = github::token();
-            let _ = tx.send(Msg::Update(update::check(token.as_deref())));
-        });
-    }
-
-    /// `v`: the version dialog. It looks for an update unless one is
-    /// already known or being installed.
-    fn open_update(&mut self) {
-        self.mode = Mode::Update;
-        if matches!(
-            self.update,
-            UpdateState::Unknown | UpdateState::Current | UpdateState::Failed(_)
-        ) {
-            self.check_for_update(false);
-        }
-    }
-
-    fn on_update_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::List,
-            KeyCode::Enter => self.update_enter(),
-            _ => {}
-        }
-    }
-
-    /// Enter in the version dialog: install what is available, restart
-    /// into what was installed, or look again.
-    fn update_enter(&mut self) {
-        match self.update.clone() {
-            UpdateState::Available(release) => self.install_update(release),
-            UpdateState::Installed(_) => {
-                self.restart = true;
-                self.quit();
-            }
-            UpdateState::Current | UpdateState::Failed(_) | UpdateState::Unknown => {
-                self.check_for_update(false);
-            }
-            UpdateState::Checking | UpdateState::Installing { .. } => {}
-        }
-    }
-
-    fn install_update(&mut self, release: Release) {
-        let total = release
-            .download
-            .as_ref()
-            .map_or(0, |download| download.size);
-        self.update = UpdateState::Installing {
-            release: release.clone(),
-            done: 0,
-            total,
-        };
-        self.worker.spawn(move |tx| {
-            let token = github::token();
-            let result = update::install(&release, token.as_deref(), |done, total| {
-                let _ = tx.send(Msg::UpdateProgress(done, total));
-            });
-            let _ = tx.send(Msg::UpdateDone(result));
-        });
     }
 
     fn open_menu(&mut self) {
@@ -1745,15 +1583,6 @@ impl App {
         }
     }
 
-    fn on_help_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Enter | KeyCode::Char('q') => {
-                self.mode = Mode::List;
-            }
-            _ => {}
-        }
-    }
-
     fn paste(&mut self, text: String) {
         let text: String = text
             .chars()
@@ -1789,35 +1618,6 @@ impl App {
                 }
             }
             _ => {}
-        }
-    }
-
-    fn dismiss_selection(&mut self) {
-        self.pointer = crate::atoms::ui::select::Pointer::default();
-        self.copy_note = None;
-        self.copy_failed = false;
-    }
-
-    fn copy_selection(&mut self) {
-        let Some(sel) = self.pointer.selection else {
-            return;
-        };
-        let text = crate::atoms::ui::select::selected_text(&self.screen, sel.anchor, sel.head);
-        if text.is_empty() {
-            self.pointer.selection = None;
-            self.copy_note = None;
-            self.copy_failed = false;
-            return;
-        }
-        match crate::atoms::sys::clipboard::set_text(&text) {
-            Ok(()) => {
-                self.copy_note = Some("Copied to the clipboard".to_string());
-                self.copy_failed = false;
-            }
-            Err(err) => {
-                self.copy_note = Some(err);
-                self.copy_failed = true;
-            }
         }
     }
 
@@ -1892,7 +1692,6 @@ impl App {
             Action::Confirm if self.mode == Mode::Path => self.accept_path(),
             Action::Confirm if self.mode == Mode::Group => self.accept_group(),
             Action::Cancel if self.mode == Mode::Menu => self.close_menu(),
-            Action::Confirm if self.mode == Mode::Update => self.update_enter(),
             Action::Cancel if self.mode == Mode::Group => self.close_group(),
             Action::Confirm => self.confirm_remove(),
             Action::Forget => self.forget_chosen(),
@@ -2956,53 +2755,6 @@ impl App {
                 if self.mode == Mode::Add {
                     self.settle_add_selection();
                 }
-            }
-            Msg::Update(result) => {
-                self.update = match result {
-                    Ok(Some(release)) => {
-                        if !self.busy && self.mode != Mode::Update {
-                            self.notice(
-                                format!(
-                                    "DevAssist {} is available. Press v to install it.",
-                                    release.version
-                                ),
-                                false,
-                            );
-                        }
-                        UpdateState::Available(release)
-                    }
-                    Ok(None) => UpdateState::Current,
-                    // Nobody asked: a failed look at startup is not news.
-                    Err(_) if self.update_quiet => UpdateState::Unknown,
-                    Err(err) => UpdateState::Failed(err),
-                };
-            }
-            Msg::UpdateProgress(done, total) => {
-                if let UpdateState::Installing {
-                    done: shown,
-                    total: of,
-                    ..
-                } = &mut self.update
-                {
-                    *shown = done;
-                    *of = total;
-                }
-            }
-            Msg::UpdateDone(result) => {
-                let version = match &self.update {
-                    UpdateState::Installing { release, .. } => release.version.clone(),
-                    _ => String::new(),
-                };
-                self.update = match result {
-                    Ok(()) => {
-                        self.notice(
-                            format!("DevAssist {version} is installed. Restart to use it."),
-                            false,
-                        );
-                        UpdateState::Installed(version)
-                    }
-                    Err(err) => UpdateState::Failed(err),
-                };
             }
             Msg::Login(login) => {
                 if let (Some(form), Some(login)) = (self.form.as_mut(), login) {
@@ -4120,105 +3872,6 @@ mod tests {
         // None of them is a key that moves or closes the menu.
         assert!(!keys.iter().any(|key| "jkq".contains(*key)));
         let _ = std::fs::remove_file(&app.config_path);
-    }
-
-    fn release(version: &str) -> Release {
-        Release {
-            version: version.into(),
-            notes: "- Something new".into(),
-            page: format!("https://github.com/AsP3X/DevAssist/releases/tag/v{version}"),
-            download: Some(update::Asset {
-                name: format!("devassist-{version}-x64.exe"),
-                url: "https://api.github.com/assets/1".into(),
-                size: 4_000_000,
-            }),
-            sums: None,
-        }
-    }
-
-    #[test]
-    fn a_newer_version_is_announced_and_installing_ends_in_a_restart() {
-        let mut app = App::empty(test_settings());
-        assert_eq!(app.update, UpdateState::Unknown);
-        assert!(!app.restart);
-
-        // The look at startup found one: the status line says so.
-        app.update = UpdateState::Checking;
-        app.on_msg(Msg::Update(Ok(Some(release("9.0.0")))));
-        assert_eq!(app.update, UpdateState::Available(release("9.0.0")));
-        assert_eq!(
-            app.status,
-            "DevAssist 9.0.0 is available. Press v to install it."
-        );
-
-        // While it downloads, progress arrives; then it is in place.
-        app.update = UpdateState::Installing {
-            release: release("9.0.0"),
-            done: 0,
-            total: 4_000_000,
-        };
-        assert!(app.waiting());
-        app.on_msg(Msg::UpdateProgress(1_000_000, 4_000_000));
-        assert!(matches!(
-            app.update,
-            UpdateState::Installing {
-                done: 1_000_000,
-                ..
-            }
-        ));
-        app.on_msg(Msg::UpdateDone(Ok(())));
-        assert_eq!(app.update, UpdateState::Installed("9.0.0".into()));
-        assert_eq!(
-            app.status,
-            "DevAssist 9.0.0 is installed. Restart to use it."
-        );
-
-        // Enter in the version dialog restarts into it.
-        app.mode = Mode::Update;
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(app.restart);
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn a_failed_look_is_quiet_at_startup_and_said_when_asked_for() {
-        let mut app = App::empty(test_settings());
-        app.update = UpdateState::Checking;
-        app.update_quiet = true;
-        app.on_msg(Msg::Update(Err("could not reach GitHub".into())));
-        assert_eq!(app.update, UpdateState::Unknown);
-        assert!(!app.status_error);
-
-        app.update = UpdateState::Checking;
-        app.update_quiet = false;
-        app.on_msg(Msg::Update(Err("could not reach GitHub".into())));
-        assert_eq!(
-            app.update,
-            UpdateState::Failed("could not reach GitHub".into())
-        );
-
-        app.update = UpdateState::Checking;
-        app.on_msg(Msg::Update(Ok(None)));
-        assert_eq!(app.update, UpdateState::Current);
-
-        // A failed install says why and can be tried again.
-        app.update = UpdateState::Installing {
-            release: release("9.0.0"),
-            done: 10,
-            total: 20,
-        };
-        app.on_msg(Msg::UpdateDone(Err("the download stopped".into())));
-        assert_eq!(
-            app.update,
-            UpdateState::Failed("the download stopped".into())
-        );
-        assert!(!app.restart);
-
-        // Esc leaves the dialog without doing anything.
-        app.mode = Mode::Update;
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(app.mode == Mode::List);
-        assert!(!app.should_quit);
     }
 
     #[test]

@@ -24,7 +24,7 @@ This plan was written and executed in the same session by the same author, so it
   - `cargo test --locked`
 - This is a binary crate: an unused `pub` item or trait method is a `dead_code` error under `-D warnings`. Something arrives with its first caller.
 - Files are moved with `git mv` so history follows them.
-- An atom names no feature type. Features do not import each other. The shell does not import a feature; `main.rs` wires them.
+- An atom names no feature type. Features do not import each other. The shell's new code does not import a feature; `main.rs` wires them. `shell/config.rs` is the exception: it still parses the repos tool's settings, as it did before the move.
 - No test runs `docker` or `git` against the network.
 
 ## File map

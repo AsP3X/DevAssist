@@ -10,12 +10,54 @@ pub mod ui;
 
 use ratatui::Frame;
 use ratatui::crossterm::event::Event;
+use ratatui::layout::Rect;
 
-use crate::config;
+use crate::shell::config;
+use crate::shell::update;
 use crate::shell::{Feature, Request};
-use crate::update;
+
+/// The keys of the overview, for the help dialog.
+const HELP: &str = "arrows, j k    move
+space          select several · ctrl-a selects all shown
+m              put the selection into a group · on a group: rename it
+enter          actions for the selection · on a group: fold it
+u              update the selection
+U              update every repository
+a              add any GitHub repository, into a folder you choose
+i              import clones you already have, from any folder
+d, Delete      delete the selection, or only take it off the list
+r, F5          fetch and refresh
+s              sort by name or by attention
+o              open the selection in the file manager
+c              settings: default accounts, protocol, title
+l              show the last update or clone
+/              filter the installed list
+wheel          scroll
+esc            clear a selection, cancel, or go back
+q              quit
+
+In Add, type owner/repo or paste a GitHub URL.
+owner/ or a link to an account lists all of its repositories.
+Space selects several repositories. Enter clones them all.
+Starting and Refresh fetch. Update fast-forwards every branch.
+Remove asks before it deletes anything.
+An action started while another runs waits and runs after it.";
 
 impl Feature for app::App {
+    fn name(&self) -> &'static str {
+        "Repos"
+    }
+
+    fn modal(&self) -> bool {
+        self.mode != app::Mode::List
+    }
+
+    fn help(&self) -> &'static str {
+        HELP
+    }
+
+    fn shown(&mut self) {}
+
     fn on_event(&mut self, event: Event) {
         app::App::on_event(self, event);
     }
@@ -28,18 +70,12 @@ impl Feature for app::App {
         app::App::waiting(self)
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
-        ui::draw(frame, self);
+    fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        ui::draw(frame, self, area);
     }
 
     fn request(&self) -> Option<Request> {
-        if !self.should_quit {
-            None
-        } else if self.restart {
-            Some(Request::Restart)
-        } else {
-            Some(Request::Quit)
-        }
+        self.should_quit.then_some(Request::Quit)
     }
 }
 

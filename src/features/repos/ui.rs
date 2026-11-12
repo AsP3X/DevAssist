@@ -1,6 +1,5 @@
 use ratatui::Frame;
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
@@ -15,21 +14,20 @@ use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::features::repos::app::{
-    Action, App, MenuItem, Mode, Purpose, RemoteState, Row, UpdateState, clone_target, group_key,
+    Action, App, MenuItem, Mode, Purpose, RemoteState, Row, clone_target, group_key,
 };
 use crate::features::repos::gitops::LocalRepo;
 use crate::features::repos::gitprogress::{self, split_progress};
 use crate::features::repos::settings::{Field, PROTOCOLS};
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+/// Draws the overview and its open dialog into `area`.
+pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     app.tick = app.tick.wrapping_add(1);
     app.hits.clear();
     app.ensure_selection();
 
-    let area = frame.area();
     if area.width < 48 || area.height < 12 {
         frame.render_widget(Paragraph::new("Make the terminal a bit larger."), area);
-        finish_selection(frame, app);
         return;
     }
 
@@ -56,58 +54,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Path => draw_path(frame, app, area),
         Mode::Group => draw_group(frame, app, area),
         Mode::Menu => draw_menu(frame, app, area),
-        Mode::Update => draw_update(frame, app, area),
-        Mode::Help => draw_help(frame, app, area),
         Mode::Settings => draw_settings(frame, app, area),
         Mode::Progress => draw_progress(frame, app, area),
         Mode::List | Mode::Filter => {}
-    }
-    finish_selection(frame, app);
-}
-
-fn finish_selection(frame: &mut Frame, app: &mut App) {
-    app.screen = capture_screen(frame.buffer_mut());
-    if let Some(sel) = app.pointer.selection {
-        paint_selection(frame.buffer_mut(), sel);
-    }
-}
-
-fn capture_screen(buf: &Buffer) -> Vec<Vec<String>> {
-    let area = buf.area;
-    let rows_n = area.y.saturating_add(area.height) as usize;
-    let cols_n = area.x.saturating_add(area.width) as usize;
-    let mut rows = vec![Vec::new(); rows_n];
-    for y in area.y..area.y.saturating_add(area.height) {
-        let mut row = vec![String::new(); cols_n];
-        for x in area.x..area.x.saturating_add(area.width) {
-            if let Some(cell) = buf.cell(Position::new(x, y)) {
-                row[x as usize] = cell.symbol().to_string();
-            }
-        }
-        rows[y as usize] = row;
-    }
-    rows
-}
-
-fn paint_selection(buf: &mut Buffer, sel: crate::atoms::ui::select::TextSel) {
-    let (start, end) = crate::atoms::ui::select::range(sel.anchor, sel.head);
-    let area = buf.area;
-    let last_x = area.x.saturating_add(area.width).saturating_sub(1);
-    let style = Style::default().fg(Color::White).bg(Color::Blue);
-    for y in start.1..=end.1 {
-        if y < area.y || y >= area.y.saturating_add(area.height) {
-            continue;
-        }
-        let x0 = if y == start.1 { start.0 } else { area.x };
-        let x1 = if y == end.1 { end.0 } else { last_x };
-        if x1 < x0 {
-            continue;
-        }
-        for x in x0..=x1 {
-            if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
-                cell.set_style(style);
-            }
-        }
     }
 }
 
@@ -163,17 +112,6 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         meta_text.push_str(&format!(" · {dirty} dirty"));
     }
     meta_text.push_str(&format!(" · {github}"));
-    match &app.update {
-        UpdateState::Available(release) => {
-            meta_text.push_str(&format!(" · version {} is out, press v", release.version));
-        }
-        UpdateState::Installed(version) => {
-            meta_text.push_str(&format!(
-                " · version {version} runs after a restart, press v"
-            ));
-        }
-        _ => {}
-    }
     let meta = Line::from(Span::styled(
         fit(&meta_text, width),
         Style::default().fg(Color::Gray),
@@ -520,32 +458,14 @@ fn draw_footer(frame: &mut Frame, app: &mut App, area: Rect) {
         width: area.width,
         height: 1,
     };
-    let (text, style) = footer_hint(app, hint.width as usize);
-    frame.render_widget(Paragraph::new(Span::styled(text, style)), hint);
-}
-
-fn footer_hint(app: &App, width: usize) -> (String, Style) {
-    if let Some(note) = &app.copy_note {
-        let style = if app.copy_failed {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
-        return (fit(&format!("  {note}"), width), style);
-    }
-    if app.pointer.selection.is_some() {
-        return (
-            fit("  release to copy", width),
-            Style::default().fg(Color::Cyan),
-        );
-    }
-    (
-        fit(
-            "  drag copies text · double-click updates · r fetches · l last run · esc cancels",
-            width,
-        ),
-        Style::default().fg(Color::DarkGray),
-    )
+    let text = fit(
+        "  drag copies text · double-click updates · r fetches · l last run · esc cancels",
+        hint.width as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray))),
+        hint,
+    );
 }
 
 fn draw_add(frame: &mut Frame, app: &mut App, screen: Rect) {
@@ -870,145 +790,6 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
 }
 
 /// The version dialog: what runs, what is out, and installing it.
-fn draw_update(frame: &mut Frame, app: &mut App, screen: Rect) {
-    let tick = app.tick as usize;
-    let state = app.update.clone();
-    let popup = centered(
-        screen,
-        72.min(screen.width.saturating_sub(2)),
-        16.min(screen.height.saturating_sub(2)),
-    );
-    let accent = match &state {
-        UpdateState::Failed(_) => Color::Red,
-        UpdateState::Available(_) | UpdateState::Installed(_) => Color::Green,
-        _ => Color::Cyan,
-    };
-    let inner = dialog::window(
-        frame,
-        popup,
-        &format!(" DevAssist {} ", crate::update::VERSION),
-        accent,
-    );
-    let text = Rect {
-        x: inner.x + 1,
-        y: inner.y,
-        width: inner.width.saturating_sub(2),
-        height: inner.height.saturating_sub(1),
-    };
-    let width = text.width as usize;
-    let dim = Style::default().fg(Color::DarkGray);
-    let bold = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-    let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1_048_576.0);
-    let mut lines: Vec<Line> = vec![Line::from("")];
-    let buttons: Vec<(&str, Action)> = match &state {
-        UpdateState::Unknown | UpdateState::Checking => {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{} ", progress::spinner(tick)),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw("Looking for a newer version…"),
-            ]));
-            vec![("Close", Action::Cancel)]
-        }
-        UpdateState::Current => {
-            lines.push(Line::from(Span::styled(
-                "✓ This is the latest version.",
-                bold,
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("enter looks again", dim)));
-            vec![("Look again", Action::Confirm), ("Close", Action::Cancel)]
-        }
-        UpdateState::Available(release) => {
-            lines.push(Line::from(Span::styled(
-                format!("Version {} is available.", release.version),
-                bold,
-            )));
-            lines.push(Line::from(""));
-            // What is new, as far as there is room for it.
-            let room = (text.height as usize).saturating_sub(lines.len() + 3);
-            let notes: Vec<&str> = release
-                .notes
-                .lines()
-                .map(str::trim_end)
-                .filter(|line| !line.trim().is_empty())
-                .collect();
-            for line in notes.iter().take(room) {
-                lines.push(Line::from(Span::styled(
-                    fit(line, width),
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-            if notes.len() > room {
-                lines.push(Line::from(Span::styled("…", dim)));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                fit("enter downloads it and replaces this program.", width),
-                dim,
-            )));
-            vec![("Install", Action::Confirm), ("Later", Action::Cancel)]
-        }
-        UpdateState::Installing {
-            release,
-            done,
-            total,
-        } => {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{} ", progress::spinner(tick)),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw(format!("Downloading version {}…", release.version)),
-            ]));
-            lines.push(Line::from(""));
-            let fraction = (*total > 0).then(|| *done as f64 / *total as f64);
-            lines.push(Line::from(progress::bar(
-                width,
-                fraction,
-                Color::Cyan,
-                tick,
-            )));
-            lines.push(Line::from(Span::styled(
-                format!("{} of {}", megabytes(*done), megabytes(*total)),
-                dim,
-            )));
-            vec![("Hide", Action::Cancel)]
-        }
-        UpdateState::Installed(version) => {
-            lines.push(Line::from(Span::styled(
-                format!("✓ Version {version} is installed."),
-                bold,
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(
-                "It runs the next time DevAssist starts. enter restarts now.",
-            ));
-            vec![("Restart now", Action::Confirm), ("Later", Action::Cancel)]
-        }
-        UpdateState::Failed(err) => {
-            lines.push(Line::from(Span::styled("✗ That did not work.", bold)));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                err.clone(),
-                Style::default().fg(Color::Red),
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("enter tries again", dim)));
-            vec![("Try again", Action::Confirm), ("Close", Action::Cancel)]
-        }
-    };
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text);
-    let row = Rect {
-        x: inner.x,
-        y: inner.y + inner.height.saturating_sub(1),
-        width: inner.width,
-        height: 1,
-    };
-    draw_dialog_buttons(frame, app, row, &buttons);
-}
-
 /// The actions for the chosen repositories, opened with Enter.
 fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
     let Some(menu) = app.menu.as_ref() else {
@@ -1340,7 +1121,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     let roomy = inner.height >= 16;
     let label_width = 15;
     let value_width = width.saturating_sub(label_width + 1);
-    let folder_title = crate::config::default_title();
+    let folder_title = crate::shell::config::default_title();
 
     let mut lines: Vec<Line> = Vec::new();
     let mut field_rows: Vec<(u16, Field)> = Vec::new();
@@ -1992,58 +1773,6 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
 }
 
-fn draw_help(frame: &mut Frame, app: &mut App, screen: Rect) {
-    let popup = centered(
-        screen,
-        72.min(screen.width.saturating_sub(2)),
-        31.min(screen.height.saturating_sub(2)),
-    );
-    let inner = dialog::window(frame, popup, " Keys ", Color::Cyan);
-    let help = "\
-arrows, j k    move
-space          select several · ctrl-a selects all shown
-m              put the selection into a group · on a group: rename it
-enter          actions for the selection · on a group: fold it
-u              update the selection
-U              update every repository
-a              add any GitHub repository, into a folder you choose
-i              import clones you already have, from any folder
-d, Delete      delete the selection, or only take it off the list
-r, F5          fetch and refresh
-s              sort by name or by attention
-o              open the selection in the file manager
-c              settings: default accounts, protocol, title
-l              show the last update or clone
-v              version: look for an update and install it
-/              filter the installed list
-drag           select text and copy it
-wheel          scroll
-esc            clear a selection, cancel, or go back
-q              quit · ctrl-c copies, or quits
-
-In Add, type owner/repo or paste a GitHub URL.
-owner/ or a link to an account lists all of its repositories.
-Space selects several repositories. Enter clones them all.
-Drag across any text. Releasing the mouse copies it.
-Starting and Refresh fetch. Update fast-forwards every branch.
-Remove asks before it deletes anything.
-An action started while another runs waits and runs after it.";
-    let text_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: inner.height.saturating_sub(1),
-    };
-    frame.render_widget(Paragraph::new(help), text_area);
-    let buttons = Rect {
-        x: inner.x,
-        y: inner.y + inner.height.saturating_sub(1),
-        width: inner.width,
-        height: 1,
-    };
-    draw_dialog_buttons(frame, app, buttons, &[("Close", Action::Cancel)]);
-}
-
 /// Draws the buttons and returns the column after the last one.
 fn draw_dialog_buttons(
     frame: &mut Frame,
@@ -2124,9 +1853,10 @@ fn add_source(app: &App) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Settings;
+    use crate::shell::config::Settings;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
     use std::path::PathBuf;
 
     fn app(first_run: bool) -> App {
@@ -2152,7 +1882,9 @@ mod tests {
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, app, frame.area()))
+            .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let mut out = String::new();
         for y in 0..height {
@@ -2437,59 +2169,6 @@ mod tests {
         assert!(screen.contains("▌ Update "));
         assert!(screen.contains("Open the folders"));
         assert!(screen.contains("Copy the paths"));
-    }
-
-    #[test]
-    fn the_version_dialog_walks_through_an_update() {
-        use crate::update::{Asset, Release};
-        let release = Release {
-            version: "9.0.0".into(),
-            notes: "## What is new\n\n- Groups fold\n- Faster clones".into(),
-            page: "https://github.com/AsP3X/DevAssist/releases/tag/v9.0.0".into(),
-            download: Some(Asset {
-                name: "devassist-9.0.0-x64.exe".into(),
-                url: "https://api.github.com/assets/1".into(),
-                size: 4_194_304,
-            }),
-            sums: None,
-        };
-        let mut app = app(false);
-
-        // In the overview, the header says a version is out.
-        app.update = UpdateState::Available(release.clone());
-        let screen = render(&mut app, 120, 30);
-        assert!(screen.contains("version 9.0.0 is out, press v"));
-
-        app.mode = Mode::Update;
-        let screen = render(&mut app, 120, 30);
-        assert!(screen.contains(&format!("╭ DevAssist {} ", crate::update::VERSION)));
-        assert!(screen.contains("Version 9.0.0 is available."));
-        assert!(screen.contains("- Groups fold"));
-        assert!(screen.contains(" Install   Later "));
-
-        app.update = UpdateState::Installing {
-            release,
-            done: 1_048_576,
-            total: 4_194_304,
-        };
-        let screen = render(&mut app, 120, 30);
-        assert!(screen.contains("Downloading version 9.0.0…"));
-        assert!(screen.contains("1.0 MB of 4.0 MB"));
-
-        app.update = UpdateState::Installed("9.0.0".into());
-        let screen = render(&mut app, 120, 30);
-        assert!(screen.contains("✓ Version 9.0.0 is installed."));
-        assert!(screen.contains(" Restart now   Later "));
-
-        app.update = UpdateState::Failed("DevAssist cannot write to C:\\Program Files".into());
-        let screen = render(&mut app, 120, 30);
-        assert!(screen.contains("✗ That did not work."));
-        assert!(screen.contains("DevAssist cannot write to"));
-        assert!(screen.contains(" Try again   Close "));
-
-        app.update = UpdateState::Current;
-        let screen = render(&mut app, 120, 30);
-        assert!(screen.contains("✓ This is the latest version."));
     }
 
     #[test]

@@ -1,14 +1,12 @@
 mod atoms;
-mod config;
 mod features;
 mod shell;
-mod update;
 
 use std::io::{self, IsTerminal};
 
 use features::repos::app::App;
 use ratatui::crossterm::terminal::disable_raw_mode;
-use shell::Feature;
+use shell::{Feature, Options, config};
 
 fn main() {
     if let Err(err) = run() {
@@ -58,7 +56,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Open Windows Terminal or PowerShell and run devassist");
                 std::process::exit(1);
             }
-            shell::run(move || vec![Box::new(App::new(*settings)) as Box<dyn Feature>])
+            let options = Options {
+                token: features::repos::github::token,
+                look_for_update: settings.update_check_now,
+            };
+            shell::run(options, move || {
+                vec![Box::new(App::new(*settings)) as Box<dyn Feature>]
+            })
         }
     }
 }
