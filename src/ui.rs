@@ -12,6 +12,7 @@ use crate::atoms::task::job::{ItemState, clock};
 use crate::atoms::ui::dialog::{self, centered};
 use crate::atoms::ui::hits::contains;
 use crate::atoms::ui::list::align_scroll;
+use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::gitops::LocalRepo;
@@ -1056,44 +1057,19 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
     } else {
         y += 1;
     }
-    for (index, item) in MenuItem::ALL.into_iter().enumerate() {
-        if y + 1 >= inner.y + inner.height {
-            break;
-        }
-        let rect = Rect {
-            x: inner.x,
-            y,
-            width: inner.width,
-            height: 1,
-        };
-        let chosen = index == picked;
-        let hovered = app.mouse.is_some_and(|(mx, my)| contains(rect, mx, my));
-        let label = item.label(many);
-        let gap = width.saturating_sub(UnicodeWidthStr::width(label) + 6);
-        let line = format!(
-            "{} {label}{}{}  ",
-            if chosen { "▌" } else { " " },
-            " ".repeat(gap),
-            item.key()
-        );
-        let style = if chosen {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if hovered {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if item == MenuItem::Remove {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::White)
-        };
-        frame.render_widget(Paragraph::new(Span::styled(fit(&line, width), style)), rect);
-        app.hits.rows.push((rect, format!("menu:{index}")));
-        y += 1;
-    }
+    let entries = MenuItem::ALL.map(|item| menu::Entry {
+        label: item.label(many),
+        key: item.key(),
+        warn: item == MenuItem::Remove,
+    });
+    // The last line of the dialog is the hint.
+    let lines = Rect {
+        x: inner.x,
+        y,
+        width: inner.width,
+        height: (inner.y + inner.height).saturating_sub(1).saturating_sub(y),
+    };
+    menu::draw(frame, lines, &entries, picked, app.mouse, &mut app.hits);
     let hint = Rect {
         x: inner.x,
         y: inner.y + inner.height.saturating_sub(1),

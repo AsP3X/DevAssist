@@ -15,6 +15,7 @@ use crate::atoms::task::worker::Worker;
 use crate::atoms::ui::hits::Hits;
 use crate::atoms::ui::input::{self, Alt};
 use crate::atoms::ui::list;
+use crate::atoms::ui::menu;
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
@@ -1108,28 +1109,15 @@ impl App {
     }
 
     fn on_menu_key(&mut self, key: KeyEvent) {
-        let Some(menu) = self.menu.as_mut() else {
+        let Some(state) = self.menu.as_mut() else {
             self.mode = Mode::List;
             return;
         };
-        let last = MenuItem::ALL.len() - 1;
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.close_menu(),
-            KeyCode::Up | KeyCode::Char('k') => menu.selected = menu.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => menu.selected = (menu.selected + 1).min(last),
-            KeyCode::Home => menu.selected = 0,
-            KeyCode::End => menu.selected = last,
-            KeyCode::Enter => {
-                let item = MenuItem::ALL[menu.selected.min(last)];
-                self.run_menu(item);
-            }
-            KeyCode::Char(ch) => {
-                let wanted = ch.to_ascii_lowercase();
-                if let Some(item) = MenuItem::ALL.into_iter().find(|item| item.key() == wanted) {
-                    self.run_menu(item);
-                }
-            }
-            _ => {}
+        let keys = MenuItem::ALL.map(MenuItem::key);
+        match menu::on_key(&mut state.selected, key, &keys) {
+            menu::Outcome::Stay => {}
+            menu::Outcome::Close => self.close_menu(),
+            menu::Outcome::Run(index) => self.run_menu(MenuItem::ALL[index]),
         }
     }
 
