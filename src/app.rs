@@ -9,6 +9,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 
+use crate::atoms::sys::open;
 use crate::atoms::sys::paths;
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
@@ -1189,7 +1190,7 @@ impl App {
         }
         let failed = pages
             .iter()
-            .filter_map(|page| gitops::open_url(page).err())
+            .filter_map(|page| open::url(page).err())
             .next_back();
         match (failed, pages.as_slice()) {
             (Some(err), _) => self.notice(err, true),
@@ -2240,7 +2241,7 @@ impl App {
             let Some(repo) = self.installed.iter().find(|repo| repo.folder == *folder) else {
                 continue;
             };
-            if let Err(err) = gitops::open_folder(&repo.path) {
+            if let Err(err) = open::folder(&repo.path) {
                 failed = Some(err);
             }
         }

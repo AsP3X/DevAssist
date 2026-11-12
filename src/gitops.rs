@@ -800,33 +800,6 @@ pub fn remove_checkout(path: &Path) -> Result<(), String> {
     remove_tree(&dest)
 }
 
-/// Opens a web page in the default browser.
-pub fn open_url(url: &str) -> Result<(), String> {
-    if !url.starts_with("https://") {
-        return Err(format!("{url} is not a web address"));
-    }
-    let mut cmd = open_command(Path::new(url));
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn()
-        .map_err(|err| format!("could not open {url}: {err}"))?;
-    Ok(())
-}
-
-pub fn open_folder(path: &Path) -> Result<(), String> {
-    if !path.is_dir() {
-        return Err(format!("{} is not a folder", path.display()));
-    }
-    let mut cmd = open_command(path);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn()
-        .map_err(|err| format!("could not open {}: {err}", path.display()))?;
-    Ok(())
-}
-
 pub fn request_cancel() {
     CANCELLED.store(true, Ordering::SeqCst);
     kill_active();
@@ -1357,27 +1330,6 @@ fn kill_pid(pid: u32) {
         .stderr(Stdio::null());
     hide_window(&mut cmd);
     let _ = cmd.status();
-}
-
-fn open_command(path: &Path) -> Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = Command::new("explorer");
-        cmd.arg(path);
-        cmd
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut cmd = Command::new("open");
-        cmd.arg(path);
-        cmd
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let mut cmd = Command::new("xdg-open");
-        cmd.arg(path);
-        cmd
-    }
 }
 
 fn git_command() -> Command {

@@ -2,4 +2,5 @@
 
 pub mod clipboard;
 pub mod encode;
+pub mod open;
 pub mod paths;
