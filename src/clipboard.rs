@@ -77,43 +77,10 @@ fn set_windows(text: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 fn set_osc52(text: &str) -> Result<(), String> {
     use std::io::Write;
-    let encoded = base64(text.as_bytes());
+    let encoded = crate::atoms::sys::encode::base64(text.as_bytes());
     let mut out = std::io::stdout().lock();
     write!(out, "\u{1b}]52;c;{encoded}\u{1b}\\").map_err(|err| err.to_string())?;
     out.flush().map_err(|err| err.to_string())
-}
-
-#[cfg(not(windows))]
-fn base64(data: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    let mut index = 0;
-    while index + 3 <= data.len() {
-        let chunk =
-            ((data[index] as u32) << 16) | ((data[index + 1] as u32) << 8) | data[index + 2] as u32;
-        for shift in [18, 12, 6, 0] {
-            out.push(TABLE[((chunk >> shift) & 63) as usize] as char);
-        }
-        index += 3;
-    }
-    match data.len() - index {
-        1 => {
-            let chunk = (data[index] as u32) << 16;
-            out.push(TABLE[((chunk >> 18) & 63) as usize] as char);
-            out.push(TABLE[((chunk >> 12) & 63) as usize] as char);
-            out.push('=');
-            out.push('=');
-        }
-        2 => {
-            let chunk = ((data[index] as u32) << 16) | ((data[index + 1] as u32) << 8);
-            out.push(TABLE[((chunk >> 18) & 63) as usize] as char);
-            out.push(TABLE[((chunk >> 12) & 63) as usize] as char);
-            out.push(TABLE[((chunk >> 6) & 63) as usize] as char);
-            out.push('=');
-        }
-        _ => {}
-    }
-    out
 }
 
 #[cfg(all(test, windows))]

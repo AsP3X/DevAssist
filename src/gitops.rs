@@ -1310,39 +1310,10 @@ fn auth_header(token: Option<&str>) -> Option<String> {
     // 401 with a Basic challenge. A disabled terminal prompt then fails the fetch.
     let mut raw = b"x-access-token:".to_vec();
     raw.extend(token.as_bytes());
-    Some(format!("AUTHORIZATION: Basic {}", base64(&raw)))
-}
-
-fn base64(data: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    let mut index = 0;
-    while index + 3 <= data.len() {
-        let chunk =
-            ((data[index] as u32) << 16) | ((data[index + 1] as u32) << 8) | data[index + 2] as u32;
-        for shift in [18, 12, 6, 0] {
-            out.push(TABLE[((chunk >> shift) & 63) as usize] as char);
-        }
-        index += 3;
-    }
-    match data.len() - index {
-        1 => {
-            let chunk = (data[index] as u32) << 16;
-            out.push(TABLE[((chunk >> 18) & 63) as usize] as char);
-            out.push(TABLE[((chunk >> 12) & 63) as usize] as char);
-            out.push('=');
-            out.push('=');
-        }
-        2 => {
-            let chunk = ((data[index] as u32) << 16) | ((data[index + 1] as u32) << 8);
-            out.push(TABLE[((chunk >> 18) & 63) as usize] as char);
-            out.push(TABLE[((chunk >> 12) & 63) as usize] as char);
-            out.push(TABLE[((chunk >> 6) & 63) as usize] as char);
-            out.push('=');
-        }
-        _ => {}
-    }
-    out
+    Some(format!(
+        "AUTHORIZATION: Basic {}",
+        crate::atoms::sys::encode::base64(&raw)
+    ))
 }
 
 fn pids() -> std::sync::MutexGuard<'static, Vec<u32>> {
