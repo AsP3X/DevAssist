@@ -651,7 +651,9 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
         };
         let key = key.trim();
         let value = unquote(value.trim());
-        if value.is_empty() {
+        // The repositories in no group are a group with an empty name, so
+        // folding them writes `collapsed =` with nothing after it.
+        if value.is_empty() && key != "collapsed" {
             return Err(format!("line {line_no}: {key} needs a value"));
         }
         match key {
@@ -978,6 +980,33 @@ mod tests {
             ]
         );
         assert_eq!(parsed.collapsed, vec!["home".to_string()]);
+    }
+
+    #[test]
+    fn folding_the_repositories_in_no_group_survives_a_restart() {
+        // "No group" has an empty name, so its line has nothing after `=`.
+        let saved = Saved {
+            title: None,
+            owners: Vec::new(),
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: Vec::new(),
+            placement: Vec::new(),
+            collapsed: vec!["Work".into(), String::new()],
+            update_check: true,
+        };
+        let text = render(&saved);
+        assert!(text.lines().any(|line| line.trim_end() == "collapsed ="));
+        let parsed = parse_config(&text).unwrap();
+        assert_eq!(parsed.collapsed, vec!["Work".to_string(), String::new()]);
+
+        // Any other setting still needs a value.
+        assert_eq!(
+            parse_config("title =").unwrap_err(),
+            "line 1: title needs a value"
+        );
     }
 
     #[test]
