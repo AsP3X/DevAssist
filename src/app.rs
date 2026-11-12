@@ -1,7 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
@@ -13,6 +12,7 @@ use crate::atoms::sys::open;
 use crate::atoms::sys::paths;
 use crate::atoms::sys::process;
 use crate::atoms::task::job::{Job, JobEvent};
+use crate::atoms::task::worker::Worker;
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
@@ -362,8 +362,7 @@ pub struct App {
     lookup_due: Option<(String, Instant)>,
     lookup_running: Option<String>,
     job_close_at: Option<Instant>,
-    tx: Sender<Msg>,
-    rx: Receiver<Msg>,
+    worker: Worker<Msg>,
 }
 
 impl App {
@@ -385,8 +384,7 @@ impl App {
         if first_run {
             app.open_settings(true);
             if app.owners.is_empty() {
-                let tx = app.tx.clone();
-                thread::spawn(move || {
+                app.worker.spawn(|tx| {
                     let _ = tx.send(Msg::Login(github::current_login()));
                 });
             }
@@ -407,7 +405,6 @@ impl App {
     }
 
     fn empty(settings: Settings) -> Self {
-        let (tx, rx) = mpsc::channel();
         Self {
             checkouts: settings.checkouts,
             clone_dir: settings.clone_dir,
@@ -467,17 +464,13 @@ impl App {
             lookups: HashMap::new(),
             lookup_due: None,
             lookup_running: None,
-            tx,
-            rx,
+            worker: Worker::default(),
         }
     }
 
     pub fn drain(&mut self) -> bool {
         let started = self.start_due_lookup() | self.close_finished_job();
-        let mut messages = Vec::new();
-        while let Ok(message) = self.rx.try_recv() {
-            messages.push(message);
-        }
+        let messages = self.worker.drain();
         let arrived = !messages.is_empty();
         for message in messages {
             self.on_msg(message);
@@ -1042,8 +1035,7 @@ impl App {
         }
         self.update = UpdateState::Checking;
         self.update_quiet = quiet;
-        let tx = self.tx.clone();
-        thread::spawn(move || {
+        self.worker.spawn(move |tx| {
             let token = github::token();
             let _ = tx.send(Msg::Update(update::check(token.as_deref())));
         });
@@ -1095,8 +1087,7 @@ impl App {
             done: 0,
             total,
         };
-        let tx = self.tx.clone();
-        thread::spawn(move || {
+        self.worker.spawn(move |tx| {
             let token = github::token();
             let result = update::install(&release, token.as_deref(), |done, total| {
                 let _ = tx.send(Msg::UpdateProgress(done, total));
@@ -2119,8 +2110,7 @@ impl App {
     fn start_lookup(&mut self, owner: String) {
         let key = owner.to_ascii_lowercase();
         self.lookup_running = Some(key.clone());
-        let tx = self.tx.clone();
-        thread::spawn(move || {
+        self.worker.spawn(move |tx| {
             let result = github::fetch_account(&owner);
             let _ = tx.send(Msg::Account { key, result });
         });
@@ -2832,9 +2822,8 @@ impl App {
             }
         }
         self.notice(label, false);
-        let tx = self.tx.clone();
-        thread::spawn(move || {
-            let result = work(&tx);
+        self.worker.spawn(move |tx| {
+            let result = work(tx);
             let _ = tx.send(Msg::JobFinished(result));
         });
     }
@@ -2891,8 +2880,7 @@ impl App {
         let generation = self.remote_generation;
         let owners = self.owners.clone();
         let pinned = self.pinned.clone();
-        let tx = self.tx.clone();
-        thread::spawn(move || {
+        self.worker.spawn(move |tx| {
             let catalog = github::fetch_catalog(&owners, &pinned);
             let _ = tx.send(Msg::Github {
                 generation,
@@ -2922,9 +2910,8 @@ impl App {
         let workers = (if fetch { 4 } else { 8 }).min(self.status_pending.max(1));
         for _ in 0..workers {
             let queue = queue.clone();
-            let tx = self.tx.clone();
             let token = token.clone();
-            thread::spawn(move || {
+            self.worker.spawn(move |tx| {
                 loop {
                     let next = queue.lock().ok().and_then(|mut queue| queue.pop());
                     let Some((folder, path)) = next else {
@@ -3273,7 +3260,7 @@ mod tests {
             config_path: std::env::temp_dir().join(format!(
                 "devassist-test-{}-{:?}.toml",
                 std::process::id(),
-                thread::current().id()
+                std::thread::current().id()
             )),
             first_run: false,
         }
@@ -3692,7 +3679,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "devassist-test-{}-{:?}.toml",
             std::process::id(),
-            thread::current().id()
+            std::thread::current().id()
         ));
         let mut settings = test_settings();
         settings.config_path = path.clone();
