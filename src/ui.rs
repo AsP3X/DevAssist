@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
 use crate::atoms::sys::paths;
 use crate::atoms::task::job::{ItemState, clock};
+use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::gitops::LocalRepo;
 use crate::gitprogress::{self, split_progress};
 use crate::pathprompt::Purpose;
@@ -2083,15 +2084,6 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
 }
 
-/// Two facts on one line. An empty one leaves no separator behind.
-fn join_facts(first: &str, second: &str) -> String {
-    match (first.is_empty(), second.is_empty()) {
-        (false, false) => format!("{first}  ·  {second}"),
-        (false, true) => first.to_string(),
-        _ => second.to_string(),
-    }
-}
-
 fn item_icon(state: ItemState, tick: usize) -> (&'static str, Style) {
     match state {
         ItemState::Waiting => ("·", Style::default().fg(Color::DarkGray)),
@@ -2293,17 +2285,6 @@ fn add_source(app: &App) -> String {
     }
 }
 
-fn padded_row(cells: &[&str], widths: &[usize; 6], total: usize) -> String {
-    let mut out = String::new();
-    for (index, cell) in cells.iter().enumerate() {
-        if widths[index] == 0 {
-            continue;
-        }
-        out.push_str(&fit(cell, widths[index]));
-    }
-    fit(&out, total)
-}
-
 fn align_scroll(offset: &mut usize, selected: usize, len: usize, height: usize) {
     if height == 0 {
         *offset = 0;
@@ -2336,59 +2317,6 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
         && y >= rect.y
         && x < rect.x.saturating_add(rect.width)
         && y < rect.y.saturating_add(rect.height)
-}
-
-fn fit_end(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if UnicodeWidthStr::width(text) <= width {
-        return text.to_string();
-    }
-    if width == 1 {
-        return "…".to_string();
-    }
-    let mut kept = String::new();
-    let mut used = 0;
-    for ch in text.chars().rev() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + ch_width > width - 1 {
-            break;
-        }
-        kept.push(ch);
-        used += ch_width;
-    }
-    let kept: String = kept.chars().rev().collect();
-    format!("…{kept}")
-}
-
-fn fit(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let current = UnicodeWidthStr::width(text);
-    if current <= width {
-        return format!("{text}{}", " ".repeat(width - current));
-    }
-    if width == 1 {
-        return "…".to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + ch_width > width - 1 {
-            break;
-        }
-        out.push(ch);
-        used += ch_width;
-    }
-    out.push('…');
-    let used = UnicodeWidthStr::width(out.as_str());
-    if used < width {
-        out.push_str(&" ".repeat(width - used));
-    }
-    out
 }
 
 #[cfg(test)]
