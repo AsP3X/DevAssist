@@ -6,6 +6,12 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- When the app cannot start, a window opened from the Start menu or by a
+  double click now stays open until you press Enter, so the error can be
+  read. Before, the window closed at once.
+
 ## [0.3.5] - 2026-11-12
 
 A maintenance release that continues preparing the code for new features.
