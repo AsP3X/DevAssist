@@ -1,6 +1,5 @@
-//! One update or clone run, as the progress dialog shows it: the
-//! repositories it works through, what git said about each, and how the
-//! run ended.
+//! One background run, as a progress dialog shows it: the items it works
+//! through, what was printed for each, and how the run ended.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -19,17 +18,17 @@ pub enum ItemState {
 pub struct Item {
     pub name: String,
     pub state: ItemState,
-    /// How it ended: "cloned", "up to date", or the error.
+    /// How it ended: a few words, or the error.
     pub note: String,
-    /// Git's output for this repository.
+    /// The output printed for this item.
     pub output: VecDeque<String>,
-    /// Git's current progress line, such as "Receiving objects:  45% ...".
+    /// The current progress line. It replaces the one before it.
     pub progress: String,
-    /// For an update: branches done, out of the branches that have
-    /// something to bring in. None for a clone, and until it is known.
+    /// Steps done, out of the steps there are. None when the work is not
+    /// counted in steps, and until the count is known.
     pub steps: Option<(u32, u32)>,
-    /// How far git's download is overall, from 0 to 1, across all of its
-    /// phases. None until git reports something.
+    /// How far the item is, from 0 to 1, as the job's reader judged it.
+    /// None until something is reported.
     reached: Option<f64>,
     started: Option<Instant>,
     ended: Option<Instant>,
@@ -50,42 +49,19 @@ impl Item {
         }
     }
 
-    /// How far git's clone or fetch is, in percent. This covers the whole
-    /// transfer, not the phase git happens to be counting right now.
+    /// How far the item is, in percent.
     pub fn percent(&self) -> Option<u16> {
         self.reached
             .map(|reached| (reached * 100.0).round().clamp(0.0, 100.0) as u16)
     }
 
-    /// Takes in a line git printed. Git counts each phase from 0 to 100 on
-    /// its own; the phases are joined into one figure that only goes up.
-    fn note_progress(&mut self, line: &str, progress: bool) {
-        if let Some(overall) = overall_progress(line) {
-            self.reached = Some(self.reached.map_or(overall, |before| before.max(overall)));
-        } else if progress && let Some(percent) = parse_percent(line) {
-            // A phase this app does not know, or git in another language:
-            // show its own percentage.
-            self.reached = Some(f64::from(percent) / 100.0);
-        }
-    }
-
-    /// How far this repository is, from 0 to 1: its branches when they are
-    /// counted, else git's percentage.
+    /// How far this item is, from 0 to 1: its steps when they are counted,
+    /// else what the reader judged.
     pub fn fraction(&self) -> Option<f64> {
         match self.steps {
             Some((done, total)) if total > 0 => Some(f64::from(done) / f64::from(total)),
             _ => self.reached,
         }
-    }
-
-    /// "2 of 3 branches updated", or "nothing new".
-    pub fn steps_label(&self) -> Option<String> {
-        let (done, total) = self.steps?;
-        Some(match total {
-            0 => "nothing new".to_string(),
-            1 => format!("{done} of 1 branch updated"),
-            _ => format!("{done} of {total} branches updated"),
-        })
     }
 
     pub fn elapsed(&self) -> Option<Duration> {
@@ -112,12 +88,26 @@ pub enum JobEvent {
     Start(usize),
     Done(usize, String),
     Failed(usize, String),
-    /// A line of git output. `true` marks a progress line that replaces the
+    /// A line of output. `true` marks a progress line that replaces the
     /// previous one instead of adding to the output.
     Line(String, bool),
-    /// Branches done, out of the branches with something to bring in, for
-    /// the repository that is running.
+    /// Steps done, out of the steps there are, for the item that is
+    /// running.
     Steps(u32, u32),
+}
+
+/// Reads how far an item is, from 0 to 1, out of a line of its output.
+/// `progress` is true for a progress line; `before` is what was known.
+pub type Reader = fn(line: &str, progress: bool, before: Option<f64>) -> Option<f64>;
+
+/// The reader a job has unless it is given another: a progress line with
+/// a percentage is that far.
+pub fn percent_reader(line: &str, progress: bool, before: Option<f64>) -> Option<f64> {
+    if progress && let Some(percent) = parse_percent(line) {
+        Some(f64::from(percent) / 100.0)
+    } else {
+        before
+    }
 }
 
 pub struct Job {
@@ -134,10 +124,11 @@ pub struct Job {
     pub scroll: usize,
     /// Output rows the dialog showed last, so scrolling knows where to stop.
     pub view: usize,
-    /// The repository git output currently belongs to.
+    /// The item that output currently belongs to.
     active: Option<usize>,
     started: Instant,
     ended: Option<Instant>,
+    reader: Reader,
 }
 
 impl Job {
@@ -155,7 +146,14 @@ impl Job {
             active: None,
             started: Instant::now(),
             ended: None,
+            reader: percent_reader,
         }
+    }
+
+    /// Reads progress with `reader` instead of the plain percentage.
+    pub fn with_reader(mut self, reader: Reader) -> Self {
+        self.reader = reader;
+        self
     }
 
     pub fn running(&self) -> bool {
@@ -199,10 +197,11 @@ impl Job {
             JobEvent::Line(text, progress) => {
                 let index = self.active.unwrap_or(0);
                 let shown = self.shown() == index;
+                let reader = self.reader;
                 let Some(item) = self.items.get_mut(index) else {
                     return;
                 };
-                item.note_progress(&text, progress);
+                item.reached = reader(&text, progress, item.reached);
                 if progress {
                     item.progress = text;
                     return;
@@ -241,7 +240,7 @@ impl Job {
         self.result = Some(result);
     }
 
-    /// The repository git is working on.
+    /// The item that is running.
     pub fn current(&self) -> Option<&Item> {
         self.items
             .iter()
@@ -330,51 +329,6 @@ pub fn parse_percent(line: &str) -> Option<u16> {
     digits.parse::<u16>().ok().filter(|value| *value <= 100)
 }
 
-/// The share of a clone or fetch each of git's phases takes, as the range
-/// it covers from 0 to 1. Receiving is the download and takes most of the
-/// time; resolving deltas and writing the files come after it.
-const PHASES: [(&str, f64, f64); 6] = [
-    ("Counting objects", 0.0, 0.04),
-    ("Compressing objects", 0.04, 0.08),
-    ("Receiving objects", 0.08, 0.75),
-    ("Resolving deltas", 0.75, 0.96),
-    ("Updating files", 0.96, 1.0),
-    ("Checking out files", 0.96, 1.0),
-];
-
-/// How far the whole transfer is, from 0 to 1, judged by one progress line.
-/// None for a line without a percentage or with a phase that is not known.
-pub fn overall_progress(line: &str) -> Option<f64> {
-    let percent = f64::from(parse_percent(line)?) / 100.0;
-    let (phase, _) = split_progress(line);
-    PHASES
-        .iter()
-        .find(|(name, _, _)| *name == phase)
-        .map(|(_, from, to)| from + (to - from) * percent)
-}
-
-/// Splits git's progress line into what it is doing and the numbers after
-/// the percentage: "Receiving objects:  45% (120/266), 1.2 MiB | 2 MiB/s"
-/// becomes ("Receiving objects", "120/266, 1.2 MiB · 2 MiB/s").
-pub fn split_progress(line: &str) -> (String, String) {
-    let line = line.trim();
-    let line = line.strip_prefix("remote: ").unwrap_or(line);
-    let Some(percent) = line.find('%') else {
-        return (line.trim_end_matches(['.', ':']).to_string(), String::new());
-    };
-    let phase = line[..percent]
-        .trim_end_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace())
-        .trim_end_matches(':')
-        .to_string();
-    let rest = line[percent + 1..]
-        .replace(['(', ')'], "")
-        .replace(" | ", " · ")
-        .trim()
-        .trim_end_matches(", done.")
-        .to_string();
-    (phase, rest)
-}
-
 pub fn clock(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     if secs < 60 {
@@ -401,139 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn a_clone_counts_every_phase_and_never_goes_back() {
-        let mut job = job(&["tool"]);
-        job.on(JobEvent::Start(0));
-        assert_eq!(job.items[0].percent(), None);
-        let mut seen = Vec::new();
-        for (line, progress) in [
-            ("Cloning into 'tool'...", false),
-            ("remote: Enumerating objects: 266, done.", false),
-            ("remote: Counting objects:  50% (133/266)", true),
-            ("remote: Counting objects: 100% (266/266), done.", false),
-            ("remote: Compressing objects: 100% (120/120), done.", false),
-            ("Receiving objects:   0% (1/266)", true),
-            (
-                "Receiving objects:  50% (133/266), 1.20 MiB | 2.00 MiB/s",
-                true,
-            ),
-            (
-                "Receiving objects: 100% (266/266), 2.40 MiB | 2.00 MiB/s, done.",
-                false,
-            ),
-            // The count starts over, the bar must not.
-            ("Resolving deltas:   0% (0/90)", true),
-            ("Resolving deltas:  50% (45/90)", true),
-            ("Resolving deltas: 100% (90/90), done.", false),
-            ("Updating files: 100% (40/40), done.", false),
-        ] {
-            job.on(JobEvent::Line(line.into(), progress));
-            seen.push(job.items[0].percent());
-        }
-        assert_eq!(
-            seen,
-            [
-                None,
-                None,
-                Some(2),
-                Some(4),
-                Some(8),
-                Some(8),
-                Some(42),
-                Some(75),
-                Some(75),
-                Some(86),
-                Some(96),
-                Some(100),
-            ]
-        );
-        assert_eq!(job.fraction(), Some(1.0));
-        // The line under the bar still says what git is doing right now.
-        assert_eq!(job.items[0].progress, "Resolving deltas:  50% (45/90)");
-
-        // A late line of an earlier phase does not pull the bar back.
-        let mut job = super::Job::new("Cloning", vec!["tool".into()], 0);
-        job.on(JobEvent::Start(0));
-        job.on(JobEvent::Line(
-            "Resolving deltas:  50% (45/90)".into(),
-            true,
-        ));
-        job.on(JobEvent::Line(
-            "Receiving objects: 100% (266/266), done.".into(),
-            false,
-        ));
-        assert_eq!(job.items[0].percent(), Some(86));
-    }
-
-    #[test]
-    fn progress_is_joined_across_phases() {
-        assert_eq!(overall_progress("Cloning into 'tool'..."), None);
-        assert_eq!(
-            overall_progress("Receiving objects:   0% (0/9)"),
-            Some(0.08)
-        );
-        assert_eq!(overall_progress("Resolving deltas:   0% (0/9)"), Some(0.75));
-        assert_eq!(
-            overall_progress("Resolving deltas: 100% (9/9), done."),
-            Some(0.96)
-        );
-        assert_eq!(
-            overall_progress("remote: Compressing objects: 100% (9/9), done."),
-            Some(0.08)
-        );
-        assert_eq!(
-            overall_progress("Updating files: 100% (9/9), done."),
-            Some(1.0)
-        );
-        assert_eq!(overall_progress("Something else:  40% (4/10)"), None);
-
-        // An unknown phase shows its own percentage while it is counting.
-        let mut job = job(&["tool"]);
-        job.on(JobEvent::Start(0));
-        job.on(JobEvent::Line("Something else:  40% (4/10)".into(), true));
-        assert_eq!(job.items[0].percent(), Some(40));
-        // Output that merely contains a percentage is not progress.
-        job.on(JobEvent::Line("similarity index 90%".into(), false));
-        assert_eq!(job.items[0].percent(), Some(40));
-    }
-
-    #[test]
-    fn steps_count_the_branches_of_the_running_repository() {
-        let mut job = job(&["a/one", "a/two"]);
-        job.on(JobEvent::Steps(1, 2));
-        assert_eq!(job.items[0].steps, None);
-
-        job.on(JobEvent::Start(0));
-        job.on(JobEvent::Steps(0, 3));
-        assert_eq!(job.items[0].fraction(), Some(0.0));
-        job.on(JobEvent::Line(
-            "Receiving objects:  80% (8/10)".into(),
-            true,
-        ));
-        // Branches count, not what git is downloading.
-        assert_eq!(job.items[0].fraction(), Some(0.0));
-        job.on(JobEvent::Steps(2, 3));
-        assert_eq!(
-            job.items[0].steps_label().unwrap(),
-            "2 of 3 branches updated"
-        );
-        assert!((job.fraction().unwrap() - 1.0 / 3.0).abs() < 1e-9);
-
-        // The count stays once the repository is done.
-        job.on(JobEvent::Done(0, "updated".into()));
-        assert_eq!(job.items[0].steps, Some((2, 3)));
-
-        job.on(JobEvent::Start(1));
-        assert_eq!(job.items[1].steps, None);
-        assert_eq!(job.items[1].steps_label(), None);
-        job.on(JobEvent::Steps(0, 0));
-        assert_eq!(job.items[1].steps_label().unwrap(), "nothing new");
-        assert_eq!(job.items[1].fraction(), None);
-        job.on(JobEvent::Steps(0, 1));
-        assert_eq!(job.items[1].steps_label().unwrap(), "0 of 1 branch updated");
-    }
-
-    #[test]
     fn reads_the_percentage_from_git_progress() {
         assert_eq!(
             parse_percent("Receiving objects:  45% (120/266), 1.20 MiB | 2.00 MiB/s"),
@@ -545,51 +366,6 @@ mod tests {
         );
         assert_eq!(parse_percent("Cloning into 'tool'..."), None);
         assert_eq!(parse_percent("%"), None);
-    }
-
-    #[test]
-    fn splits_a_progress_line_into_phase_and_numbers() {
-        assert_eq!(
-            split_progress("Receiving objects:  45% (120/266), 1.20 MiB | 2.00 MiB/s"),
-            (
-                "Receiving objects".to_string(),
-                "120/266, 1.20 MiB · 2.00 MiB/s".to_string()
-            )
-        );
-        assert_eq!(
-            split_progress("remote: Counting objects: 100% (266/266), done."),
-            ("Counting objects".to_string(), "266/266".to_string())
-        );
-        assert_eq!(
-            split_progress("Updating files..."),
-            ("Updating files".to_string(), String::new())
-        );
-    }
-
-    #[test]
-    fn a_batch_keeps_output_and_progress_per_repository() {
-        let mut job = job(&["a/one", "a/two"]);
-        assert_eq!(job.fraction(), Some(0.0));
-        job.on(JobEvent::Start(0));
-        job.on(JobEvent::Line("Receiving objects:  50% (1/2)".into(), true));
-        // Half of the download is not half of the clone: deltas come after.
-        assert_eq!(job.current().unwrap().percent(), Some(42));
-        assert!((job.fraction().unwrap() - 0.415 / 2.0).abs() < 1e-9);
-        job.on(JobEvent::Line("Cloning into 'one'...".into(), false));
-        job.on(JobEvent::Done(0, "cloned".into()));
-        job.on(JobEvent::Start(1));
-        job.on(JobEvent::Line("Cloning into 'two'...".into(), false));
-        job.on(JobEvent::Line("fatal: not found".into(), false));
-        job.on(JobEvent::Failed(1, "fatal: not found\nmore".into()));
-        assert_eq!(job.items[0].output, ["Cloning into 'one'..."]);
-        assert_eq!(job.items[1].output.len(), 2);
-        assert!(job.items[0].progress.is_empty());
-        assert_eq!(job.settled(), 2);
-        assert_eq!(job.items[1].note, "fatal: not found");
-        job.finish(Err("Cloned 1, 1 failed: a/two".into()), false);
-        assert!(!job.running());
-        assert_eq!(job.fraction(), Some(1.0));
-        assert_eq!(job.items[0].state, ItemState::Done);
     }
 
     #[test]
@@ -657,5 +433,46 @@ mod tests {
         job.pick(1);
         assert_eq!(job.scroll, 0);
         assert_eq!(clock(Duration::from_secs(65)), "1m 05s");
+    }
+
+    #[test]
+    fn a_progress_line_with_a_percentage_is_that_far() {
+        let mut job = job(&["one"]);
+        job.on(JobEvent::Start(0));
+        job.on(JobEvent::Line("Pulling layer:  40%".into(), true));
+        assert_eq!(job.items[0].percent(), Some(40));
+        // Output that merely contains a percentage is not progress.
+        job.on(JobEvent::Line("similarity index 90%".into(), false));
+        assert_eq!(job.items[0].percent(), Some(40));
+        assert_eq!(job.items[0].progress, "Pulling layer:  40%");
+    }
+
+    #[test]
+    fn a_job_reads_progress_with_the_reader_it_is_given() {
+        fn halfway(_: &str, _: bool, _: Option<f64>) -> Option<f64> {
+            Some(0.5)
+        }
+        let mut job = job(&["one", "two"]).with_reader(halfway);
+        job.on(JobEvent::Start(0));
+        assert_eq!(job.fraction(), Some(0.0));
+        job.on(JobEvent::Line("anything".into(), false));
+        assert_eq!(job.items[0].percent(), Some(50));
+        assert!((job.fraction().unwrap() - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn steps_count_before_the_percentage() {
+        let mut job = job(&["one", "two"]);
+        job.on(JobEvent::Steps(1, 2));
+        assert_eq!(job.items[0].steps, None);
+        job.on(JobEvent::Start(0));
+        job.on(JobEvent::Steps(0, 3));
+        job.on(JobEvent::Line("Working:  80%".into(), true));
+        assert_eq!(job.items[0].fraction(), Some(0.0));
+        job.on(JobEvent::Steps(5, 3));
+        assert_eq!(job.items[0].steps, Some((3, 3)));
+        job.on(JobEvent::Done(0, "ok".into()));
+        job.on(JobEvent::Start(1));
+        assert_eq!(job.items[1].steps, None);
     }
 }

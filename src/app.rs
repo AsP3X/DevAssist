@@ -16,6 +16,7 @@ use crate::atoms::task::job::{Job, JobEvent};
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
+use crate::gitprogress;
 use crate::pathprompt::{self, PathPrompt, Purpose};
 use crate::select::{PointerEffect, PointerEvent};
 use crate::settings::{Form, Outcome};
@@ -2320,7 +2321,7 @@ impl App {
             );
             return;
         };
-        let job = Job::new(format!("Updating {folder}"), vec![folder.clone()], 0);
+        let job = gitprogress::job(format!("Updating {folder}"), vec![folder.clone()], 0);
         self.start_job(format!("Updating {folder}…"), Some(job), move |tx| {
             let token = github::token();
             send(tx, JobEvent::Start(0));
@@ -2373,7 +2374,7 @@ impl App {
     fn update_batch(&mut self, work: Vec<Planned>, skipped: usize, total: usize) {
         let count = work.len();
         let names = work.iter().map(|item| item.folder.clone()).collect();
-        let job = Job::new(format!("Updating {}", count_label(count)), names, skipped);
+        let job = gitprogress::job(format!("Updating {}", count_label(count)), names, skipped);
         let label = format!("Updating {}…", count_label(count));
         self.start_job(label, Some(job), move |tx| {
             let token = github::token();
@@ -2585,7 +2586,7 @@ impl App {
                 format!("Cloning {}…", count_label(count)),
             ),
         };
-        let job = Job::new(title, names, 0);
+        let job = gitprogress::job(title, names, 0);
         self.start_job(label, Some(job), move |tx| {
             let token = github::token();
             let single = jobs.len() == 1;

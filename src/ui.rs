@@ -8,8 +8,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
 use crate::atoms::sys::paths;
-use crate::atoms::task::job::{ItemState, clock, split_progress};
+use crate::atoms::task::job::{ItemState, clock};
 use crate::gitops::LocalRepo;
+use crate::gitprogress::{self, split_progress};
 use crate::pathprompt::Purpose;
 use crate::settings::{Field, PROTOCOLS};
 
@@ -1774,7 +1775,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
             ));
         }
     } else if let Some(item) = job.items.first() {
-        let steps = item.steps_label().unwrap_or_default();
+        let steps = gitprogress::steps_label(item.steps).unwrap_or_default();
         if running {
             facts.push(Span::styled(join_facts(&steps, &numbers), gray));
         } else {
@@ -1929,7 +1930,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
             let (icon, icon_style) = item_icon(item.state, tick);
             let (item_phase, item_numbers) = split_progress(&item.progress);
             // An update counts branches: done, out of those with news.
-            let steps_text = item.steps_label().unwrap_or_default();
+            let steps_text = gitprogress::steps_label(item.steps).unwrap_or_default();
             let steps = item.steps.filter(|(_, total)| *total > 0);
             let part = steps.map(|(done, total)| f64::from(done) / f64::from(total));
             let (status, status_style, detail_line, detail_style) = match item.state {
@@ -2847,7 +2848,7 @@ mod tests {
 
     fn job(names: &[&str], skipped: usize) -> crate::atoms::task::job::Job {
         let names = names.iter().map(|name| (*name).to_string()).collect();
-        crate::atoms::task::job::Job::new("Cloning 3 repositories", names, skipped)
+        crate::gitprogress::job("Cloning 3 repositories", names, skipped)
     }
 
     fn batch() -> crate::atoms::task::job::Job {
@@ -2905,7 +2906,7 @@ mod tests {
         use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
         let names = ["api", "portal", "docs"].map(String::from).to_vec();
-        let mut run = crate::atoms::task::job::Job::new("Updating 3 repositories", names, 0);
+        let mut run = crate::gitprogress::job("Updating 3 repositories", names, 0);
         run.on(JobEvent::Start(0));
         run.on(JobEvent::Steps(0, 2));
         run.on(JobEvent::Steps(2, 2));
@@ -2985,8 +2986,7 @@ mod tests {
     fn one_repository_gets_the_whole_dialog_for_its_output() {
         use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
-        let mut run =
-            crate::atoms::task::job::Job::new("Updating artcraft", vec!["artcraft".into()], 0);
+        let mut run = crate::gitprogress::job("Updating artcraft", vec!["artcraft".into()], 0);
         run.on(JobEvent::Start(0));
         run.on(JobEvent::Line(
             "From https://github.com/AsP3X/artcraft".into(),
