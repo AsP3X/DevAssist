@@ -341,6 +341,8 @@ pub struct App {
     pub should_quit: bool,
     /// Look for a newer version at startup: the setting, kept to be saved.
     update_check: bool,
+    /// The shell's settings, kept to be saved with the rest.
+    shell: config::ShellPrefs,
     generation: u64,
     remote_generation: u64,
     status_pending: usize,
@@ -434,6 +436,7 @@ impl App {
             hits: Hits::default(),
             should_quit: false,
             update_check: settings.update_check,
+            shell: settings.shell,
             generation: 0,
             remote_generation: 0,
             status_pending: 0,
@@ -1407,6 +1410,7 @@ impl App {
             placement: self.placement.clone(),
             collapsed: self.collapsed.clone(),
             update_check: self.update_check,
+            shell: self.shell.clone(),
         };
         if let Err(err) = config::save(&self.config_path, &saved) {
             self.notice(err, true);
@@ -1920,6 +1924,7 @@ impl App {
         saved.placement = self.placement.clone();
         saved.collapsed = self.collapsed.clone();
         saved.update_check = self.update_check;
+        saved.shell = self.shell.clone();
         if let Err(err) = config::save(&form.path, &saved) {
             form.error = Some(err);
             return;
@@ -2905,6 +2910,7 @@ mod tests {
             collapsed: Vec::new(),
             update_check: false,
             update_check_now: false,
+            shell: Default::default(),
             clone_dir: std::env::temp_dir().join("devassist-clones"),
             owners_explicit: true,
             unsaved: false,

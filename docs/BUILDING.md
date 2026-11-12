@@ -85,10 +85,13 @@ Windows recognises a newer version of the same program: the `UpgradeCode` in
 | File | What is in it |
 |---|---|
 | `src/main.rs` | Start-up: the command line, then the shell |
-| `src/shell/mod.rs` | The main loop, the `Feature` trait every tool implements, switching tools, and which keys and clicks are the shell's |
-| `src/shell/chrome.rs` | The top line: the tools and a note |
+| `src/shell/mod.rs` | The main loop, the `Feature` trait every tool implements, what is on screen (home or a tool), and which keys and clicks are the shell's |
+| `src/shell/home.rs` | The welcome screen: the logo and a card for every tool |
+| `src/shell/tools.rs` | The palette: Home and every tool in a searchable list |
+| `src/shell/keys.rs` | Reading a key name such as `ctrl-p` from the settings, and matching it |
+| `src/shell/chrome.rs` | The top line: where you are and a note |
 | `src/shell/select.rs` | Selecting text with the mouse and copying it |
-| `src/shell/help.rs`, `tools.rs` | The help dialog and the Ctrl-P tool menu |
+| `src/shell/help.rs` | The help dialog |
 | `src/shell/updater.rs` | The version dialog and its state |
 | `src/shell/update.rs` | Looking for a newer release and installing it |
 | `src/shell/config.rs` | The settings file and the command line |
@@ -121,12 +124,15 @@ are in `docs/superpowers/specs/`.
 
 1. Make `src/features/<name>/` with a struct that implements
    `shell::Feature`.
-2. Add it to the list in `main.rs`. It gets the next number in the top line.
+2. Add it to the list in `main.rs`.
 
-The shell gives every tool text selection, the help dialog (the tool
-supplies its key list), the version dialog and switching. The tool draws
-into the area it is given, below the top line, and reports `modal()` while
-a text field or one of its dialogs has the keyboard.
+That is the whole registration. From the trait the shell makes the tool's
+card on the welcome screen (`name`, `about`, `status`), its line in the
+palette, its place in the top line and its page in the help dialog
+(`help`). The shell also gives every tool text selection and the version
+dialog. The tool draws into the area it is given, below the top line, and
+reports `modal()` while a text field or one of its dialogs has the
+keyboard, so the palette key and `?` stay out of its way.
 
 The Docker tool has one test that talks to a real engine. It only touches
 containers, an image tag and a volume it creates, named `devassist-test-*`:

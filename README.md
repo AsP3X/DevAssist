@@ -47,7 +47,7 @@ and volumes, with live logs. It works with the keyboard and with the mouse.
   organise the list; they are not folders on disk.
 - **Does several things in a row.** Actions you start while another is
   running wait in a queue and run one after another.
-- **Manages Docker.** Press `2` for a second tool: containers grouped by
+- **Manages Docker.** Open the Docker tool for containers grouped by
   Compose project, Compose projects, images and volumes. Start, stop and
   restart them, follow logs live, and remove or prune behind a dialog that
   lists exactly what will go. It needs the `docker` command and does

@@ -63,6 +63,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let options = Options {
                 token: features::repos::github::token,
                 look_for_update: settings.update_check_now,
+                palette_key: settings.shell.palette_key,
+                start: settings.shell.start.clone(),
             };
             shell::run(options, move || {
                 vec![

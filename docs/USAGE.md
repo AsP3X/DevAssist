@@ -4,30 +4,54 @@ DevAssist runs full-screen in a terminal. Everything can be done with the
 keyboard; the mouse works for selecting, clicking buttons, scrolling and
 copying text. Press `?` in the app for the key list.
 
-## Tools
+## The welcome screen and the tools
 
-DevAssist has two tools. The top line lists them:
+DevAssist starts on its welcome screen: the name, and a card for every
+tool. A card says what the tool is for and, where the tool has something
+to report, how things stand ("56 clones · 3 behind").
+
+- **Repos** is the overview of your local clones.
+- **Docker** lists containers, Compose projects, images and volumes. Its
+  card has no status until you have opened it once: DevAssist asks Docker
+  nothing before that.
+
+| Key | Does |
+|---|---|
+| `←` `→` `↑` `↓`, `Tab` | Choose a card |
+| `Enter` | Open that tool. A click on a card does the same |
+| a letter | Search the tools: the palette opens with the letter typed |
+
+## Going from one tool to another
+
+`Ctrl-P` opens the palette: Home and every tool in one list, each with what
+it is for. Type to narrow the list, by name or by what a tool does
+("containers" finds Docker). `↑` `↓` move, `Enter` goes there, `Esc` or
+`Ctrl-P` again closes it. A click on a line goes there too.
+
+The palette works on the welcome screen and in any tool. While you type
+into a field or a dialog is open, the key belongs to that field or dialog;
+close it first.
+
+"Home" in the palette is the welcome screen. So is a click on `DevAssist`
+at the left of the top line, which says where you are:
 
 ```
-  1 Repos   2 Docker                                  ctrl-p tools · ? help
+ DevAssist › Docker                                  ctrl-p tools · ? help
 ```
 
-- **Repos** is the overview of your local clones. It is what you see first.
-- **Docker** lists containers, Compose projects, images and volumes.
-
-Press the number of a tool to switch to it, or click its name. `Ctrl-P`
-opens a list of the tools that narrows as you type; `Enter` goes to the
-highlighted one. While you type into a field or a dialog is open, the
-numbers are typed, not switched on.
+You can choose another key for the palette, and have DevAssist start in a
+tool instead of on the welcome screen: see `palette_key` and `start` in
+[Configuration](CONFIGURATION.md).
 
 A tool keeps working when it is not on screen: an update of your
 repositories goes on while you look at Docker.
 
-These keys work in every tool:
+These keys work on the welcome screen and in every tool:
 
 | Key | Does |
 |---|---|
-| `?` | The keys of the tool on screen |
+| `Ctrl-P` | The palette |
+| `?` | The keys of what is on screen |
 | `v` | The version dialog: look for a newer DevAssist and install it |
 | `Ctrl-C` | Copies selected text; quits when nothing is selected |
 | `q` | Quits |
@@ -179,8 +203,8 @@ The filter also looks inside folded groups.
 
 ## Docker
 
-Press `2`. DevAssist asks Docker only from that moment on; if you never
-open the tool, it never runs `docker`.
+Open it from the welcome screen or the palette. DevAssist asks Docker only
+from that moment on; if you never open the tool, it never runs `docker`.
 
 The tool needs the `docker` command, as Docker Desktop installs it. If
 Docker is not installed or not running, the tool says so and `r` tries

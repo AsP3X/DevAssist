@@ -191,6 +191,7 @@ impl Form {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            shell: Default::default(),
         })
     }
 

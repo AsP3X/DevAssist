@@ -1,14 +1,18 @@
-//! The shell's own line at the top of the screen: the tools, and a note.
+//! The shell's own line at the top of the screen: where you are, and a
+//! note.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::atoms::ui::hits::contains;
 use crate::atoms::ui::text::fit_end;
+
+/// The program's name, as the top line shows it.
+const TITLE: &str = "DevAssist";
 
 /// How the note on the right is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,52 +24,59 @@ pub enum Tone {
     Hint,
 }
 
-/// Draws ` 1 Repos  2 Docker ` from the left and `note` at the right end.
-/// Returns where each tool's name is, for clicks; a name that does not fit
-/// gets an empty rectangle.
+/// Draws ` DevAssist › Docker ` from the left and `note` at the right
+/// end. `tool` is the tool on screen; none on the welcome screen, where
+/// the name is left out too. Returns where the program's name is: a
+/// click there goes home.
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
-    names: &[&str],
-    active: usize,
+    tool: Option<&str>,
     note: (&str, Tone),
     mouse: Option<(u16, u16)>,
-) -> Vec<Rect> {
+) -> Rect {
     let end = area.x + area.width;
-    let mut rects = Vec::with_capacity(names.len());
-    let mut x = area.x + 1;
-    for (index, name) in names.iter().enumerate() {
-        let text = format!(" {} {name} ", index + 1);
-        let width = UnicodeWidthStr::width(text.as_str()) as u16;
-        if x + width > end {
-            rects.push(Rect::default());
-            continue;
-        }
-        let rect = Rect {
-            x,
+    let mut used = area.x + 1;
+    let mut home = Rect::default();
+    if let Some(tool) = tool {
+        home = Rect {
+            x: area.x + 1,
             y: area.y,
-            width,
+            width: (TITLE.len() as u16).min(area.width.saturating_sub(1)),
             height: 1,
         };
-        let hovered = mouse.is_some_and(|(mx, my)| contains(rect, mx, my));
-        let style = if index == active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if hovered {
+        let hovered = mouse.is_some_and(|(mx, my)| contains(home, mx, my));
+        let title = if hovered {
             Style::default()
                 .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::default().fg(Color::Gray)
         };
-        frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
-        rects.push(rect);
-        x += width + 1;
+        let line = Line::from(vec![
+            Span::styled(TITLE, title),
+            Span::styled(" › ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                tool.to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        let width = (line.width() as u16).min(area.width.saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: area.x + 1,
+                y: area.y,
+                width,
+                height: 1,
+            },
+        );
+        used += width;
     }
 
-    let room = end.saturating_sub(x + 2) as usize;
+    let room = end.saturating_sub(used + 3) as usize;
     let text = fit_end(note.0, room);
     let width = UnicodeWidthStr::width(text.as_str()) as u16;
     if width > 0 {
@@ -82,7 +93,7 @@ pub fn draw(
         };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
     }
-    rects
+    home
 }
 
 #[cfg(test)]
@@ -99,48 +110,58 @@ mod tests {
     }
 
     #[test]
-    fn the_tools_are_numbered_and_the_note_sits_at_the_right() {
+    fn it_says_which_tool_is_on_screen_and_the_note_sits_at_the_right() {
         let mut terminal = Terminal::new(TestBackend::new(50, 1)).unwrap();
-        let mut rects = Vec::new();
+        let mut home = Rect::default();
         terminal
             .draw(|frame| {
-                rects = draw(
+                home = draw(
                     frame,
                     frame.area(),
-                    &["Repos", "Docker"],
-                    1,
-                    ("? help", Tone::Hint),
+                    Some("Docker"),
+                    ("ctrl-p tools", Tone::Hint),
                     None,
                 );
             })
             .unwrap();
         let line = row(&terminal);
-        assert!(line.starts_with("  1 Repos   2 Docker "), "{line:?}");
-        assert!(line.ends_with("? help "), "{line:?}");
-        assert_eq!(rects, [Rect::new(1, 0, 9, 1), Rect::new(11, 0, 10, 1)]);
-        // The active tool stands out.
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((12, 0)).unwrap().bg, Color::Cyan);
-        assert_ne!(buffer.cell((2, 0)).unwrap().bg, Color::Cyan);
+        assert!(line.starts_with(" DevAssist › Docker "), "{line:?}");
+        assert!(line.ends_with("ctrl-p tools "), "{line:?}");
+        // The program's name is what a click takes home.
+        assert_eq!(home, Rect::new(1, 0, 9, 1));
     }
 
     #[test]
-    fn a_tool_that_does_not_fit_is_left_out() {
-        let mut terminal = Terminal::new(TestBackend::new(14, 1)).unwrap();
-        let mut rects = Vec::new();
+    fn the_welcome_screen_has_only_the_note() {
+        let mut terminal = Terminal::new(TestBackend::new(50, 1)).unwrap();
+        let mut home = Rect::new(1, 1, 1, 1);
         terminal
             .draw(|frame| {
-                rects = draw(
+                home = draw(frame, frame.area(), None, ("? help", Tone::Hint), None);
+            })
+            .unwrap();
+        let line = row(&terminal);
+        assert!(!line.contains("DevAssist"));
+        assert!(line.ends_with("? help "), "{line:?}");
+        assert_eq!(home, Rect::default());
+    }
+
+    #[test]
+    fn a_long_note_keeps_its_end_and_leaves_the_place_alone() {
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
                     frame,
                     frame.area(),
-                    &["Repos", "Docker"],
-                    0,
-                    ("", Tone::Hint),
+                    Some("Docker"),
+                    ("version 9.0.0 runs after a restart, press v", Tone::News),
                     None,
                 );
             })
             .unwrap();
-        assert_eq!(rects[1], Rect::default());
-        assert!(!row(&terminal).contains("Docker"));
+        let line = row(&terminal);
+        assert!(line.starts_with(" DevAssist › Docker "), "{line:?}");
+        assert!(line.trim_end().ends_with("press v"), "{line:?}");
     }
 }

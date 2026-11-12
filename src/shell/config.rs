@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::keys::KeyCombo;
 use crate::atoms::sys::paths::{env_dir, home_dir, push_path, same_path};
 use crate::features::repos::github::{self, RepoSpec};
 use crate::features::repos::gitops::{self, Protocol};
@@ -38,6 +39,8 @@ pub struct Settings {
     pub collapsed: Vec<String>,
     /// Look for a newer version at startup. Saved in the settings file.
     pub update_check: bool,
+    /// What the shell itself is set to.
+    pub shell: ShellPrefs,
     /// False when this start was told not to look, with --no-update-check.
     pub update_check_now: bool,
     /// Where the settings are saved.
@@ -46,6 +49,24 @@ pub struct Settings {
     pub first_run: bool,
     /// The checkouts changed at startup and are not in the file yet.
     pub unsaved: bool,
+}
+
+/// The settings of the shell: they are about no tool in particular.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellPrefs {
+    /// The key that opens the palette.
+    pub palette_key: KeyCombo,
+    /// Where the program starts: `home`, or a tool's name in lowercase.
+    pub start: String,
+}
+
+impl Default for ShellPrefs {
+    fn default() -> Self {
+        Self {
+            palette_key: KeyCombo::default(),
+            start: "home".to_string(),
+        }
+    }
 }
 
 /// What is written to the settings file.
@@ -62,6 +83,8 @@ pub struct Saved {
     pub placement: Vec<(PathBuf, String)>,
     pub collapsed: Vec<String>,
     pub update_check: bool,
+    /// What the shell itself is set to.
+    pub shell: ShellPrefs,
 }
 
 pub enum Startup {
@@ -96,6 +119,8 @@ struct ParsedConfig {
     placement: Vec<(PathBuf, String)>,
     collapsed: Vec<String>,
     update_check: Option<bool>,
+    palette_key: Option<KeyCombo>,
+    start: Option<String>,
 }
 
 /// The settings file as found at startup.
@@ -173,6 +198,19 @@ pub fn startup() -> Result<Startup, String> {
         .as_ref()
         .and_then(|file| file.update_check)
         .unwrap_or(true);
+    let defaults = ShellPrefs::default();
+    let shell = ShellPrefs {
+        palette_key: loaded
+            .file
+            .as_ref()
+            .and_then(|file| file.palette_key)
+            .unwrap_or(defaults.palette_key),
+        start: loaded
+            .file
+            .as_ref()
+            .and_then(|file| file.start.clone())
+            .unwrap_or(defaults.start),
+    };
     let discovered = discovered_owners(&checkouts);
     let resolved = resolve(&flags, loaded.file, &discovered);
     Ok(Startup::Run(Box::new(Settings {
@@ -188,6 +226,7 @@ pub fn startup() -> Result<Startup, String> {
         placement,
         collapsed,
         update_check,
+        shell,
         update_check_now: update_check && !flags.no_update_check,
         config_path: loaded.path,
         first_run,
@@ -588,6 +627,16 @@ fn render(saved: &Saved) -> String {
     if !saved.update_check {
         out.push_str("update_check = off\n");
     }
+    let defaults = ShellPrefs::default();
+    if saved.shell.palette_key != defaults.palette_key {
+        out.push_str(&format!(
+            "palette_key = {}\n",
+            saved.shell.palette_key.label()
+        ));
+    }
+    if saved.shell.start != defaults.start {
+        out.push_str(&format!("start = {}\n", saved.shell.start));
+    }
     out
 }
 
@@ -712,6 +761,21 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                     "off" | "no" | "false" => false,
                     _ => return Err(format!("line {line_no}: update_check is on or off")),
                 });
+            }
+            "palette_key" => {
+                parsed.palette_key = Some(
+                    KeyCombo::parse(value)
+                        .map_err(|err| format!("line {line_no}: palette_key: {err}"))?,
+                );
+            }
+            "start" => {
+                let place = value.trim().to_lowercase();
+                if place.is_empty() {
+                    return Err(format!(
+                        "line {line_no}: start is home or the name of a tool"
+                    ));
+                }
+                parsed.start = Some(place);
             }
             other => return Err(format!("line {line_no}: unknown setting {other}")),
         }
@@ -882,6 +946,7 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         assert_eq!(parsed.title, saved.title);
@@ -906,6 +971,7 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         assert!(!parsed.owners_explicit);
@@ -954,6 +1020,7 @@ mod tests {
             ],
             collapsed: vec!["home".into()],
             update_check: true,
+            shell: ShellPrefs::default(),
         };
         let text = render(&saved);
         let lines: Vec<&str> = text.lines().skip(2).collect();
@@ -996,6 +1063,7 @@ mod tests {
             placement: Vec::new(),
             collapsed: vec!["Work".into(), String::new()],
             update_check: true,
+            shell: ShellPrefs::default(),
         };
         let text = render(&saved);
         assert!(text.lines().any(|line| line.trim_end() == "collapsed ="));
@@ -1007,6 +1075,51 @@ mod tests {
             parse_config("title =").unwrap_err(),
             "line 1: title needs a value"
         );
+    }
+
+    #[test]
+    fn the_palette_key_and_the_start_are_read_checked_and_written_back() {
+        let parsed = parse_config("palette_key = Ctrl-K\nstart = Docker\n").unwrap();
+        assert_eq!(parsed.palette_key, Some(KeyCombo::parse("ctrl-k").unwrap()));
+        assert_eq!(parsed.start.as_deref(), Some("docker"));
+        let nothing = parse_config("").unwrap();
+        assert_eq!(nothing.palette_key, None);
+        assert_eq!(nothing.start, None);
+
+        // A key that cannot work is refused, with the line and the reason.
+        let err = parse_config("title = x\npalette_key = p\n").unwrap_err();
+        assert_eq!(
+            err,
+            "line 2: palette_key: a letter or digit needs ctrl or alt, such as ctrl-k"
+        );
+        assert!(parse_config("start =\n").is_err());
+
+        // Saving keeps both; the defaults are left out of the file.
+        let mut saved = Saved {
+            title: None,
+            owners: Vec::new(),
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: Vec::new(),
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+            update_check: true,
+            shell: ShellPrefs {
+                palette_key: KeyCombo::parse("alt-f2").unwrap(),
+                start: "docker".to_string(),
+            },
+        };
+        let text = render(&saved);
+        assert!(text.contains("palette_key = alt-f2\n"), "{text}");
+        assert!(text.contains("start = docker\n"), "{text}");
+        let parsed = parse_config(&text).unwrap();
+        assert_eq!(parsed.palette_key, Some(saved.shell.palette_key));
+        saved.shell = ShellPrefs::default();
+        let text = render(&saved);
+        assert!(!text.contains("palette_key"));
+        assert!(!text.contains("start ="));
     }
 
     #[test]
@@ -1034,6 +1147,7 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            shell: ShellPrefs::default(),
         };
         // On is the default and is not written down.
         assert!(!render(&saved).contains("update_check"));
@@ -1054,6 +1168,7 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         let resolved = resolve(&Flags::default(), Some(parsed), &["storytold".into()]);

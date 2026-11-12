@@ -39,6 +39,25 @@ impl Feature for Docker {
         "Docker"
     }
 
+    fn about(&self) -> &'static str {
+        "Containers, Compose, images and volumes, with live logs"
+    }
+
+    /// What runs, once Docker has been asked. Before the tool is first
+    /// opened nothing was asked, and there is nothing to say.
+    fn status(&self) -> Option<String> {
+        match &self.engine {
+            state::Engine::Idle | state::Engine::Loading => None,
+            state::Engine::Missing => Some("Docker is not installed".to_string()),
+            state::Engine::Down(_) => Some("Docker is not running".to_string()),
+            state::Engine::Ready => {
+                let running = self.lists.containers.iter().filter(|c| c.running()).count();
+                let stopped = self.lists.containers.len() - running;
+                Some(format!("{running} running · {stopped} stopped"))
+            }
+        }
+    }
+
     fn modal(&self) -> bool {
         Docker::modal(self)
     }

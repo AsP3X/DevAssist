@@ -48,6 +48,28 @@ impl Feature for app::App {
         "Repos"
     }
 
+    fn about(&self) -> &'static str {
+        "Local clones of GitHub repos: add, update, group, remove"
+    }
+
+    /// How many clones there are and how many have something to bring in.
+    fn status(&self) -> Option<String> {
+        let clones = self.installed.len();
+        let behind = self
+            .installed
+            .iter()
+            .filter(|repo| repo.sync_counts().1 > 0)
+            .count();
+        let mut status = match clones {
+            1 => "1 clone".to_string(),
+            _ => format!("{clones} clones"),
+        };
+        if behind > 0 {
+            status.push_str(&format!(" · {behind} behind"));
+        }
+        Some(status)
+    }
+
     fn modal(&self) -> bool {
         self.mode != app::Mode::List
     }

@@ -27,6 +27,8 @@ owner = my-org
 repo = someone/tool
 protocol = ssh
 update_check = off
+palette_key = ctrl-k
+start = repos
 clone_dir = C:\dev
 checkout = C:\dev\tool
 group = Client work
@@ -43,6 +45,8 @@ collapsed = Client work
 | `repo` | One repository to list in Add as well, as `owner/name`. |
 | `protocol` | How clones are fetched: `auto`, `https` or `ssh`. `auto` follows what your existing clones use, and falls back to https. |
 | `update_check` | `on` or `off`. Whether DevAssist looks for a newer version when it starts. Default: on. |
+| `palette_key` | The key that opens the palette, the list that takes you to a tool. Default: `ctrl-p`. Write `ctrl-`, `alt-` or `shift-` and a letter or digit, or `f1` to `f12` alone or with one of those: `ctrl-k`, `alt-t`, `f2`, `ctrl-shift-p`. A letter or digit needs `ctrl` or `alt`, so that typing stays typing, and `ctrl-c` is taken. A key your terminal keeps for itself never reaches DevAssist. |
+| `start` | Where DevAssist starts: `home` for the welcome screen, or a tool's name, `repos` or `docker`. Default: `home`. A name no tool has starts at home. |
 | `clone_dir` | The folder the Add dialog offers for a new clone. It follows the folder you used last. |
 | `checkout` | The path of a clone on the list. One line per clone. |
 | `group` | Starts a group. The `checkout` lines after it are in that group, up to the next `group` line. Checkouts before the first `group` line are in no group. |

@@ -10,9 +10,8 @@ use super::Act;
 use crate::atoms::ui::dialog::{self, centered};
 use crate::atoms::ui::hits::Hits;
 
-/// The keys that work in every tool.
+/// The keys that work everywhere, after the palette's own.
 const SHELL_KEYS: &str = "\
-1-9            switch to that tool · ctrl-p lists the tools
 v              version: look for an update and install it
 drag           select text · releasing the mouse copies it
 ctrl-c         copy the selection, or quit";
@@ -22,6 +21,7 @@ pub fn draw(
     screen: Rect,
     name: &str,
     tool_keys: &str,
+    palette_key: &str,
     mouse: Option<(u16, u16)>,
     hits: &mut Hits<Act>,
 ) {
@@ -30,6 +30,9 @@ pub fn draw(
     let heading =
         |text: String| Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)));
     let mut lines: Vec<Line> = vec![heading("Everywhere".to_string())];
+    lines.push(Line::from(format!(
+        "{palette_key:<15}the tools: search them and go to one, or home"
+    )));
     lines.extend(SHELL_KEYS.lines().map(Line::from));
     lines.push(Line::from(""));
     lines.push(heading(format!("In {name}")));

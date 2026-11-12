@@ -6,6 +6,28 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A welcome screen.** DevAssist starts on it: the name in large letters
+  and a card for every tool, with what the tool is for and how things stand.
+  Arrows and `Enter`, or a click, open a tool.
+- **The palette lists Home and every tool with what it is for.** Typing
+  narrows it by name or by description, so "containers" finds Docker.
+  Typing a letter on the welcome screen opens it.
+- Two settings: `palette_key` chooses the key that opens the palette, and
+  `start` makes DevAssist open a tool directly instead of the welcome
+  screen.
+
+### Changed
+
+- **The palette is the one way to go from tool to tool.** The number keys
+  `1` and `2` and the clickable list of tools in the top line are gone; the
+  number keys now belong to the tool on screen.
+- The top line says where you are, as `DevAssist › Docker`. A click on
+  `DevAssist` goes to the welcome screen.
+- DevAssist no longer starts in the repository overview. Set `start = repos`
+  to have that back.
+
 ## [0.4.0] - 2026-11-12
 
 DevAssist gets a second tool: Docker.

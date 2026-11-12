@@ -1,10 +1,13 @@
 //! The frame every tool runs in: the terminal, the main loop, the list of
-//! tools and what they share: the top line, switching, text selection,
-//! help and the program's own update.
+//! tools and what they share: the welcome screen, the palette that goes
+//! from one to another, the top line, text selection, help and the
+//! program's own update.
 
 mod chrome;
 pub mod config;
 mod help;
+mod home;
+pub mod keys;
 mod select;
 mod terminal;
 mod tools;
@@ -23,14 +26,22 @@ use ratatui::widgets::Paragraph;
 
 use crate::atoms::ui::hits::{Hits, contains};
 use chrome::Tone;
+use home::{Card, Home};
+use keys::KeyCombo;
 use select::{Pass, Selection};
-use tools::ToolMenu;
+use tools::{Place, ToolMenu};
 use updater::Updater;
 
 /// One tool of the program, as the shell sees it.
 pub trait Feature {
-    /// The name in the top line and in the tool menu.
+    /// The name in the top line, on the welcome screen and in the palette.
     fn name(&self) -> &'static str;
+    /// What the tool is for, in a few words, for its card on the welcome
+    /// screen and its line in the palette.
+    fn about(&self) -> &'static str;
+    /// What the tool has to report right now, such as "56 clones · 3
+    /// behind", for its card. None when it has nothing to say yet.
+    fn status(&self) -> Option<String>;
     /// True while a text field or a dialog has the keyboard, so the shell
     /// leaves its own keys to the tool.
     fn modal(&self) -> bool;
@@ -69,6 +80,10 @@ pub struct Options {
     pub token: fn() -> Option<String>,
     /// Look for a newer version right away.
     pub look_for_update: bool,
+    /// The key that opens the palette.
+    pub palette_key: KeyCombo,
+    /// Where to start: `home`, or the name of a tool in lowercase.
+    pub start: String,
 }
 
 /// How the program ends.
@@ -86,28 +101,47 @@ enum Act {
     Close,
 }
 
-/// The shell's own dialog, over whatever tool is on screen.
+/// The shell's own dialog, over whatever is on screen.
 enum Dialog {
     None,
     Help,
     /// The version dialog.
     Update,
+    /// The palette.
     Tools(ToolMenu),
 }
 
 /// The smallest screen anything is drawn on.
 const MIN_SIZE: (u16, u16) = (48, 13);
 
-/// The tools, which one is on screen, and what they share.
+/// The first place in the palette: the welcome screen.
+const HOME: Place = Place {
+    name: "Home",
+    about: "the welcome screen",
+};
+
+/// The keys of the welcome screen, for the help dialog.
+const HOME_KEYS: &str = "\
+arrows, tab    choose a tool
+enter          open it
+a letter       search the tools by name
+q              quit";
+
+/// The tools, what is on screen, and what they share.
 struct Shell {
     features: Vec<Box<dyn Feature>>,
+    /// The tool that is on screen, or was before the welcome screen.
     active: usize,
+    /// The welcome screen is on screen, not a tool.
+    at_home: bool,
+    home: Home,
+    palette_key: KeyCombo,
     dialog: Dialog,
     selection: Selection,
     updater: Updater,
     mouse: Option<(u16, u16)>,
-    /// Where the top line drew each tool's name.
-    strip: Vec<Rect>,
+    /// Where the top line drew the program's name: a click goes home.
+    title: Rect,
     /// What the open dialog drew that can be clicked.
     hits: Hits<Act>,
     tick: usize,
@@ -117,28 +151,64 @@ struct Shell {
 }
 
 impl Shell {
-    fn new(features: Vec<Box<dyn Feature>>, updater: Updater) -> Self {
+    /// `start` is `home` or a tool's name in lowercase; anything else
+    /// starts at home. `animated` lets the logo draw itself.
+    fn new(
+        features: Vec<Box<dyn Feature>>,
+        updater: Updater,
+        palette_key: KeyCombo,
+        start: &str,
+        animated: bool,
+    ) -> Self {
         let mut shell = Self {
             features,
             active: 0,
+            at_home: true,
+            home: Home::new(animated),
+            palette_key,
             dialog: Dialog::None,
             selection: Selection::default(),
             updater,
             mouse: None,
-            strip: Vec::new(),
+            title: Rect::default(),
             hits: Hits::default(),
             tick: 0,
             leave: None,
             cramped: false,
         };
-        if let Some(first) = shell.features.first_mut() {
-            first.shown();
+        let wanted = start.trim().to_lowercase();
+        if let Some(index) = shell
+            .features
+            .iter()
+            .position(|feature| feature.name().to_lowercase() == wanted)
+        {
+            shell.switch_to(index);
         }
         shell
     }
 
-    fn names(&self) -> Vec<&'static str> {
-        self.features.iter().map(|feature| feature.name()).collect()
+    /// Home, then every tool: what the palette lists.
+    fn places(&self) -> Vec<Place<'static>> {
+        let mut places = vec![HOME];
+        places.extend(self.features.iter().map(|feature| Place {
+            name: feature.name(),
+            about: feature.about(),
+        }));
+        places
+    }
+
+    /// Goes to a place of the palette.
+    fn go(&mut self, place: usize) {
+        match place.checked_sub(1) {
+            None => self.go_home(),
+            Some(index) => self.switch_to(index),
+        }
+    }
+
+    fn go_home(&mut self) {
+        self.dialog = Dialog::None;
+        self.at_home = true;
+        self.home.selected = self.active;
     }
 
     fn switch_to(&mut self, index: usize) {
@@ -146,16 +216,39 @@ impl Shell {
             return;
         }
         self.dialog = Dialog::None;
-        if index != self.active {
+        if self.at_home || index != self.active {
+            self.at_home = false;
             self.active = index;
             self.features[index].shown();
         }
     }
 
+    /// The tool on screen, if one is.
+    fn tool(&self) -> Option<&dyn Feature> {
+        if self.at_home {
+            return None;
+        }
+        self.features.get(self.active).map(|feature| &**feature)
+    }
+
+    /// True while the tool on screen has the keyboard for itself. The
+    /// welcome screen never has.
+    fn modal(&self) -> bool {
+        self.tool().is_some_and(|feature| feature.modal())
+    }
+
     fn forward(&mut self, event: Event) {
+        if self.at_home {
+            return;
+        }
         if let Some(feature) = self.features.get_mut(self.active) {
             feature.on_event(event);
         }
+    }
+
+    fn open_palette(&mut self) {
+        let current = if self.at_home { 0 } else { self.active + 1 };
+        self.dialog = Dialog::Tools(ToolMenu::new(current));
     }
 
     fn on_event(&mut self, event: Event) {
@@ -193,24 +286,30 @@ impl Shell {
             self.on_dialog_key(key);
             return;
         }
-        let modal = self
-            .features
-            .get(self.active)
-            .is_none_or(|feature| feature.modal());
-        if !modal {
+        if !self.modal() && self.palette_key.matches(key) {
+            self.open_palette();
+            return;
+        }
+        if self.at_home {
+            if ctrl_c {
+                self.leave = Some(Leave::Quit);
+                return;
+            }
+            match self.home.on_key(key, self.features.len()) {
+                home::Outcome::Stay => {}
+                home::Outcome::Open(index) => self.switch_to(index),
+                home::Outcome::Search(text) => {
+                    self.dialog = Dialog::Tools(ToolMenu::typed(&text));
+                }
+                home::Outcome::Help => self.dialog = Dialog::Help,
+                home::Outcome::Version => self.open_update(),
+                home::Outcome::Quit => self.leave = Some(Leave::Quit),
+            }
+            return;
+        }
+        if !self.modal() {
             let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
             match key.code {
-                KeyCode::Char('p') | KeyCode::Char('P') if ctrl => {
-                    self.dialog = Dialog::Tools(ToolMenu::new(self.active));
-                    return;
-                }
-                KeyCode::Char(digit @ '1'..='9') if plain => {
-                    let index = digit as usize - '1' as usize;
-                    if index < self.features.len() {
-                        self.switch_to(index);
-                        return;
-                    }
-                }
                 KeyCode::Char('?') if plain => {
                     self.dialog = Dialog::Help;
                     return;
@@ -231,7 +330,7 @@ impl Shell {
     }
 
     fn on_dialog_key(&mut self, key: KeyEvent) {
-        let names = self.names();
+        let places = self.places();
         match &mut self.dialog {
             Dialog::None => {}
             Dialog::Help => {
@@ -247,11 +346,18 @@ impl Shell {
                 updater::Outcome::Close => self.dialog = Dialog::None,
                 updater::Outcome::Restart => self.leave = Some(Leave::Restart),
             },
-            Dialog::Tools(menu) => match menu.on_key(key, &names) {
-                tools::Outcome::Stay => {}
-                tools::Outcome::Close => self.dialog = Dialog::None,
-                tools::Outcome::Pick(index) => self.switch_to(index),
-            },
+            Dialog::Tools(menu) => {
+                // The key that opened the palette closes it again.
+                if self.palette_key.matches(key) {
+                    self.dialog = Dialog::None;
+                    return;
+                }
+                match menu.on_key(key, &places) {
+                    tools::Outcome::Stay => {}
+                    tools::Outcome::Close => self.dialog = Dialog::None,
+                    tools::Outcome::Pick(place) => self.go(place),
+                }
+            }
         }
     }
 
@@ -271,15 +377,17 @@ impl Shell {
             }
             return;
         }
-        // The top line is the shell's: a click there never reaches the tool.
-        if let Some(index) = self.strip.iter().position(|rect| contains(*rect, x, y)) {
-            // As with the number keys: not while the tool has a dialog open.
-            let modal = self
-                .features
-                .get(self.active)
-                .is_none_or(|feature| feature.modal());
-            if released && !modal {
+        if self.at_home {
+            if released && let Some(index) = self.home.card_at(x, y) {
                 self.switch_to(index);
+            }
+            return;
+        }
+        // The program's name in the top line goes home, as the palette
+        // does: not while the tool has a dialog open.
+        if contains(self.title, x, y) {
+            if released && !self.modal() {
+                self.go_home();
             }
             return;
         }
@@ -287,7 +395,7 @@ impl Shell {
     }
 
     fn click_dialog(&mut self, x: u16, y: u16) {
-        let names = self.names();
+        let places = self.places();
         if let Some(act) = self.hits.button_at(x, y) {
             match (&self.dialog, act) {
                 (Dialog::Update, Act::Confirm) => {
@@ -300,12 +408,12 @@ impl Shell {
             return;
         }
         if let Dialog::Tools(menu) = &self.dialog
-            && let Some(index) = self
+            && let Some(place) = self
                 .hits
                 .row_at(x, y)
-                .and_then(|row| menu.clicked(&row, &names))
+                .and_then(|row| menu.clicked(&row, &places))
         {
-            self.switch_to(index);
+            self.go(place);
         }
     }
 
@@ -319,7 +427,9 @@ impl Shell {
     }
 
     fn waiting(&self) -> bool {
-        self.updater.waiting() || self.features.iter().any(|feature| feature.waiting())
+        self.updater.waiting()
+            || (self.at_home && self.home.animating())
+            || self.features.iter().any(|feature| feature.waiting())
     }
 
     /// The note at the right of the top line: what a copy did, news about
@@ -332,7 +442,10 @@ impl Shell {
         if let Some(news) = self.updater.notice() {
             return (news, Tone::News);
         }
-        ("ctrl-p tools · ? help".to_string(), Tone::Hint)
+        (
+            format!("{} tools · ? help", self.palette_key.label()),
+            Tone::Hint,
+        )
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -341,7 +454,7 @@ impl Shell {
         let screen = frame.area();
         self.cramped = screen.width < MIN_SIZE.0 || screen.height < MIN_SIZE.1;
         if self.cramped {
-            self.strip.clear();
+            self.title = Rect::default();
             frame.render_widget(Paragraph::new("Make the terminal a bit larger."), screen);
             self.selection.finish(frame.buffer_mut());
             return;
@@ -355,24 +468,46 @@ impl Shell {
             height: screen.height - 1,
             ..screen
         };
-        let names = self.names();
         let (note, tone) = self.note();
-        self.strip = chrome::draw(frame, top, &names, self.active, (&note, tone), self.mouse);
-        let (name, keys) = match self.features.get_mut(self.active) {
-            Some(feature) => {
-                feature.draw(frame, body);
-                (feature.name(), feature.help())
+        let key = self.palette_key.label();
+        let name = self.tool().map(|feature| feature.name());
+        // Nothing under a dialog lights up under the mouse.
+        let mouse = match self.dialog {
+            Dialog::None => self.mouse,
+            _ => None,
+        };
+        self.title = chrome::draw(frame, top, name, (&note, tone), mouse);
+        let (name, keys) = if self.at_home {
+            let cards: Vec<Card> = self
+                .features
+                .iter()
+                .map(|feature| Card {
+                    name: feature.name(),
+                    about: feature.about(),
+                    status: feature.status(),
+                })
+                .collect();
+            self.home.draw(frame, body, &cards, &key, mouse);
+            ("Home", HOME_KEYS)
+        } else {
+            match self.features.get_mut(self.active) {
+                Some(feature) => {
+                    feature.draw(frame, body);
+                    (feature.name(), feature.help())
+                }
+                None => ("", ""),
             }
-            None => ("", ""),
         };
         match &self.dialog {
             Dialog::None => {}
-            Dialog::Help => help::draw(frame, screen, name, keys, self.mouse, &mut self.hits),
+            Dialog::Help => help::draw(frame, screen, name, keys, &key, self.mouse, &mut self.hits),
             Dialog::Update => {
                 self.updater
                     .draw(frame, screen, self.tick, self.mouse, &mut self.hits);
             }
-            Dialog::Tools(menu) => menu.draw(frame, screen, &names, self.mouse, &mut self.hits),
+            Dialog::Tools(menu) => {
+                menu.draw(frame, screen, &self.places(), self.mouse, &mut self.hits);
+            }
         }
         self.selection.finish(frame.buffer_mut());
     }
@@ -409,7 +544,7 @@ pub fn run(
     if options.look_for_update {
         updater.look(true);
     }
-    let mut shell = Shell::new(make(), updater);
+    let mut shell = Shell::new(make(), updater, options.palette_key, &options.start, true);
     let mut screen = terminal::setup()?;
     let mut dirty = true;
     let result = loop {
@@ -470,6 +605,15 @@ mod tests {
         fn name(&self) -> &'static str {
             self.name
         }
+        fn about(&self) -> &'static str {
+            match self.name {
+                "one" => "the first stub, for apples",
+                _ => "the second stub, for pears",
+            }
+        }
+        fn status(&self) -> Option<String> {
+            (self.name == "one").then(|| "3 apples".to_string())
+        }
         fn modal(&self) -> bool {
             self.modal
         }
@@ -521,19 +665,30 @@ mod tests {
         }
     }
 
-    fn shell_of(stubs: Vec<Stub>) -> Shell {
+    /// A shell that starts at `start`, with the palette on ctrl-p.
+    fn shell_at(stubs: Vec<Stub>, start: &str) -> Shell {
         Shell::new(
             stubs
                 .into_iter()
                 .map(|stub| Box::new(stub) as Box<dyn Feature>)
                 .collect(),
             Updater::new(|| None),
+            KeyCombo::default(),
+            start,
+            false,
         )
     }
 
-    /// Two tools, with the log emptied of the first one's `shown`.
+    /// Two tools, on the welcome screen.
+    fn at_home(log: &Log) -> Shell {
+        let shell = shell_at(vec![stub("one", log), stub("two", log)], "home");
+        assert!(log.borrow().is_empty());
+        shell
+    }
+
+    /// Two tools, with the first on screen and the log emptied of that.
     fn two(log: &Log) -> Shell {
-        let shell = shell_of(vec![stub("one", log), stub("two", log)]);
+        let shell = shell_at(vec![stub("one", log), stub("two", log)], "one");
         assert_eq!(*log.borrow(), ["one shown"]);
         log.borrow_mut().clear();
         shell
@@ -561,6 +716,12 @@ mod tests {
         shell.on_event(mouse(MouseEventKind::Up(MouseButton::Left), column, row));
     }
 
+    fn type_text(shell: &mut Shell, text: &str) {
+        for ch in text.chars() {
+            shell.on_event(key(KeyCode::Char(ch)));
+        }
+    }
+
     fn render(shell: &mut Shell, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| shell.draw(frame)).unwrap();
@@ -576,29 +737,156 @@ mod tests {
     }
 
     #[test]
-    fn an_event_goes_to_the_active_feature_only() {
+    fn the_program_starts_on_the_welcome_screen_with_a_card_per_tool() {
         let log = Log::default();
-        let mut shell = two(&log);
-        shell.on_event(key(KeyCode::Char('x')));
-        shell.active = 1;
-        shell.on_event(key(KeyCode::Char('x')));
-        shell.on_event(Event::Paste("text".into()));
-        assert_eq!(*log.borrow(), ["one key x", "two key x", "two paste text"]);
+        let mut shell = at_home(&log);
+        let screen = render(&mut shell, 100, 30);
+        assert!(screen.contains("██████"));
+        assert!(screen.contains("╭ ▌ one "));
+        assert!(screen.contains("the first stub, for apples"));
+        assert!(screen.contains("● 3 apples"));
+        assert!(screen.contains("╭ two "));
+        assert!(screen.contains("○ opens when you choose it"));
+        // No tool is on screen: the top line names none.
+        let top = screen.lines().next().unwrap();
+        assert!(!top.contains("DevAssist"));
+        assert!(top.trim_end().ends_with("ctrl-p tools · ? help"), "{top:?}");
+        assert!(!screen.contains("body of"));
     }
 
     #[test]
-    fn a_digit_switches_tools_and_tells_the_tool_it_is_shown() {
+    fn enter_or_a_click_on_a_card_opens_its_tool() {
+        let log = Log::default();
+        let mut shell = at_home(&log);
+        render(&mut shell, 100, 30);
+        shell.on_event(key(KeyCode::Right));
+        shell.on_event(key(KeyCode::Enter));
+        assert!(!shell.at_home);
+        assert_eq!(shell.active, 1);
+        assert_eq!(*log.borrow(), ["two shown"]);
+        let screen = render(&mut shell, 100, 30);
+        let mut lines = screen.lines();
+        assert!(lines.next().unwrap().starts_with(" DevAssist › two "));
+        assert_eq!(lines.next().unwrap().trim_end(), "body of two");
+
+        let log = Log::default();
+        let mut shell = at_home(&log);
+        render(&mut shell, 100, 30);
+        let card = shell.home.card_at_index(1);
+        click(&mut shell, card.x + 2, card.y + 2);
+        assert_eq!(shell.active, 1);
+        assert_eq!(*log.borrow(), ["two shown"]);
+    }
+
+    #[test]
+    fn the_start_setting_opens_a_tool_directly() {
+        let log = Log::default();
+        let shell = shell_at(vec![stub("one", &log), stub("two", &log)], "Two");
+        assert!(!shell.at_home);
+        assert_eq!(shell.active, 1);
+        assert_eq!(*log.borrow(), ["two shown"]);
+        // A name no tool has starts at home.
+        let log = Log::default();
+        let shell = shell_at(vec![stub("one", &log)], "orbit");
+        assert!(shell.at_home);
+        assert!(log.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_palette_goes_to_any_tool_and_back_home() {
         let log = Log::default();
         let mut shell = two(&log);
-        shell.on_event(key(KeyCode::Char('2')));
+        shell.on_event(ctrl('p'));
+        let screen = render(&mut shell, 80, 20);
+        assert!(screen.contains("╭ Tools "));
+        assert!(screen.contains("Home"));
+        assert!(screen.contains("the second stub, for pears"));
+        type_text(&mut shell, "tw");
+        shell.on_event(key(KeyCode::Enter));
         assert_eq!(shell.active, 1);
-        // The tool that is already on screen is not shown again.
-        shell.on_event(key(KeyCode::Char('2')));
-        // There is no third tool: the key is the tool's.
-        shell.on_event(key(KeyCode::Char('3')));
-        shell.on_event(key(KeyCode::Char('1')));
+        assert!(matches!(shell.dialog, Dialog::None));
+        assert_eq!(*log.borrow(), ["two shown"]);
+
+        // A tool is found by what it is for, too.
+        shell.on_event(ctrl('p'));
+        type_text(&mut shell, "apples");
+        shell.on_event(key(KeyCode::Enter));
         assert_eq!(shell.active, 0);
-        assert_eq!(*log.borrow(), ["two shown", "two key 3", "one shown"]);
+
+        // Home is the first place; from there a tool is shown anew.
+        shell.on_event(ctrl('p'));
+        type_text(&mut shell, "home");
+        shell.on_event(key(KeyCode::Enter));
+        assert!(shell.at_home);
+        assert_eq!(shell.home.selected, 0);
+        log.borrow_mut().clear();
+        shell.on_event(key(KeyCode::Enter));
+        assert_eq!(*log.borrow(), ["one shown"]);
+
+        // A click on a line of the palette goes there too.
+        shell.on_event(ctrl('p'));
+        render(&mut shell, 80, 20);
+        let (rect, _) = shell.hits.rows[2].clone();
+        click(&mut shell, rect.x + 2, rect.y);
+        assert_eq!(shell.active, 1);
+
+        // The key that opens the palette closes it.
+        shell.on_event(ctrl('p'));
+        shell.on_event(ctrl('p'));
+        assert!(matches!(shell.dialog, Dialog::None));
+    }
+
+    #[test]
+    fn typing_on_the_welcome_screen_searches_the_tools() {
+        let log = Log::default();
+        let mut shell = at_home(&log);
+        type_text(&mut shell, "tw");
+        let screen = render(&mut shell, 80, 20);
+        assert!(screen.contains("› tw▌"), "{screen}");
+        shell.on_event(key(KeyCode::Enter));
+        assert_eq!(shell.active, 1);
+        assert!(!shell.at_home);
+    }
+
+    #[test]
+    fn the_palette_key_can_be_another_one() {
+        let log = Log::default();
+        let mut shell = two(&log);
+        shell.palette_key = KeyCombo::parse("ctrl-k").unwrap();
+        shell.on_event(ctrl('p'));
+        assert!(matches!(shell.dialog, Dialog::None));
+        assert_eq!(*log.borrow(), ["one key p"]);
+        shell.on_event(ctrl('k'));
+        assert!(matches!(shell.dialog, Dialog::Tools(_)));
+        shell.on_event(key(KeyCode::Esc));
+        let screen = render(&mut shell, 80, 20);
+        assert!(screen.lines().next().unwrap().contains("ctrl-k tools"));
+        shell.on_event(key(KeyCode::Char('?')));
+        let screen = render(&mut shell, 80, 24);
+        assert!(screen.contains("ctrl-k         the tools: search them and go to one"));
+    }
+
+    #[test]
+    fn an_event_goes_to_the_tool_on_screen_only() {
+        let log = Log::default();
+        let mut shell = two(&log);
+        shell.on_event(key(KeyCode::Char('x')));
+        // The number keys are the tool's own.
+        shell.on_event(key(KeyCode::Char('2')));
+        shell.active = 1;
+        shell.on_event(key(KeyCode::Char('x')));
+        shell.on_event(Event::Paste("text".into()));
+        assert_eq!(
+            *log.borrow(),
+            ["one key x", "one key 2", "two key x", "two paste text"]
+        );
+        // On the welcome screen no tool hears anything.
+        let log = Log::default();
+        let mut shell = at_home(&log);
+        shell.on_event(key(KeyCode::Down));
+        shell.on_event(Event::Paste("text".into()));
+        click(&mut shell, 5, 3);
+        assert!(log.borrow().is_empty());
     }
 
     #[test]
@@ -606,43 +894,29 @@ mod tests {
         let log = Log::default();
         let mut first = stub("one", &log);
         first.modal = true;
-        let mut shell = shell_of(vec![first, stub("two", &log)]);
+        let mut shell = shell_at(vec![first, stub("two", &log)], "one");
         log.borrow_mut().clear();
-        shell.on_event(key(KeyCode::Char('2')));
         shell.on_event(key(KeyCode::Char('?')));
         shell.on_event(key(KeyCode::Char('v')));
         shell.on_event(ctrl('p'));
         assert_eq!(shell.active, 0);
         assert!(matches!(shell.dialog, Dialog::None));
-        assert_eq!(
-            *log.borrow(),
-            ["one key 2", "one key ?", "one key v", "one key p"]
-        );
+        assert_eq!(*log.borrow(), ["one key ?", "one key v", "one key p"]);
+        // Nor does a click on the program's name take it away.
+        render(&mut shell, 60, 14);
+        click(&mut shell, 3, 0);
+        assert!(!shell.at_home);
     }
 
     #[test]
-    fn the_top_line_lists_the_tools_and_the_tool_is_drawn_below_it() {
-        let log = Log::default();
-        let mut shell = two(&log);
-        shell.active = 1;
-        let screen = render(&mut shell, 60, 14);
-        let mut lines = screen.lines();
-        let top = lines.next().unwrap();
-        assert!(top.starts_with("  1 one   2 two "), "{top:?}");
-        assert!(top.trim_end().ends_with("ctrl-p tools · ? help"), "{top:?}");
-        assert_eq!(lines.next().unwrap().trim_end(), "body of two");
-    }
-
-    #[test]
-    fn a_click_on_a_name_in_the_top_line_switches() {
+    fn a_click_on_the_programs_name_goes_home_and_other_clicks_are_the_tools() {
         let log = Log::default();
         let mut shell = two(&log);
         render(&mut shell, 60, 14);
-        click(&mut shell, 12, 0);
-        assert_eq!(shell.active, 1);
-        // A click below the top line is the tool's, press and release.
         click(&mut shell, 5, 3);
-        assert_eq!(*log.borrow(), ["two shown", "two down 5,3", "two up 5,3"]);
+        assert_eq!(*log.borrow(), ["one down 5,3", "one up 5,3"]);
+        click(&mut shell, 3, 0);
+        assert!(shell.at_home);
     }
 
     #[test]
@@ -669,43 +943,28 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_p_opens_the_tool_menu_and_enter_goes_to_the_match() {
-        let log = Log::default();
-        let mut shell = two(&log);
-        shell.on_event(ctrl('p'));
-        let screen = render(&mut shell, 60, 14);
-        assert!(screen.contains("╭ Tools "));
-        shell.on_event(key(KeyCode::Char('t')));
-        shell.on_event(key(KeyCode::Char('w')));
-        shell.on_event(key(KeyCode::Enter));
-        assert_eq!(shell.active, 1);
-        assert!(matches!(shell.dialog, Dialog::None));
-        assert_eq!(*log.borrow(), ["two shown"]);
-
-        // A click on a line of the menu goes there too.
-        shell.on_event(ctrl('p'));
-        render(&mut shell, 60, 14);
-        let (rect, _) = shell.hits.rows[0].clone();
-        click(&mut shell, rect.x + 2, rect.y);
-        assert_eq!(shell.active, 0);
-    }
-
-    #[test]
-    fn help_shows_the_tools_keys_and_the_shells() {
+    fn help_shows_the_shells_keys_and_those_of_what_is_on_screen() {
         let log = Log::default();
         let mut shell = two(&log);
         shell.on_event(key(KeyCode::Char('?')));
         let screen = render(&mut shell, 80, 20);
         assert!(screen.contains("╭ Keys · one "));
         assert!(screen.contains("does the stub's thing"));
-        assert!(screen.contains("switch to that tool"));
+        assert!(screen.contains("ctrl-p         the tools: search them and go to one"));
         // The shell's keys come first, so a short screen cuts the tool's.
-        assert!(screen.find("switch to that tool") < screen.find("does the stub's thing"));
+        assert!(screen.find("the tools: search") < screen.find("does the stub's thing"));
         // While it is open, keys are not the tool's.
         shell.on_event(key(KeyCode::Char('x')));
         shell.on_event(key(KeyCode::Esc));
         assert!(matches!(shell.dialog, Dialog::None));
         assert!(log.borrow().is_empty());
+
+        // The welcome screen has its own few keys.
+        let mut shell = at_home(&log);
+        shell.on_event(key(KeyCode::Char('?')));
+        let screen = render(&mut shell, 80, 24);
+        assert!(screen.contains("╭ Keys · Home "));
+        assert!(screen.contains("search the tools by name"));
     }
 
     #[test]
@@ -728,6 +987,23 @@ mod tests {
         assert_eq!(shell.leaving(), None);
         shell.on_event(key(KeyCode::Enter));
         assert_eq!(shell.leaving(), Some(Leave::Restart));
+
+        // From the welcome screen too.
+        let mut shell = at_home(&log);
+        shell.updater.state = updater::UpdateState::Installed("9.0.0".into());
+        shell.on_event(key(KeyCode::Char('v')));
+        assert!(matches!(shell.dialog, Dialog::Update));
+    }
+
+    #[test]
+    fn q_and_ctrl_c_quit_from_the_welcome_screen() {
+        let log = Log::default();
+        let mut shell = at_home(&log);
+        shell.on_event(key(KeyCode::Char('q')));
+        assert_eq!(shell.leaving(), Some(Leave::Quit));
+        let mut shell = at_home(&log);
+        shell.on_event(ctrl('c'));
+        assert_eq!(shell.leaving(), Some(Leave::Quit));
     }
 
     #[test]
@@ -735,13 +1011,12 @@ mod tests {
         let log = Log::default();
         let mut second = stub("two", &log);
         second.changed = true;
-        let mut shell = shell_of(vec![stub("one", &log), second]);
-        log.borrow_mut().clear();
+        let mut shell = shell_at(vec![stub("one", &log), second], "home");
         assert!(shell.drain());
         assert_eq!(*log.borrow(), ["one drain", "two drain"]);
 
         let log = Log::default();
-        let mut shell = shell_of(vec![stub("one", &log)]);
+        let mut shell = shell_at(vec![stub("one", &log)], "home");
         assert!(!shell.drain());
     }
 
@@ -749,19 +1024,19 @@ mod tests {
     fn the_shell_waits_while_any_feature_does() {
         let log = Log::default();
         let mut second = stub("two", &log);
-        assert!(!shell_of(vec![stub("one", &log), stub("two", &log)]).waiting());
+        assert!(!at_home(&log).waiting());
         second.waiting = true;
-        assert!(shell_of(vec![stub("one", &log), second]).waiting());
+        assert!(shell_at(vec![stub("one", &log), second], "home").waiting());
     }
 
     #[test]
     fn a_tool_that_is_not_on_screen_can_still_quit_the_program() {
         let log = Log::default();
-        assert_eq!(shell_of(vec![stub("one", &log)]).leaving(), None);
+        assert_eq!(at_home(&log).leaving(), None);
         let mut quits = stub("two", &log);
         quits.request = Some(Request::Quit);
         assert_eq!(
-            shell_of(vec![stub("one", &log), quits]).leaving(),
+            shell_at(vec![stub("one", &log), quits], "home").leaving(),
             Some(Leave::Quit)
         );
     }
@@ -774,10 +1049,10 @@ mod tests {
         assert!(screen.contains("Make the terminal a bit larger."));
         // What the keys would act on cannot be seen: they do nothing.
         shell.on_event(key(KeyCode::Enter));
-        shell.on_event(key(KeyCode::Char('2')));
+        shell.on_event(ctrl('p'));
         click(&mut shell, 5, 3);
         assert!(log.borrow().is_empty());
-        assert_eq!(shell.active, 0);
+        assert!(matches!(shell.dialog, Dialog::None));
         shell.on_event(ctrl('c'));
         assert_eq!(shell.leaving(), Some(Leave::Quit));
 
@@ -786,6 +1061,11 @@ mod tests {
         assert!(screen.contains("body of one"));
         shell.on_event(key(KeyCode::Enter));
         assert_eq!(*log.borrow(), ["one key Enter"]);
+        // The welcome screen fits the smallest screen too.
+        log.borrow_mut().clear();
+        let mut shell = at_home(&log);
+        let screen = render(&mut shell, 48, 13);
+        assert!(screen.contains("D e v A s s i s t"));
     }
 
     #[test]
@@ -794,16 +1074,5 @@ mod tests {
         let mut shell = two(&log);
         shell.close();
         assert_eq!(*log.borrow(), ["one closing", "two closing"]);
-    }
-
-    #[test]
-    fn a_click_on_the_top_line_does_not_leave_a_tool_that_has_a_dialog_open() {
-        let log = Log::default();
-        let mut first = stub("one", &log);
-        first.modal = true;
-        let mut shell = shell_of(vec![first, stub("two", &log)]);
-        render(&mut shell, 60, 14);
-        click(&mut shell, 12, 0);
-        assert_eq!(shell.active, 0);
     }
 }

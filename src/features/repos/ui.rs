@@ -1866,6 +1866,7 @@ mod tests {
             collapsed: Vec::new(),
             update_check: false,
             update_check_now: false,
+            shell: Default::default(),
             clone_dir: PathBuf::from("development"),
             owners_explicit: true,
             unsaved: false,
