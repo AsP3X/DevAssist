@@ -1,17 +1,13 @@
-mod app;
 mod atoms;
 mod config;
-mod github;
-mod gitops;
-mod gitprogress;
-mod settings;
-mod ui;
+mod features;
 mod update;
 
 use std::io::{self, IsTerminal};
 use std::time::Duration;
 
-use app::App;
+use features::repos::app::App;
+use features::repos::{github, gitops, ui};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};

@@ -7,8 +7,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::atoms::ui::input::{self, Alt};
 use crate::config::{self, Saved};
-use crate::github::RepoSpec;
-use crate::gitops::Protocol;
+use crate::features::repos::github::RepoSpec;
+use crate::features::repos::gitops::Protocol;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {

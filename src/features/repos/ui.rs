@@ -6,9 +6,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{
-    Action, App, MenuItem, Mode, Purpose, RemoteState, Row, UpdateState, clone_target, group_key,
-};
 use crate::atoms::sys::paths;
 use crate::atoms::task::job::{ItemState, clock};
 use crate::atoms::ui::dialog::{self, centered};
@@ -17,9 +14,12 @@ use crate::atoms::ui::list::align_scroll;
 use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
-use crate::gitops::LocalRepo;
-use crate::gitprogress::{self, split_progress};
-use crate::settings::{Field, PROTOCOLS};
+use crate::features::repos::app::{
+    Action, App, MenuItem, Mode, Purpose, RemoteState, Row, UpdateState, clone_target, group_key,
+};
+use crate::features::repos::gitops::LocalRepo;
+use crate::features::repos::gitprogress::{self, split_progress};
+use crate::features::repos::settings::{Field, PROTOCOLS};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.tick = app.tick.wrapping_add(1);
@@ -200,7 +200,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         let mut hint =
             "  arrows move · enter actions · space selects · m group · / filter · s sort · ? help"
                 .to_string();
-        if app.sort == crate::app::SortMode::NeedsUpdate {
+        if app.sort == crate::features::repos::app::SortMode::NeedsUpdate {
             hint.push_str(" · sorted by attention");
         }
         Line::from(Span::styled(
@@ -2143,7 +2143,7 @@ mod tests {
             custom_title: None,
             owners: vec!["AsP3X".into()],
             pinned: Vec::new(),
-            protocol: crate::gitops::Protocol::Auto,
+            protocol: crate::features::repos::gitops::Protocol::Auto,
             doctor: false,
             config_path: PathBuf::from("development").join("devassist.toml"),
             first_run,
@@ -2167,7 +2167,7 @@ mod tests {
     #[test]
     fn the_overview_shows_commits_waiting_on_other_remote_branches() {
         let mut app = app(false);
-        let current = crate::gitops::LocalRepo {
+        let current = crate::features::repos::gitops::LocalRepo {
             folder: "api".into(),
             owner: "AsP3X".into(),
             repo: "api".into(),
@@ -2202,8 +2202,8 @@ mod tests {
         assert!(screen.contains("AsP3X/portal  3 new commits on remote branch dev"));
     }
 
-    fn local(folder: &str, dirty: bool) -> crate::gitops::LocalRepo {
-        crate::gitops::LocalRepo {
+    fn local(folder: &str, dirty: bool) -> crate::features::repos::gitops::LocalRepo {
+        crate::features::repos::gitops::LocalRepo {
             folder: folder.into(),
             owner: "AsP3X".into(),
             repo: folder.into(),
@@ -2258,11 +2258,13 @@ mod tests {
         assert!(screen.contains(" Update u "));
     }
 
-    fn remote(name: &str) -> crate::github::RemoteRepo {
-        crate::github::RemoteRepo::direct(crate::github::RepoSpec {
-            owner: "AsP3X".into(),
-            name: name.into(),
-        })
+    fn remote(name: &str) -> crate::features::repos::github::RemoteRepo {
+        crate::features::repos::github::RemoteRepo::direct(
+            crate::features::repos::github::RepoSpec {
+                owner: "AsP3X".into(),
+                name: name.into(),
+            },
+        )
     }
 
     #[test]
@@ -2354,7 +2356,7 @@ mod tests {
 
     #[test]
     fn the_group_dialog_moves_and_renames() {
-        use crate::app::GroupPrompt;
+        use crate::features::repos::app::GroupPrompt;
         let mut app = app(false);
         let mut api = local("api", false);
         api.group = "Work".into();
@@ -2389,7 +2391,7 @@ mod tests {
 
     #[test]
     fn enter_shows_the_actions_for_the_selection() {
-        use crate::app::Menu;
+        use crate::features::repos::app::Menu;
         let mut app = app(false);
         app.installed = vec![
             local("api", false),
@@ -2492,7 +2494,7 @@ mod tests {
 
     #[test]
     fn queued_actions_show_under_the_list_and_on_the_dialog() {
-        use crate::app::Queued;
+        use crate::features::repos::app::Queued;
         let mut app = app(false);
         app.installed = vec![local("api", false), local("docs", false)];
         app.busy = true;
@@ -2554,10 +2556,12 @@ mod tests {
         let mut app = app(false);
         for name in ["alpha", "beta", "gamma"] {
             app.remotes
-                .push(crate::github::RemoteRepo::direct(crate::github::RepoSpec {
-                    owner: "AsP3X".into(),
-                    name: name.into(),
-                }));
+                .push(crate::features::repos::github::RemoteRepo::direct(
+                    crate::features::repos::github::RepoSpec {
+                        owner: "AsP3X".into(),
+                        name: name.into(),
+                    },
+                ));
         }
         app.run(Action::Add);
         render(&mut app, 100, 30);
@@ -2574,7 +2578,7 @@ mod tests {
 
     fn job(names: &[&str], skipped: usize) -> crate::atoms::task::job::Job {
         let names = names.iter().map(|name| (*name).to_string()).collect();
-        crate::gitprogress::job("Cloning 3 repositories", names, skipped)
+        crate::features::repos::gitprogress::job("Cloning 3 repositories", names, skipped)
     }
 
     fn batch() -> crate::atoms::task::job::Job {
@@ -2632,7 +2636,7 @@ mod tests {
         use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
         let names = ["api", "portal", "docs"].map(String::from).to_vec();
-        let mut run = crate::gitprogress::job("Updating 3 repositories", names, 0);
+        let mut run = crate::features::repos::gitprogress::job("Updating 3 repositories", names, 0);
         run.on(JobEvent::Start(0));
         run.on(JobEvent::Steps(0, 2));
         run.on(JobEvent::Steps(2, 2));
@@ -2712,7 +2716,11 @@ mod tests {
     fn one_repository_gets_the_whole_dialog_for_its_output() {
         use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
-        let mut run = crate::gitprogress::job("Updating artcraft", vec!["artcraft".into()], 0);
+        let mut run = crate::features::repos::gitprogress::job(
+            "Updating artcraft",
+            vec!["artcraft".into()],
+            0,
+        );
         run.on(JobEvent::Start(0));
         run.on(JobEvent::Line(
             "From https://github.com/AsP3X/artcraft".into(),

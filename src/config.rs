@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::atoms::sys::paths::{env_dir, home_dir, push_path, same_path};
-use crate::github::{self, RepoSpec};
-use crate::gitops::{self, Protocol};
+use crate::features::repos::github::{self, RepoSpec};
+use crate::features::repos::gitops::{self, Protocol};
 
 /// The app's name: the default heading and the settings folder.
 pub const APP_NAME: &str = "DevAssist";

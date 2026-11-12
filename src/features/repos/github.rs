@@ -3,7 +3,7 @@ use std::fmt;
 use serde::Deserialize;
 
 use crate::atoms::sys::http::{self, Profile};
-use crate::gitops;
+use crate::features::repos::gitops;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSpec {

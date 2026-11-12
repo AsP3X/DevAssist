@@ -335,7 +335,7 @@ mod tests {
         if !cfg!(all(windows, target_arch = "x86_64")) {
             return;
         }
-        let token = crate::github::token();
+        let token = crate::features::repos::github::token();
         let token = token.as_deref();
         let url = format!("https://api.github.com/repos/{REPOSITORY}/releases/latest");
         let body = succeeded(get(&url, token, "application/vnd.github+json").unwrap())

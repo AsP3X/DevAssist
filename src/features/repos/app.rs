@@ -19,10 +19,10 @@ use crate::atoms::ui::menu;
 use crate::atoms::ui::path::{self as pathprompt, PathPrompt};
 use crate::atoms::ui::select::{PointerEffect, PointerEvent};
 use crate::config::{self, Settings};
-use crate::github::{self, AccountQuery, RemoteRepo};
-use crate::gitops::{self, LocalRepo};
-use crate::gitprogress;
-use crate::settings::{Form, Outcome};
+use crate::features::repos::github::{self, AccountQuery, RemoteRepo};
+use crate::features::repos::gitops::{self, LocalRepo};
+use crate::features::repos::gitprogress;
+use crate::features::repos::settings::{Form, Outcome};
 use crate::update::{self, Release};
 
 /// How long the Add search waits after the last key before asking GitHub.
