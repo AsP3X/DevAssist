@@ -16,7 +16,7 @@ Executed on branch `refactor/shell-and-feature` as written; final result `180 pa
 
 - **Task 3 Step 9 was done for real:** the debug build was started in a terminal tab. The overview drew, the header filled in ("55 installed", "80 on GitHub") and the status spinner ran, which shows events, drawing and background work all pass through the shell. Ctrl-C quit it and the shell prompt came back.
 - **Task 4:** the `docs/BUILDING.md` table also got a row for `src/features/repos/mod.rs`, and the note about layering went after the table's last row (`.github/workflows/`), not after the source rows.
-- **Not done:** a restart after a self-update (`Request::Restart`). It needs a newer release to install; the shell test covers that a restart request wins, not the relaunch itself.
+- **Not done:** a restart after a self-update (`Request::Restart`). It needs a newer release to install; the shell test covers that a restart request wins, not the relaunch itself. Done later, with the 0.4.0 release: see the execution notes of `2026-11-12-docker-tool.md`.
 
 ## Why step 4 is split in two
 
