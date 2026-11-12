@@ -2498,7 +2498,7 @@ impl App {
         }
     }
 
-    fn quit(&mut self) {
+    pub fn quit(&mut self) {
         // Stop git only if this app started some. The cancel flag is shared
         // by everything in the process, so it is not raised without need.
         if self.busy || self.fetching || self.status_pending > 0 {

@@ -157,10 +157,10 @@ impl Stream {
         let stopped = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<(bool, String)>();
         if let Some(pipe) = child.stdout.take() {
-            pump(pipe, tx.clone());
+            pump_whole(pipe, tx.clone());
         }
         if let Some(pipe) = child.stderr.take() {
-            pump(pipe, tx.clone());
+            pump_whole(pipe, tx.clone());
         }
         drop(tx);
 
@@ -170,7 +170,9 @@ impl Stream {
             let mut hear = |text: String| {
                 if !flag.load(Ordering::SeqCst) {
                     on_line(&text);
-                    last = text;
+                    if !text.trim().is_empty() {
+                        last = text.trim().to_string();
+                    }
                 }
             };
             let status = loop {
@@ -325,6 +327,35 @@ fn pump(reader: impl Read + Send + 'static, tx: mpsc::Sender<(bool, String)>) {
             if !text.is_empty() {
                 let _ = tx.send((false, text));
             }
+        }
+    });
+}
+
+/// Sends every line as it was printed: with its indentation, and empty
+/// ones too. Only a line feed ends a line; the carriage return before it
+/// and spaces at the end are left out.
+fn pump_whole(reader: impl Read + Send + 'static, tx: mpsc::Sender<(bool, String)>) {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 2048];
+        let whole = |line: &[u8]| String::from_utf8_lossy(line).trim_end().to_string();
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(size) => {
+                    buf.extend_from_slice(&chunk[..size]);
+                    while let Some(pos) = buf.iter().position(|byte| *byte == b'\n') {
+                        let line: Vec<u8> = buf.drain(..=pos).collect();
+                        if tx.send((false, whole(&line[..line.len() - 1]))).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        if !buf.is_empty() {
+            let _ = tx.send((false, whole(&buf)));
         }
     });
 }

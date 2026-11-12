@@ -1,4 +1,4 @@
-//! The help dialog: the keys of the tool on screen, then the shell's own.
+//! The help dialog: the shell's own keys, then those of the tool on screen.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -25,13 +25,15 @@ pub fn draw(
     mouse: Option<(u16, u16)>,
     hits: &mut Hits<Act>,
 ) {
-    let mut lines: Vec<Line> = tool_keys.lines().map(Line::from).collect();
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Everywhere",
-        Style::default().fg(Color::DarkGray),
-    )));
+    // The shell's keys come first: on a short screen the end is cut off,
+    // and these are the ones no tool's own hints mention.
+    let heading =
+        |text: String| Line::from(Span::styled(text, Style::default().fg(Color::DarkGray)));
+    let mut lines: Vec<Line> = vec![heading("Everywhere".to_string())];
     lines.extend(SHELL_KEYS.lines().map(Line::from));
+    lines.push(Line::from(""));
+    lines.push(heading(format!("In {name}")));
+    lines.extend(tool_keys.lines().map(Line::from));
     let popup = centered(
         screen,
         72.min(screen.width.saturating_sub(2)),

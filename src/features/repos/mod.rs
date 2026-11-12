@@ -77,6 +77,11 @@ impl Feature for app::App {
     fn request(&self) -> Option<Request> {
         self.should_quit.then_some(Request::Quit)
     }
+
+    fn closing(&mut self) {
+        // Stops git if this tool started some, however the program ends.
+        app::App::quit(self);
+    }
 }
 
 /// `--doctor`: prints the version, the settings and every listed

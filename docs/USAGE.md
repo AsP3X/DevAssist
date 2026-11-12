@@ -216,14 +216,19 @@ within a second. `r` asks again by hand.
 | `/` | Filter the list; `Esc` clears the filter |
 | `r`, `F5` | Ask Docker again |
 
-A project's header stands for all of its containers: with it highlighted,
-`s`, `R` and `d` act on the whole project's containers and `Space` ticks
-them.
+A project's header stands for its containers: with it highlighted, `s`,
+`R` and `d` act on the project's containers and `Space` ticks them.
 
-In the Compose list, `s` brings a project up from its compose files when
-some of it is not running, and stops it when all of it runs. Up, stop,
-restart and down show their output as it comes; `Esc` hides the output
-and the command goes on.
+Keys only act on what the list shows. With a filter on, a project's header
+stands for the containers the filter lets through, ticked rows the filter
+hides are left alone, and nothing happens when the filter matches nothing.
+
+In the Compose list, `s` stops a project when any of it runs and starts
+its containers when none does. Start, stop, restart and down show their
+output as it comes; `Esc` hides the output and the command goes on.
+Starting uses the containers as they are. To create a project from its
+compose files, or to apply a changed file, run `docker compose up`
+yourself; the project then appears in the list.
 
 Actions run one at a time. One started while another runs waits and runs
 after it; the status line shows what is next.
@@ -250,8 +255,8 @@ name what will go.
 
 | You remove | The dialog |
 |---|---|
-| Containers | Lists the stopped ones, which `Enter` removes. Running ones are listed apart and stay, unless you press `f`: "Stop and remove all". |
-| Images | Lists the unused ones, which `Enter` removes. Images a container was made from are listed with that container and stay, unless you press `f`: "Remove anyway". |
+| Containers | Lists the stopped ones, which `Enter` removes. Running ones are listed apart and stay, unless you press `f`: "Stop and remove all". `Enter` never does that, also when every container you chose is running. |
+| Images | Lists the unused ones, which `Enter` removes. Images a container was made from are listed with that container and stay, unless you press `f`: "Remove anyway". A second name for an image that is in use under another name is removed as a name only. |
 | Volumes | Lists the unused ones, which `Enter` removes with all data in them. A volume a container mounts is listed and always stays. |
 | A Compose project (down) | Names the project's containers. Its volumes stay unless you tick "also remove its volumes" with `Space`. |
 
@@ -264,6 +269,11 @@ Prune looks at the whole list instead of your selection:
 | Volumes | Every unnamed volume no container mounts. Tick the box to include named ones |
 
 The dialog shows exactly what will be removed, and only that is removed.
+When the list is longer than the window, the dialog says how many names it
+could not show; make the terminal taller to read them all before you
+confirm.
+
+Projects are taken down one at a time.
 
 ## Copying text
 

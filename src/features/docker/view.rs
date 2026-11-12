@@ -648,7 +648,7 @@ fn draw_confirm(frame: &mut Frame, docker: &mut Docker, screen: Rect, confirm: &
     let popup = centered(
         screen,
         76.min(screen.width.saturating_sub(2)),
-        wanted.min(screen.height.saturating_sub(2)),
+        wanted.min(screen.height),
     );
     let inner = dialog::window(
         frame,
@@ -657,29 +657,37 @@ fn draw_confirm(frame: &mut Frame, docker: &mut Docker, screen: Rect, confirm: &
         Color::Yellow,
     );
     let width = inner.width.saturating_sub(2) as usize;
-    // What does not fit is counted, not silently cut.
+    // What does not fit is counted, not silently cut, and the last two
+    // lines stay: they say what else happens.
     let room = (inner.height as usize).saturating_sub(extra as usize + 3);
-    let mut lines: Vec<Line> = vec![Line::from("")];
-    for line in told.iter().take(if told.len() > room {
-        room.saturating_sub(1)
-    } else {
-        room
-    }) {
-        let style = if line.warn {
+    let style_of = |warn: bool| {
+        if warn {
             Style::default().fg(Color::Yellow)
         } else {
             Style::default().fg(Color::White)
-        };
-        lines.push(Line::from(Span::styled(
+        }
+    };
+    let shown = |line: &super::actions::Told| {
+        Line::from(Span::styled(
             fit(&format!(" {}", line.text), width),
-            style,
-        )));
-    }
-    if told.len() > room {
+            style_of(line.warn),
+        ))
+    };
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    if told.len() <= room {
+        lines.extend(told.iter().map(shown));
+    } else {
+        let tail = 2.min(room.saturating_sub(2));
+        let head = room.saturating_sub(tail + 1);
+        lines.extend(told.iter().take(head).map(shown));
         lines.push(Line::from(Span::styled(
-            format!("   … and {} more lines", told.len() + 1 - room),
-            Style::default().fg(Color::DarkGray),
+            format!(
+                "   … and {} more, not shown: make the window taller to see them",
+                told.len() - head - tail
+            ),
+            Style::default().fg(Color::Yellow),
         )));
+        lines.extend(told.iter().skip(told.len() - tail).map(shown));
     }
     let text = Rect {
         height: inner.height.saturating_sub(extra + 1),
@@ -913,6 +921,34 @@ mod tests {
                 Action::Answer(Choice::Cancel)
             ]
         );
+    }
+
+    #[test]
+    fn a_long_list_says_how_much_is_hidden_and_keeps_its_last_lines() {
+        let mut lists = samples::lists();
+        let template = lists.containers[0].clone();
+        for number in 0..30 {
+            let mut extra = template.clone();
+            extra.id = format!("extra{number:02}");
+            extra.name = format!("extra-{number:02}");
+            extra.state = "exited".into();
+            lists.containers.push(extra);
+        }
+        let mut docker = Docker::for_test(lists);
+        press(&mut docker, KeyCode::Char('p'));
+        let screen = render(&mut docker, 100, 20);
+        assert!(screen.contains("32 stopped containers will be removed:"));
+        assert!(screen.contains("more, not shown"), "{screen}");
+        assert!(screen.contains(" Remove   Cancel "));
+
+        // Taking a project down keeps the line about its volumes.
+        let mut docker = self::docker();
+        docker.tab = COMPOSE;
+        docker.ensure_selection();
+        press(&mut docker, KeyCode::Down);
+        press(&mut docker, KeyCode::Char('d'));
+        let screen = render(&mut docker, 80, 12);
+        assert!(screen.contains("Its volumes stay."), "{screen}");
     }
 
     #[test]

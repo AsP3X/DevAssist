@@ -52,6 +52,9 @@ pub trait Feature {
     fn draw(&mut self, frame: &mut Frame, area: Rect);
     /// What the tool asks of the program, if anything.
     fn request(&self) -> Option<Request>;
+    /// The program is about to end, whoever asked for it: stop what was
+    /// started.
+    fn closing(&mut self);
 }
 
 /// What a tool can ask of the program.
@@ -109,6 +112,8 @@ struct Shell {
     hits: Hits<Act>,
     tick: usize,
     leave: Option<Leave>,
+    /// The last frame had no room for anything but a message.
+    cramped: bool,
 }
 
 impl Shell {
@@ -124,6 +129,7 @@ impl Shell {
             hits: Hits::default(),
             tick: 0,
             leave: None,
+            cramped: false,
         };
         if let Some(first) = shell.features.first_mut() {
             first.shown();
@@ -172,6 +178,13 @@ impl Shell {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
+        if self.cramped {
+            // Nothing is on screen to act on: only quitting is safe.
+            if ctrl_c {
+                self.leave = Some(Leave::Quit);
+            }
+            return;
+        }
         if !matches!(self.dialog, Dialog::None) {
             if ctrl_c {
                 self.leave = Some(Leave::Quit);
@@ -247,6 +260,9 @@ impl Shell {
         if self.selection.on_mouse(&mut mouse) == Pass::Swallow {
             return;
         }
+        if self.cramped {
+            return;
+        }
         let (x, y) = (mouse.column, mouse.row);
         let released = mouse.kind == MouseEventKind::Up(MouseButton::Left);
         if !matches!(self.dialog, Dialog::None) {
@@ -257,7 +273,12 @@ impl Shell {
         }
         // The top line is the shell's: a click there never reaches the tool.
         if let Some(index) = self.strip.iter().position(|rect| contains(*rect, x, y)) {
-            if released {
+            // As with the number keys: not while the tool has a dialog open.
+            let modal = self
+                .features
+                .get(self.active)
+                .is_none_or(|feature| feature.modal());
+            if released && !modal {
                 self.switch_to(index);
             }
             return;
@@ -318,7 +339,8 @@ impl Shell {
         self.tick = self.tick.wrapping_add(1);
         self.hits.clear();
         let screen = frame.area();
-        if screen.width < MIN_SIZE.0 || screen.height < MIN_SIZE.1 {
+        self.cramped = screen.width < MIN_SIZE.0 || screen.height < MIN_SIZE.1;
+        if self.cramped {
             self.strip.clear();
             frame.render_widget(Paragraph::new("Make the terminal a bit larger."), screen);
             self.selection.finish(frame.buffer_mut());
@@ -353,6 +375,13 @@ impl Shell {
             Dialog::Tools(menu) => menu.draw(frame, screen, &names, self.mouse, &mut self.hits),
         }
         self.selection.finish(frame.buffer_mut());
+    }
+
+    /// Tells every tool the program is ending.
+    fn close(&mut self) {
+        for feature in &mut self.features {
+            feature.closing();
+        }
     }
 
     /// Whether the program should end, and how. A restart is the shell's
@@ -405,6 +434,7 @@ pub fn run(
     terminal::restore(&mut screen)?;
     let leave = shell.leaving();
     // Let the tools stop what they started before another copy runs.
+    shell.close();
     drop(shell);
     if leave == Some(Leave::Restart) {
         // An update was installed: hand the terminal to the new version.
@@ -474,6 +504,9 @@ mod tests {
         }
         fn request(&self) -> Option<Request> {
             self.request
+        }
+        fn closing(&mut self) {
+            self.log.borrow_mut().push(format!("{} closing", self.name));
         }
     }
 
@@ -666,6 +699,8 @@ mod tests {
         assert!(screen.contains("╭ Keys · one "));
         assert!(screen.contains("does the stub's thing"));
         assert!(screen.contains("switch to that tool"));
+        // The shell's keys come first, so a short screen cuts the tool's.
+        assert!(screen.find("switch to that tool") < screen.find("does the stub's thing"));
         // While it is open, keys are not the tool's.
         shell.on_event(key(KeyCode::Char('x')));
         shell.on_event(key(KeyCode::Esc));
@@ -732,12 +767,43 @@ mod tests {
     }
 
     #[test]
-    fn a_screen_that_is_too_small_says_so() {
+    fn a_screen_that_is_too_small_says_so_and_takes_no_keys() {
         let log = Log::default();
         let mut shell = two(&log);
         let screen = render(&mut shell, 47, 13);
         assert!(screen.contains("Make the terminal a bit larger."));
+        // What the keys would act on cannot be seen: they do nothing.
+        shell.on_event(key(KeyCode::Enter));
+        shell.on_event(key(KeyCode::Char('2')));
+        click(&mut shell, 5, 3);
+        assert!(log.borrow().is_empty());
+        assert_eq!(shell.active, 0);
+        shell.on_event(ctrl('c'));
+        assert_eq!(shell.leaving(), Some(Leave::Quit));
+
+        let mut shell = two(&log);
         let screen = render(&mut shell, 48, 13);
         assert!(screen.contains("body of one"));
+        shell.on_event(key(KeyCode::Enter));
+        assert_eq!(*log.borrow(), ["one key Enter"]);
+    }
+
+    #[test]
+    fn every_tool_is_told_when_the_program_ends() {
+        let log = Log::default();
+        let mut shell = two(&log);
+        shell.close();
+        assert_eq!(*log.borrow(), ["one closing", "two closing"]);
+    }
+
+    #[test]
+    fn a_click_on_the_top_line_does_not_leave_a_tool_that_has_a_dialog_open() {
+        let log = Log::default();
+        let mut first = stub("one", &log);
+        first.modal = true;
+        let mut shell = shell_of(vec![first, stub("two", &log)]);
+        render(&mut shell, 60, 14);
+        click(&mut shell, 12, 0);
+        assert_eq!(shell.active, 0);
     }
 }

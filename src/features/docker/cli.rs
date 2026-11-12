@@ -96,15 +96,9 @@ pub fn volume_rm(names: &[String]) -> Vec<String> {
     with(&["volume", "rm"], names)
 }
 
-/// Starts a project from its compose files, in the background.
-pub fn compose_up(project: &str, files: &[String]) -> Vec<String> {
-    let mut all = args(&["compose", "-p", project]);
-    for file in files {
-        all.push("-f".to_string());
-        all.push(file.clone());
-    }
-    all.extend(args(&["up", "--detach"]));
-    all
+/// Starts a project's containers as they are.
+pub fn compose_start(project: &str) -> Vec<String> {
+    args(&["compose", "-p", project, "start"])
 }
 
 pub fn compose_stop(project: &str) -> Vec<String> {
@@ -201,11 +195,7 @@ mod tests {
 
     #[test]
     fn compose_names_the_project_and_keeps_volumes_unless_told() {
-        let files = names(&["a.yml", "b.yml"]);
-        assert_eq!(
-            line(compose_up("shop", &files)),
-            "compose -p shop -f a.yml -f b.yml up --detach"
-        );
+        assert_eq!(line(compose_start("shop")), "compose -p shop start");
         assert_eq!(line(compose_stop("shop")), "compose -p shop stop");
         assert_eq!(line(compose_restart("shop")), "compose -p shop restart");
         assert_eq!(line(compose_down("shop", false)), "compose -p shop down");

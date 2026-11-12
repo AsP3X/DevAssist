@@ -238,4 +238,13 @@ Each step compiles, passes the tests and leaves the app usable.
 - **`Worker::sender`** was added so a `Stream` can report on the tool's channel.
 - **Actions with long output** are the four Compose ones. Their output opens in the log view; closing it leaves the command running.
 - **`docker events` is filtered:** the `exec_*` and `health_status` events that health checks cause every few seconds do not reload the lists.
-- **`s` in the Compose tab** brings a project up when some of it is not running and stops it when all of it runs.
+- **There is no Compose "up".** The tool starts a project with `docker compose -p <name> start`, which uses the containers as they are. `up` needs the compose files, and with them the profiles and environment files the project was created with, which `compose ls` does not report; run with the wrong ones it would recreate containers differently. `s` stops a project when any of it runs and starts it when none does, so a service that ran once and ended is not run again.
+- **Enter never forces.** When everything chosen is running or in use, the dialog's only way forward is `f` or a click on the second button; Enter closes it.
+- **Keys act only on what the filter shows.** A project's header stands for the containers the filter lets through, ticks the filter hides are not acted on, and a highlight left on a hidden row does nothing.
+- **Guards found in review:** `docker events` that ends within ten seconds of starting is not restarted until `r`; a load that hangs can be given up with `r` after five seconds; a queued Compose action does not open its output over an open dialog or log; the shell takes no keys while the screen is too small to draw; every tool is told when the program ends, so quitting from any tool or dialog stops running git work.
+
+## Known limits
+
+- Closing the terminal window, instead of quitting, can leave `docker events` (and an open `docker logs`) running until Docker stops: they are started without a console, so the window's close does not reach them. `git` commands started by the repos tool have the same limit. A Windows job object that ends children with the program would fix both.
+- A right click does nothing in the Docker tool or in the shell's dialogs.
+- Log lines come as Docker prints them, cut at the window's width. There is no horizontal scrolling.

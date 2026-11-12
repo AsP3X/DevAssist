@@ -31,7 +31,7 @@ esc            clear a selection or a filter, or go back
 q              quit
 
 Nothing is removed without a dialog that lists what will go.
-Running containers and images in use need the second button, or f.
+Enter never forces: running containers and images in use need f.
 Volumes in use are never removed.";
 
 impl Feature for Docker {
@@ -70,6 +70,10 @@ impl Feature for Docker {
     fn request(&self) -> Option<Request> {
         self.should_quit.then_some(Request::Quit)
     }
+
+    /// Dropping the tool stops `docker events` and an open log. A command
+    /// that changes something is left to finish.
+    fn closing(&mut self) {}
 }
 
 /// `--doctor`: one line about Docker. A missing Docker is not a failure.

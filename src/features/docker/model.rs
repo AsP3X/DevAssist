@@ -54,6 +54,8 @@ pub struct Image {
     pub age: String,
     /// How many containers Docker says use it. Older versions do not say.
     pub containers: usize,
+    /// How many names point at this image, this one included.
+    pub names: usize,
 }
 
 impl Image {
@@ -93,14 +95,16 @@ impl Image {
     /// The names of the containers made from this image.
     pub fn used_by(&self, containers: &[Container]) -> Vec<String> {
         let name = self.name();
-        let short = self.short_id();
+        let bare = self.id.trim_start_matches("sha256:");
         containers
             .iter()
             .filter(|container| {
-                let image = container.image.as_str();
+                let image = container.image.trim_start_matches("sha256:");
+                // A container made from an ID names at least its first
+                // twelve characters.
                 image == name
                     || (self.tag == "latest" && image == self.repository)
-                    || (!image.is_empty() && (self.id.ends_with(image) || image == short))
+                    || (image.len() >= 12 && bare.starts_with(image))
             })
             .map(|container| container.name.clone())
             .collect()
@@ -108,6 +112,12 @@ impl Image {
 
     pub fn in_use(&self, containers: &[Container]) -> bool {
         self.containers > 0 || !self.used_by(containers).is_empty()
+    }
+
+    /// True for a second name of an image that is in use under another
+    /// one. Removing it takes only the name away, which Docker allows.
+    pub fn spare_name(&self, containers: &[Container]) -> bool {
+        self.names > 1 && !self.dangling() && self.used_by(containers).is_empty()
     }
 
     /// The size in bytes, as near as Docker's rounded text allows.
@@ -257,9 +267,14 @@ pub fn parse_images(output: &str) -> Vec<Image> {
             size: text(value, "Size"),
             age: text(value, "CreatedSince"),
             containers: text(value, "Containers").parse().unwrap_or(0),
+            names: 1,
         })
         .filter(|image| !image.id.is_empty())
         .collect();
+    let ids: Vec<String> = images.iter().map(|image| image.id.clone()).collect();
+    for image in &mut images {
+        image.names = ids.iter().filter(|id| **id == image.id).count();
+    }
     images.sort_by(|left, right| {
         (left.dangling(), left.name(), &left.id).cmp(&(right.dangling(), right.name(), &right.id))
     });
@@ -496,6 +511,39 @@ mod tests {
         assert!(postgres.in_use(&containers));
 
         assert!(!images[0].in_use(&containers));
+
+        // A container made from an ID matches that image, and a short
+        // name that happens to be hex matches none.
+        let by_id = |image: &str| Container {
+            name: "made-from-id".into(),
+            image: image.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            images[0].used_by(&[by_id("532d42f059e8")]),
+            ["made-from-id"]
+        );
+        assert!(images[0].used_by(&[by_id("ba")]).is_empty());
+        assert!(images[3].used_by(&[by_id("ba")]).is_empty());
+
+        // A second name for an image in use can go without force: only
+        // the name is removed. The name the container uses cannot.
+        let two_names = parse_images(
+            r#"{"Containers":"1","ID":"sha256:aaaaaaaaaaaaaaaa","Repository":"redis","Tag":"7"}
+{"Containers":"1","ID":"sha256:aaaaaaaaaaaaaaaa","Repository":"mine","Tag":"latest"}"#,
+        );
+        let redis = Container {
+            name: "cache".into(),
+            image: "redis:7".into(),
+            ..Default::default()
+        };
+        let users = std::slice::from_ref(&redis);
+        assert_eq!(two_names[0].name(), "mine:latest");
+        assert_eq!(two_names[0].names, 2);
+        assert!(two_names[0].in_use(users));
+        assert!(two_names[0].spare_name(users));
+        assert!(!two_names[1].spare_name(users));
+        assert!(!images[2].spare_name(&containers));
 
         // An image without a name is removed by its ID.
         let dangling = &images[3];

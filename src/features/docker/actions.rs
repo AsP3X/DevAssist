@@ -45,7 +45,6 @@ pub enum Verb {
     Logs,
     CopyName,
     Remove,
-    Up,
     Down,
 }
 
@@ -58,7 +57,6 @@ impl Verb {
             Verb::Logs => "Show the logs",
             Verb::CopyName => "Copy the name",
             Verb::Remove => "Remove…",
-            Verb::Up => "Up: create and start",
             Verb::Down => "Down: stop and remove…",
         }
     }
@@ -72,7 +70,6 @@ impl Verb {
             Verb::Logs => 'l',
             Verb::CopyName => 'c',
             Verb::Remove => 'd',
-            Verb::Up => 'u',
             Verb::Down => 'w',
         }
     }
@@ -91,7 +88,13 @@ pub const CONTAINER_MENU: [Verb; 6] = [
     Verb::CopyName,
     Verb::Remove,
 ];
-pub const PROJECT_MENU: [Verb; 5] = [Verb::Up, Verb::Stop, Verb::Restart, Verb::Logs, Verb::Down];
+pub const PROJECT_MENU: [Verb; 5] = [
+    Verb::Start,
+    Verb::Stop,
+    Verb::Restart,
+    Verb::Logs,
+    Verb::Down,
+];
 pub const OBJECT_MENU: [Verb; 2] = [Verb::CopyName, Verb::Remove];
 
 fn ids(containers: &[&Container]) -> Vec<String> {
@@ -156,11 +159,13 @@ pub fn toggle(containers: &[&Container]) -> Option<Request> {
     }
 }
 
-pub fn project_up(project: &Project) -> Request {
+/// Starts the project's containers as they are. Nothing is created anew,
+/// so no compose file, profile or environment file is needed.
+pub fn project_start(project: &Project) -> Request {
     Request {
         doing: format!("Starting project {}", project.name),
-        done: format!("Project {} is up", project.name),
-        steps: vec![cli::compose_up(&project.name, &project.files)],
+        done: format!("Started project {}", project.name),
+        steps: vec![cli::compose_start(&project.name)],
         show_output: true,
     }
 }
@@ -183,13 +188,14 @@ pub fn project_restart(project: &Project) -> Request {
     }
 }
 
-/// `s` on a project: stops it when all of it runs, and otherwise brings
-/// it up.
+/// `s` on a project: stops it when any of it runs, and starts it when
+/// none does. A service that ran once and ended does not count as a
+/// reason to start the rest again.
 pub fn project_toggle(project: &Project) -> Request {
-    if project.total > 0 && project.running == project.total {
+    if project.running > 0 {
         project_stop(project)
     } else {
-        project_up(project)
+        project_start(project)
     }
 }
 
@@ -312,7 +318,10 @@ impl Confirm {
             if image.dangling() {
                 item.name = format!("<none> {}", image.short_id());
             }
-            if image.in_use(containers) {
+            if image.spare_name(containers) {
+                item.note = "only this name goes; the image is in use under another".to_string();
+                free.push(item);
+            } else if image.in_use(containers) {
                 item.note = match users.as_slice() {
                     [] => "used by a container".to_string(),
                     users => format!("used by {}", users.join(", ")),
@@ -636,11 +645,18 @@ impl Confirm {
         buttons
     }
 
-    /// What Enter does: the first button.
+    /// What Enter does: `Go` where the dialog offers it, and otherwise
+    /// nothing. Force is never what Enter does.
     pub fn default_choice(&self) -> Choice {
-        self.buttons()
-            .first()
-            .map_or(Choice::Cancel, |(_, choice)| *choice)
+        if self
+            .buttons()
+            .iter()
+            .any(|(_, choice)| *choice == Choice::Go)
+        {
+            Choice::Go
+        } else {
+            Choice::Cancel
+        }
     }
 
     /// What a button runs. Nothing for Cancel, or for a button the dialog
@@ -792,7 +808,9 @@ mod tests {
         let running: Vec<&Container> = all.iter().copied().filter(|c| c.running()).collect();
         let confirm = Confirm::containers(&running);
         assert_eq!(labels(&confirm), ["Stop and remove all", "Cancel"]);
-        assert_eq!(confirm.default_choice(), Choice::Force);
+        // Enter never forces: it closes the dialog.
+        assert_eq!(confirm.default_choice(), Choice::Cancel);
+        assert!(confirm.request(Choice::Force).is_some());
         assert_eq!(confirm.request(Choice::Go), None);
     }
 
@@ -911,15 +929,17 @@ mod tests {
     }
 
     #[test]
-    fn a_project_is_brought_up_from_its_files_or_stopped_when_all_of_it_runs() {
+    fn s_on_a_project_stops_it_while_any_of_it_runs_and_starts_it_otherwise() {
         let lists = samples::lists();
+        // Two of three run: the third may be a job that ran once and ended.
         let shop = lists.projects.iter().find(|p| p.name == "shop").unwrap();
-        let up = project_toggle(shop);
-        assert_eq!(up.doing, "Starting project shop");
-        assert_eq!(up.steps[0][..3], ["compose", "-p", "shop"]);
-        assert!(up.steps[0].contains(&"C:\\dev\\shop\\docker-compose.yml".to_string()));
-        let mut running = shop.clone();
-        running.running = running.total;
-        assert_eq!(project_toggle(&running).doing, "Stopping project shop");
+        let stop = project_toggle(shop);
+        assert_eq!(stop.doing, "Stopping project shop");
+        assert_eq!(stop.steps[0].join(" "), "compose -p shop stop");
+        let blog = lists.projects.iter().find(|p| p.name == "blog").unwrap();
+        let start = project_toggle(blog);
+        assert_eq!(start.doing, "Starting project blog");
+        assert_eq!(start.steps[0].join(" "), "compose -p blog start");
+        assert!(start.show_output);
     }
 }

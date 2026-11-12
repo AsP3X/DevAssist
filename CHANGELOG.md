@@ -16,8 +16,9 @@ What changed in each version of DevAssist. The format follows
     them, `Enter` shows the actions for the selection.
   - `d` removes and `p` prunes, both behind a dialog that lists by name
     what will go. Running containers and images in use stay unless you
-    choose the second button; a volume in use always stays. Taking a
-    Compose project down keeps its volumes unless you tick the box.
+    press `f` or click the second button, which Enter never does; a
+    volume in use always stays. Taking a Compose project down keeps its
+    volumes unless you tick the box.
   - It needs the `docker` command. If Docker is missing or stopped, the
     tool says so and the rest of DevAssist works as before. Nothing runs
     `docker` until you open the tool.
