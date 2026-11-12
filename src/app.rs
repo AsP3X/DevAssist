@@ -16,11 +16,11 @@ use crate::atoms::ui::hits::Hits;
 use crate::atoms::ui::input::{self, Alt};
 use crate::atoms::ui::list;
 use crate::atoms::ui::menu;
+use crate::atoms::ui::path::{self as pathprompt, PathPrompt};
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
 use crate::gitprogress;
-use crate::pathprompt::{self, PathPrompt, Purpose};
 use crate::select::{PointerEffect, PointerEvent};
 use crate::settings::{Form, Outcome};
 use crate::update::{self, Release};
@@ -117,6 +117,36 @@ impl Queued {
             Queued::Import(dir) => format!("import {}", dir.display()),
             Queued::Refresh => "refresh".to_string(),
         }
+    }
+}
+
+/// What the folder dialog is asking for.
+#[derive(Clone)]
+pub enum Purpose {
+    /// Clone these repositories into the folder.
+    Clone(Vec<RemoteRepo>),
+    /// Add the clones that already sit in the folder to the overview.
+    Import,
+}
+
+impl Purpose {
+    /// The dialog for this purpose. Only an import needs a folder that is
+    /// already there: cloning creates it.
+    pub fn prompt(self, start: &Path) -> PathPrompt<Purpose> {
+        let must_exist = matches!(self, Purpose::Import);
+        PathPrompt::new(self, start, must_exist)
+    }
+}
+
+/// Where a single repository ends up, to show under the field.
+pub fn clone_target(prompt: &PathPrompt<Purpose>) -> Option<PathBuf> {
+    match &prompt.purpose {
+        Purpose::Clone(remotes) if remotes.len() == 1 => Some(
+            pathprompt::resolve(&prompt.input)
+                .ok()?
+                .join(&remotes[0].name),
+        ),
+        _ => None,
     }
 }
 
@@ -287,7 +317,7 @@ pub struct App {
     pub clone_dir: PathBuf,
     owners_explicit: bool,
     /// The open folder dialog.
-    pub prompt: Option<PathPrompt>,
+    pub prompt: Option<PathPrompt<Purpose>>,
     /// Checkouts a running remove is deleting.
     removing: Vec<PathBuf>,
     /// Which group each checkout is in. Groups only sort the overview.
@@ -1467,7 +1497,7 @@ impl App {
     }
 
     fn open_import(&mut self) {
-        self.prompt = Some(PathPrompt::new(Purpose::Import, &self.clone_dir));
+        self.prompt = Some(Purpose::Import.prompt(&self.clone_dir));
         self.mode = Mode::Path;
     }
 
@@ -2412,7 +2442,7 @@ impl App {
                 self.notice("Those repositories are on the list already.", true);
                 return;
             }
-            self.prompt = Some(PathPrompt::new(Purpose::Clone(remotes), &self.clone_dir));
+            self.prompt = Some(Purpose::Clone(remotes).prompt(&self.clone_dir));
             self.mode = Mode::Path;
             return;
         }
@@ -2436,10 +2466,7 @@ impl App {
             self.notice(format!("{} is on the list already.", remote.id()), true);
             return;
         }
-        self.prompt = Some(PathPrompt::new(
-            Purpose::Clone(vec![remote]),
-            &self.clone_dir,
-        ));
+        self.prompt = Some(Purpose::Clone(vec![remote]).prompt(&self.clone_dir));
         self.mode = Mode::Path;
     }
 

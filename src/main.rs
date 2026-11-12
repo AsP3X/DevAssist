@@ -4,7 +4,6 @@ mod config;
 mod github;
 mod gitops;
 mod gitprogress;
-mod pathprompt;
 mod select;
 mod settings;
 mod ui;

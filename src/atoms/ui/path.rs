@@ -1,24 +1,14 @@
-//! The dialog that asks for a folder: where new clones go, or where to
-//! look for clones that already exist.
+//! A dialog field that asks for a folder, with Tab completion.
 
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::input::{self, Alt};
 use crate::atoms::sys::paths;
-use crate::atoms::ui::input::{self, Alt};
-use crate::github::RemoteRepo;
 
 /// How many completion candidates the dialog keeps to show.
 const MATCH_LIMIT: usize = 40;
-
-#[derive(Clone)]
-pub enum Purpose {
-    /// Clone these repositories into the folder.
-    Clone(Vec<RemoteRepo>),
-    /// Add the clones that already sit in the folder to the overview.
-    Import,
-}
 
 pub enum Outcome {
     Stay,
@@ -26,21 +16,25 @@ pub enum Outcome {
     Close,
 }
 
-pub struct PathPrompt {
-    pub purpose: Purpose,
+/// `P` says what the folder is for. The prompt only carries it.
+pub struct PathPrompt<P> {
+    pub purpose: P,
     pub input: String,
     pub error: Option<String>,
     /// Folders that Tab found for what is typed.
     pub matches: Vec<String>,
+    /// Refuse a folder that is not there yet.
+    must_exist: bool,
 }
 
-impl PathPrompt {
-    pub fn new(purpose: Purpose, start: &Path) -> Self {
+impl<P> PathPrompt<P> {
+    pub fn new(purpose: P, start: &Path, must_exist: bool) -> Self {
         Self {
             purpose,
             input: start.display().to_string(),
             error: None,
             matches: Vec::new(),
+            must_exist,
         }
     }
 
@@ -80,25 +74,13 @@ impl PathPrompt {
         self.matches.clear();
     }
 
-    /// The folder that is typed, checked for what it will be used for.
+    /// The folder that is typed, checked.
     pub fn folder(&self) -> Result<PathBuf, String> {
         let folder = resolve(&self.input)?;
-        match &self.purpose {
-            Purpose::Import if !folder.is_dir() => {
-                Err(format!("{} is not a folder.", folder.display()))
-            }
-            _ => Ok(folder),
+        if self.must_exist && !folder.is_dir() {
+            return Err(format!("{} is not a folder.", folder.display()));
         }
-    }
-
-    /// Where a single repository ends up, to show under the field.
-    pub fn target(&self) -> Option<PathBuf> {
-        match &self.purpose {
-            Purpose::Clone(remotes) if remotes.len() == 1 => {
-                Some(resolve(&self.input).ok()?.join(&remotes[0].name))
-            }
-            _ => None,
-        }
+        Ok(folder)
     }
 
     fn complete(&mut self) {
@@ -275,10 +257,10 @@ mod tests {
     fn the_prompt_edits_checks_and_accepts() {
         let root = temp("keys");
         fs::create_dir_all(root.join("work")).unwrap();
-        let mut prompt = PathPrompt::new(Purpose::Import, &root);
+        let mut prompt = PathPrompt::new((), &root, true);
         assert_eq!(prompt.input, root.display().to_string());
 
-        // Import needs a folder that exists.
+        // This prompt needs a folder that exists.
         prompt.paste(&format!("{MAIN_SEPARATOR}missing"));
         assert!(matches!(prompt.on_key(key(KeyCode::Enter)), Outcome::Stay));
         assert!(prompt.error.as_deref().unwrap().contains("is not a folder"));
@@ -301,7 +283,21 @@ mod tests {
 
         prompt.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert!(prompt.input.is_empty());
-        assert!(prompt.target().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_prompt_can_take_a_folder_that_is_not_there_yet() {
+        let root = temp("fresh");
+        let mut prompt = PathPrompt::new("clone", &root.join("new"), false);
+        assert_eq!(prompt.purpose, "clone");
+        // AltGr characters are typed: a path needs `\` on some keyboards.
+        prompt.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert!(prompt.input.ends_with("newx"));
+        match prompt.on_key(key(KeyCode::Enter)) {
+            Outcome::Accept(folder) => assert!(paths::same_path(&folder, &root.join("newx"))),
+            _ => panic!("the folder should be accepted"),
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

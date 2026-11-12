@@ -6,7 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
+use crate::app::{
+    Action, App, MenuItem, Mode, Purpose, RemoteState, Row, UpdateState, clone_target, group_key,
+};
 use crate::atoms::sys::paths;
 use crate::atoms::task::job::{ItemState, clock};
 use crate::atoms::ui::dialog::{self, centered};
@@ -17,7 +19,6 @@ use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::gitops::LocalRepo;
 use crate::gitprogress::{self, split_progress};
-use crate::pathprompt::Purpose;
 use crate::settings::{Field, PROTOCOLS};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -1228,7 +1229,7 @@ fn draw_path(frame: &mut Frame, app: &mut App, screen: Rect) {
                     }
                 }
             };
-            let note = match prompt.target() {
+            let note = match clone_target(prompt) {
                 Some(target) => format!("becomes {}", target.display()),
                 None if names.len() > 1 => "each repository gets its own folder inside".to_string(),
                 None => String::new(),
@@ -2266,13 +2267,9 @@ mod tests {
 
     #[test]
     fn adding_asks_where_the_clone_should_go() {
-        use crate::pathprompt::PathPrompt;
         let mut app = app(false);
         let dir = PathBuf::from(if cfg!(windows) { r"C:\dev" } else { "/srv/dev" });
-        app.prompt = Some(PathPrompt::new(
-            Purpose::Clone(vec![remote("portal")]),
-            &dir,
-        ));
+        app.prompt = Some(Purpose::Clone(vec![remote("portal")]).prompt(&dir));
         app.mode = Mode::Path;
         let screen = render(&mut app, 120, 30);
         assert!(screen.contains("╭ Clone into "));
@@ -2290,7 +2287,7 @@ mod tests {
 
         // Several repositories, and what Tab found.
         let several = vec![remote("a"), remote("b"), remote("c"), remote("d")];
-        let mut prompt = PathPrompt::new(Purpose::Clone(several), &dir);
+        let mut prompt = Purpose::Clone(several).prompt(&dir);
         prompt.matches = vec!["api-new".into(), "api-old".into()];
         app.prompt = Some(prompt);
         let screen = render(&mut app, 120, 30);
@@ -2299,7 +2296,7 @@ mod tests {
         assert!(screen.contains("api-new   api-old"));
 
         // Import uses the same dialog, and shows what is wrong.
-        let mut prompt = PathPrompt::new(Purpose::Import, &dir);
+        let mut prompt = Purpose::Import.prompt(&dir);
         prompt.error = Some("That is not a folder.".into());
         app.prompt = Some(prompt);
         let screen = render(&mut app, 120, 30);
