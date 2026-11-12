@@ -1209,7 +1209,7 @@ impl App {
             self.notice("Select a repository first.", true);
             return;
         }
-        match crate::clipboard::set_text(&paths.join("\n")) {
+        match crate::atoms::sys::clipboard::set_text(&paths.join("\n")) {
             Err(err) => self.notice(err, true),
             Ok(()) => match paths.as_slice() {
                 [path] => self.notice(format!("Copied {path}."), false),
@@ -1836,7 +1836,7 @@ impl App {
             self.copy_failed = false;
             return;
         }
-        match crate::clipboard::set_text(&text) {
+        match crate::atoms::sys::clipboard::set_text(&text) {
             Ok(()) => {
                 self.copy_note = Some("Copied to the clipboard".to_string());
                 self.copy_failed = false;

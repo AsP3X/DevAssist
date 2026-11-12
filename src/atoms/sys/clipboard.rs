@@ -77,7 +77,7 @@ fn set_windows(text: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 fn set_osc52(text: &str) -> Result<(), String> {
     use std::io::Write;
-    let encoded = crate::atoms::sys::encode::base64(text.as_bytes());
+    let encoded = super::encode::base64(text.as_bytes());
     let mut out = std::io::stdout().lock();
     write!(out, "\u{1b}]52;c;{encoded}\u{1b}\\").map_err(|err| err.to_string())?;
     out.flush().map_err(|err| err.to_string())

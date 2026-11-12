@@ -1,6 +1,5 @@
 mod app;
 mod atoms;
-mod clipboard;
 mod config;
 mod github;
 mod gitops;
