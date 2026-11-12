@@ -23,7 +23,7 @@ use ratatui::crossterm::terminal::{
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("artcraft-repos: {err}");
+        eprintln!("devassist: {err}");
         std::process::exit(1);
     }
 }
@@ -41,8 +41,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_tui(settings: config::Settings) -> Result<(), Box<dyn std::error::Error>> {
     if !io::stdout().is_terminal() {
-        eprintln!("artcraft-repos is a full-screen terminal app.");
-        eprintln!("Open Windows Terminal or PowerShell and run artcraft-repos");
+        eprintln!("devassist is a full-screen terminal app.");
+        eprintln!("Open Windows Terminal or PowerShell and run devassist");
         std::process::exit(1);
     }
     enable_utf8();

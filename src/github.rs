@@ -515,7 +515,7 @@ fn agent() -> &'static ureq::Agent {
 fn gh_get(url: &str, token: Option<&str>) -> Result<RawResponse, GhError> {
     let mut request = agent()
         .get(url)
-        .set("User-Agent", "artcraft-repos")
+        .set("User-Agent", "devassist")
         .set("Accept", "application/vnd.github+json")
         .set("X-GitHub-Api-Version", "2022-11-28");
     if let Some(token) = token {

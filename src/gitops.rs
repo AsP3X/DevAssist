@@ -798,6 +798,20 @@ pub fn remove_checkout(path: &Path) -> Result<(), String> {
     remove_tree(&dest)
 }
 
+/// Opens a web page in the default browser.
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err(format!("{url} is not a web address"));
+    }
+    let mut cmd = open_command(Path::new(url));
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn()
+        .map_err(|err| format!("could not open {url}: {err}"))?;
+    Ok(())
+}
+
 pub fn open_folder(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err(format!("{} is not a folder", path.display()));
@@ -1680,7 +1694,7 @@ mod tests {
 
     #[test]
     fn only_a_checkout_is_deleted() {
-        let root = std::env::temp_dir().join(format!("artcraft-repos-rm-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("devassist-rm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("plain")).unwrap();
         write_origin(&root, "demo", "https://github.com/acme/demo.git");
@@ -1698,7 +1712,7 @@ mod tests {
 
     #[test]
     fn listed_checkouts_load_from_anywhere_with_names_of_their_own() {
-        let root = std::env::temp_dir().join(format!("artcraft-repos-load-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("devassist-load-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let work = root.join("work");
         let home = root.join("home");
@@ -1771,7 +1785,7 @@ mod tests {
 
     #[test]
     fn scan_keeps_every_github_owner_and_skips_other_hosts() {
-        let root = std::env::temp_dir().join(format!("artcraft-repos-scan-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("devassist-scan-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         write_origin(&root, "alpha", "https://github.com/storytold/alpha.git");
@@ -1833,7 +1847,7 @@ mod tests {
 
     #[test]
     fn clone_destination_avoids_a_folder_used_by_another_repo() {
-        let root = std::env::temp_dir().join(format!("artcraft-repos-dest-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("devassist-dest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         write_origin(&root, "demo", "https://github.com/other/demo.git");
@@ -2033,8 +2047,7 @@ refs/remotes/fork/dev\tiii\t\t
 
     #[test]
     fn update_moves_every_branch_that_can_move_and_adds_new_ones() {
-        let root =
-            std::env::temp_dir().join(format!("artcraft-repos-update-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("devassist-update-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let upstream = root.join("upstream");
@@ -2133,8 +2146,7 @@ refs/remotes/fork/dev\tiii\t\t
 
     #[test]
     fn a_fresh_clone_gets_a_local_branch_for_every_branch_with_commits() {
-        let root =
-            std::env::temp_dir().join(format!("artcraft-repos-clone-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("devassist-clone-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let upstream = root.join("upstream");
@@ -2189,8 +2201,7 @@ refs/remotes/fork/dev\tiii\t\t
 
     #[test]
     fn status_sees_commits_on_remote_branches_that_are_not_checked_out() {
-        let root =
-            std::env::temp_dir().join(format!("artcraft-repos-remote-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("devassist-remote-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let upstream = root.join("upstream");

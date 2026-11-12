@@ -4,8 +4,8 @@
 
 .DESCRIPTION
   Writes to target\installer:
-    artcraft-repos-<version>-x64.msi     Windows Installer package (WiX)
-    artcraft-repos-<version>-setup.exe   setup wizard (Inno Setup)
+    devassist-<version>-x64.msi     Windows Installer package (WiX)
+    devassist-<version>-setup.exe   setup wizard (Inno Setup)
 
   The version comes from Cargo.toml. An installer whose tool is missing is
   skipped with a note on how to get the tool; the script then exits with 1.
@@ -32,11 +32,11 @@ if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
     throw 'Cargo.toml has no version.'
 }
 $version = $Matches[1]
-$exe = Join-Path $root 'target\release\artcraft-repos.exe'
+$exe = Join-Path $root 'target\release\devassist.exe'
 $out = Join-Path $root 'target\installer'
 
 if (-not $SkipBuild) {
-    Write-Host "Building artcraft-repos $version (release)"
+    Write-Host "Building devassist $version (release)"
     cargo build --release
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
 }
@@ -48,9 +48,9 @@ $missing = @()
 # ---- MSI
 $wix = Get-Command wix -ErrorAction SilentlyContinue
 if ($wix) {
-    $msi = Join-Path $out "artcraft-repos-$version-x64.msi"
+    $msi = Join-Path $out "devassist-$version-x64.msi"
     Write-Host "Building $msi"
-    & $wix.Source build (Join-Path $PSScriptRoot 'artcraft-repos.wxs') `
+    & $wix.Source build (Join-Path $PSScriptRoot 'devassist.wxs') `
         -arch x64 -pdbtype none -d "Version=$version" -d "ExePath=$exe" -o $msi
     if ($LASTEXITCODE -ne 0) { throw 'wix build failed.' }
 } else {
@@ -68,7 +68,7 @@ if (-not $iscc) {
 }
 if ($iscc) {
     Write-Host "Building the setup wizard with $iscc"
-    & $iscc /Qp "/DAppVersion=$version" "/DExePath=$exe" (Join-Path $PSScriptRoot 'artcraft-repos.iss')
+    & $iscc /Qp "/DAppVersion=$version" "/DExePath=$exe" (Join-Path $PSScriptRoot 'devassist.iss')
     if ($LASTEXITCODE -ne 0) { throw 'ISCC failed.' }
 } else {
     $missing += 'setup.exe skipped: Inno Setup is not installed. Get it with: winget install JRSoftware.InnoSetup'

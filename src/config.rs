@@ -4,10 +4,15 @@ use std::path::{Path, PathBuf};
 use crate::github::{self, RepoSpec};
 use crate::gitops::{self, Protocol};
 
-const DEFAULT_OWNER: &str = "storytold";
+/// The app's name: the default heading and the settings folder.
+pub const APP_NAME: &str = "DevAssist";
 
 /// The settings file's name, wherever it lives.
-const FILE_NAME: &str = "artcraft-repos.toml";
+const FILE_NAME: &str = "devassist.toml";
+/// What the settings file and its folder were called before the app was
+/// renamed. Settings found under the old name are taken over once.
+const OLD_FILE_NAME: &str = "artcraft-repos.toml";
+const OLD_DIR_NAME: &str = "artcraft-repos";
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -156,7 +161,7 @@ pub fn startup() -> Result<Startup, String> {
         .map(|file| (file.placement.clone(), file.collapsed.clone()))
         .unwrap_or_default();
     let discovered = discovered_owners(&checkouts);
-    let resolved = resolve(&flags, loaded.file, &discovered, "");
+    let resolved = resolve(&flags, loaded.file, &discovered);
     Ok(Startup::Run(Box::new(Settings {
         title: resolved.title,
         custom_title: resolved.custom_title,
@@ -178,13 +183,13 @@ pub fn startup() -> Result<Startup, String> {
 pub fn print_help() {
     println!(
         "\
-artcraft-repos
+DevAssist
   Add, update, and remove local GitHub clones, wherever they are on disk.
 
 Usage
-  artcraft-repos [--owner NAME]... [--repo OWNER/NAME]... [--import PATH]...
-  artcraft-repos --doctor
-  artcraft-repos --help
+  devassist [--owner NAME]... [--repo OWNER/NAME]... [--import PATH]...
+  devassist --doctor
+  devassist --help
 
 The app can be started from any folder. It keeps a list of the clones it
 manages in its settings file. Adding a repository asks where to put it.
@@ -202,9 +207,9 @@ Options
   --protocol MODE    auto, https, or ssh. auto follows the remotes of the
                      clones already listed, otherwise https.
   --title TEXT       Heading shown in the app.
-  --config PATH      Settings file. Default: artcraft-repos.toml in
-                     %APPDATA%\\artcraft-repos on Windows, in
-                     ~/.config/artcraft-repos elsewhere. A file an older
+  --config PATH      Settings file. Default: devassist.toml in
+                     %APPDATA%\\DevAssist on Windows, in
+                     ~/.config/devassist elsewhere. A file an older
                      version kept in the clone folder or beside the
                      executable is taken over once, with that folder's clones.
   --doctor           Print the settings and the GitHub check, then exit.
@@ -364,12 +369,7 @@ fn choose_accounts(counts: &[(String, usize)], login: Option<&str>) -> Vec<Strin
     }
 }
 
-fn resolve(
-    flags: &Flags,
-    file: Option<ParsedConfig>,
-    discovered: &[String],
-    folder: &str,
-) -> Resolved {
+fn resolve(flags: &Flags, file: Option<ParsedConfig>, discovered: &[String]) -> Resolved {
     let mut owners = discovered.to_vec();
     let mut pinned = Vec::new();
     let mut title = None;
@@ -400,7 +400,7 @@ fn resolve(
         protocol = value;
     }
     let custom_title = title.clone();
-    let title = title.unwrap_or_else(|| default_title(&owners, folder));
+    let title = title.unwrap_or_else(default_title);
     Resolved {
         title,
         custom_title,
@@ -410,19 +410,9 @@ fn resolve(
     }
 }
 
-pub fn default_title(owners: &[String], folder: &str) -> String {
-    if let [owner] = owners
-        && owner.eq_ignore_ascii_case(DEFAULT_OWNER)
-    {
-        return "Artcraft Repos".to_string();
-    }
-    if !folder.is_empty() {
-        return folder.to_string();
-    }
-    match owners {
-        [owner] => format!("{owner} repos"),
-        _ => "GitHub Repos".to_string(),
-    }
+/// The heading when the user has not chosen one.
+pub fn default_title() -> String {
+    APP_NAME.to_string()
 }
 
 /// Finds the settings file. It lives in the user's own settings folder, so
@@ -451,12 +441,24 @@ fn load_file(flags: &Flags) -> Result<Loaded, String> {
             migrated: false,
         });
     }
+    // The settings of the app under its old name move to the new place.
+    if let Some(old) = user_config_dir()
+        .map(|base| base.join(OLD_DIR_NAME).join(OLD_FILE_NAME))
+        .filter(|old| old.is_file())
+    {
+        return Ok(Loaded {
+            file: Some(read_config(&old)?),
+            path,
+            legacy_root: None,
+            migrated: true,
+        });
+    }
     // Older versions managed one folder and kept the settings in it, or
     // beside the executable. Take both over once.
     let root = gitops::default_root();
     let legacy = [
-        Some(root.join(FILE_NAME)),
-        exe_dir().map(|dir| dir.join(FILE_NAME)),
+        Some(root.join(OLD_FILE_NAME)),
+        exe_dir().map(|dir| dir.join(OLD_FILE_NAME)),
     ]
     .into_iter()
     .flatten()
@@ -479,15 +481,25 @@ fn read_config(path: &Path) -> Result<ParsedConfig, String> {
     parse_config(&text).map_err(|err| format!("{}: {err}", path.display()))
 }
 
-/// %APPDATA%\artcraft-repos on Windows, ~/.config/artcraft-repos elsewhere.
-fn user_config_path() -> PathBuf {
-    let base = if cfg!(windows) {
+/// The folder programs keep their per-user settings in.
+fn user_config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
         env_dir("APPDATA")
     } else {
         env_dir("XDG_CONFIG_HOME").or_else(|| home_dir().map(|home| home.join(".config")))
+    }
+    .or_else(home_dir)
+}
+
+/// %APPDATA%\DevAssist on Windows, ~/.config/devassist elsewhere.
+fn user_config_path() -> PathBuf {
+    let folder = if cfg!(windows) {
+        APP_NAME.to_string()
+    } else {
+        APP_NAME.to_lowercase()
     };
-    match base.or_else(home_dir) {
-        Some(base) => base.join("artcraft-repos").join(FILE_NAME),
+    match user_config_dir() {
+        Some(base) => base.join(folder).join(FILE_NAME),
         None => exe_dir().unwrap_or_default().join(FILE_NAME),
     }
 }
@@ -538,8 +550,7 @@ pub fn save(path: &Path, saved: &Saved) -> Result<(), String> {
 }
 
 fn render(saved: &Saved) -> String {
-    let mut out =
-        String::from("# artcraft-repos settings. Edit this file, or press c in the app.\n");
+    let mut out = String::from("# devassist settings. Edit this file, or press c in the app.\n");
     if let Some(title) = &saved.title {
         out.push_str(&format!("title = {title}\n"));
     }
@@ -752,35 +763,29 @@ mod tests {
 
     #[test]
     fn an_empty_folder_has_no_preset_account() {
-        let resolved = resolve(&Flags::default(), None, &[], "");
+        let resolved = resolve(&Flags::default(), None, &[]);
         assert!(resolved.owners.is_empty());
-        assert_eq!(resolved.title, "GitHub Repos");
+        assert_eq!(resolved.title, "DevAssist");
         assert_eq!(resolved.protocol, Protocol::Auto);
         assert!(resolved.pinned.is_empty());
     }
 
     #[test]
-    fn owners_come_from_the_folder_and_storytold_keeps_its_title() {
-        let resolved = resolve(
-            &Flags::default(),
-            None,
-            &["storytold".into()],
-            "AdobeCloneApps",
-        );
+    fn owners_come_from_the_checkouts_and_the_title_is_the_app_name() {
+        let resolved = resolve(&Flags::default(), None, &["storytold".into()]);
         assert_eq!(resolved.owners, vec!["storytold".to_string()]);
-        assert_eq!(resolved.title, "Artcraft Repos");
+        assert_eq!(resolved.title, "DevAssist");
 
         let resolved = resolve(
             &Flags::default(),
             None,
             &["ahwootech".into(), "AsP3X".into()],
-            "development",
         );
         assert_eq!(
             resolved.owners,
             vec!["ahwootech".to_string(), "AsP3X".to_string()]
         );
-        assert_eq!(resolved.title, "development");
+        assert_eq!(resolved.title, "DevAssist");
     }
 
     #[test]
@@ -805,31 +810,21 @@ mod tests {
             "\u{feff}# workspace\n\nowner = my-user\nprotocol = ssh\ntitle = \"My Tools\"\n",
         )
         .unwrap();
-        let resolved = resolve(
-            &Flags::default(),
-            Some(file),
-            &["storytold".into()],
-            "development",
-        );
+        let resolved = resolve(&Flags::default(), Some(file), &["storytold".into()]);
         assert_eq!(resolved.owners, vec!["my-user".to_string()]);
         assert_eq!(resolved.protocol, Protocol::Ssh);
         assert_eq!(resolved.title, "My Tools");
     }
 
     #[test]
-    fn several_owners_use_a_generic_title() {
+    fn several_owners_keep_the_app_name_as_title() {
         let file = parse_config("owner = alpha\nowner = beta\nowner = ALPHA\n").unwrap();
-        let resolved = resolve(
-            &Flags::default(),
-            Some(file),
-            &["storytold".into()],
-            "development",
-        );
+        let resolved = resolve(&Flags::default(), Some(file), &["storytold".into()]);
         assert_eq!(
             resolved.owners,
             vec!["alpha".to_string(), "beta".to_string()]
         );
-        assert_eq!(resolved.title, "development");
+        assert_eq!(resolved.title, "DevAssist");
     }
 
     #[test]
@@ -839,10 +834,10 @@ mod tests {
             ..Flags::default()
         };
         let file = parse_config("owner = my-user\nrepo = someone/tool\n").unwrap();
-        let resolved = resolve(&flags, Some(file), &["storytold".into()], "development");
+        let resolved = resolve(&flags, Some(file), &["storytold".into()]);
         assert!(resolved.owners.is_empty());
         assert_eq!(resolved.pinned[0].id(), "someone/tool");
-        assert_eq!(resolved.title, "development");
+        assert_eq!(resolved.title, "DevAssist");
     }
 
     #[test]
@@ -855,7 +850,7 @@ mod tests {
             ..Flags::default()
         };
         let file = parse_config("owner = file-user\nprotocol = ssh\ntitle = File\n").unwrap();
-        let resolved = resolve(&flags, Some(file), &["storytold".into()], "development");
+        let resolved = resolve(&flags, Some(file), &["storytold".into()]);
         assert_eq!(resolved.owners, vec!["cli".to_string()]);
         assert_eq!(resolved.protocol, Protocol::Https);
         assert_eq!(resolved.title, "Desk");
@@ -864,9 +859,9 @@ mod tests {
     #[test]
     fn repo_flag_keeps_the_accounts_found_in_the_folder() {
         let flags = flags_from(&["--repo", "https://github.com/other/tool"]);
-        let resolved = resolve(&flags, None, &["AsP3X".into()], "development");
+        let resolved = resolve(&flags, None, &["AsP3X".into()]);
         assert_eq!(resolved.owners, vec!["AsP3X".to_string()]);
-        assert_eq!(resolved.title, "development");
+        assert_eq!(resolved.title, "DevAssist");
         assert_eq!(resolved.pinned[0].id(), "other/tool");
     }
 
@@ -1000,12 +995,7 @@ mod tests {
             collapsed: Vec::new(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
-        let resolved = resolve(
-            &Flags::default(),
-            Some(parsed),
-            &["storytold".into()],
-            "development",
-        );
+        let resolved = resolve(&Flags::default(), Some(parsed), &["storytold".into()]);
         assert!(resolved.owners.is_empty());
         assert!(resolved.custom_title.is_none());
         assert!(parse_config("owners = none\nowner = ada\n").is_err());

@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{Action, App, Mode, RemoteState, Row, group_key};
+use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, group_key};
 use crate::gitops::LocalRepo;
 use crate::job::{ItemState, clock, split_progress};
 use crate::pathprompt::Purpose;
@@ -49,6 +49,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::ConfirmRemove { .. } => draw_confirm(frame, app, area),
         Mode::Path => draw_path(frame, app, area),
         Mode::Group => draw_group(frame, app, area),
+        Mode::Menu => draw_menu(frame, app, area),
         Mode::Help => draw_help(frame, app, area),
         Mode::Settings => draw_settings(frame, app, area),
         Mode::Progress => draw_progress(frame, app, area),
@@ -170,7 +171,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled(
             fit(
                 &format!(
-                    "  {} selected · u update · m group · d remove · o open · ctrl-a all · esc clears",
+                    "  {} selected · enter actions · u update · m group · d remove · ctrl-a all · esc clears",
                     app.marked.len()
                 ),
                 width,
@@ -179,7 +180,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ))
     } else {
         let mut hint =
-            "  arrows move · space selects · m group · / filter · s sort · o open · i import · c settings · ? help"
+            "  arrows move · enter actions · space selects · m group · / filter · s sort · ? help"
                 .to_string();
         if app.sort == crate::app::SortMode::NeedsUpdate {
             hint.push_str(" · sorted by attention");
@@ -872,6 +873,115 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
     );
 }
 
+/// The actions for the chosen repositories, opened with Enter.
+fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(menu) = app.menu.as_ref() else {
+        return;
+    };
+    let many = menu.repos.len() > 1;
+    let picked = menu.selected;
+    let title = match menu.repos.as_slice() {
+        [one] => format!(" {one} "),
+        several => format!(" {} ", count_repos(several.len())),
+    };
+    let names = {
+        let shown = menu.repos[..menu.repos.len().min(4)].join(", ");
+        match menu.repos.len().saturating_sub(4) {
+            0 => shown,
+            rest => format!("{shown} and {rest} more"),
+        }
+    };
+    let rows = MenuItem::ALL.len() as u16;
+    let extra = u16::from(many) * 2;
+    let popup = centered(
+        screen,
+        46.min(screen.width.saturating_sub(2)),
+        (rows + extra + 5).min(screen.height.saturating_sub(2)),
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            fit_end(&title, popup.width.saturating_sub(4) as usize),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let width = inner.width as usize;
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut y = inner.y;
+    if many {
+        // Which repositories the menu is about.
+        frame.render_widget(
+            Paragraph::new(Span::styled(fit(&format!(" {names}"), width), dim)),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+        y += 2;
+    } else {
+        y += 1;
+    }
+    for (index, item) in MenuItem::ALL.into_iter().enumerate() {
+        if y + 1 >= inner.y + inner.height {
+            break;
+        }
+        let rect = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
+        let chosen = index == picked;
+        let hovered = app.mouse.is_some_and(|(mx, my)| contains(rect, mx, my));
+        let label = item.label(many);
+        let gap = width.saturating_sub(UnicodeWidthStr::width(label) + 6);
+        let line = format!(
+            "{} {label}{}{}  ",
+            if chosen { "▌" } else { " " },
+            " ".repeat(gap),
+            item.key()
+        );
+        let style = if chosen {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if hovered {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if item == MenuItem::Remove {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(fit(&line, width), style)), rect);
+        app.hits.rows.push((rect, format!("menu:{index}")));
+        y += 1;
+    }
+    let hint = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            fit(" ↑ ↓ choose · enter runs · esc closes", width),
+            dim,
+        )),
+        hint,
+    );
+}
+
 /// The dialog that moves repositories into a group, or renames a group.
 fn draw_group(frame: &mut Frame, app: &mut App, screen: Rect) {
     let Some(prompt) = app.group_prompt.as_ref() else {
@@ -1162,10 +1272,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     let roomy = inner.height >= 16;
     let label_width = 15;
     let value_width = width.saturating_sub(label_width + 1);
-    let folder_title = crate::config::default_title(
-        &crate::config::parse_owner_list(&form.accounts).unwrap_or_default(),
-        "",
-    );
+    let folder_title = crate::config::default_title();
 
     let mut lines: Vec<Line> = Vec::new();
     let mut field_rows: Vec<(u16, Field)> = Vec::new();
@@ -1894,8 +2001,8 @@ fn draw_help(frame: &mut Frame, app: &mut App, screen: Rect) {
 arrows, j k    move
 space          select several · ctrl-a selects all shown
 m              put the selection into a group · on a group: rename it
-enter, ← →     on a group: fold or unfold it
-enter, u       update the selection
+enter          actions for the selection · on a group: fold it
+u              update the selection
 U              update every repository
 a              add any GitHub repository, into a folder you choose
 i              import clones you already have, from any folder
@@ -2154,7 +2261,7 @@ mod tests {
             pinned: Vec::new(),
             protocol: crate::gitops::Protocol::Auto,
             doctor: false,
-            config_path: PathBuf::from("development").join("artcraft-repos.toml"),
+            config_path: PathBuf::from("development").join("devassist.toml"),
             first_run,
         })
     }
@@ -2242,7 +2349,7 @@ mod tests {
         assert!(screen.contains("▌●docs"));
         assert!(screen.contains("  portal"));
         assert!(screen.contains("3 installed · 2 selected"));
-        assert!(screen.contains("2 selected · u update · m group · d remove · o open"));
+        assert!(screen.contains("2 selected · enter actions · u update · m group · d remove"));
         assert!(screen.contains(" Update 2 u "));
         assert!(screen.contains(" Remove 2 d "));
 
@@ -2401,6 +2508,56 @@ mod tests {
     }
 
     #[test]
+    fn enter_shows_the_actions_for_the_selection() {
+        use crate::app::Menu;
+        let mut app = app(false);
+        app.installed = vec![
+            local("api", false),
+            local("docs", false),
+            local("web", false),
+        ];
+        app.selected = Some("docs".into());
+        app.menu = Some(Menu {
+            repos: vec!["docs".into()],
+            selected: 1,
+        });
+        app.mode = Mode::Menu;
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ docs "));
+        assert!(screen.contains("  Update "));
+        assert!(screen.contains("▌ Open the folder "));
+        for label in [
+            "Open on GitHub",
+            "Move to a group…",
+            "Copy the path",
+            "Remove…",
+        ] {
+            assert!(screen.contains(label), "{label} is missing");
+        }
+        assert!(screen.contains("enter runs"));
+        assert_eq!(
+            app.hits
+                .rows
+                .iter()
+                .filter(|(_, name)| name.starts_with("menu:"))
+                .count(),
+            MenuItem::ALL.len()
+        );
+
+        // Several repositories: the menu says which, and words change.
+        app.menu = Some(Menu {
+            repos: vec!["api".into(), "docs".into(), "web".into()],
+            selected: 0,
+        });
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ 3 repositories "));
+        assert!(screen.contains("api, docs, web"));
+        assert!(screen.contains("▌ Update "));
+        assert!(screen.contains("Open the folders"));
+        assert!(screen.contains("Copy the paths"));
+    }
+
+    #[test]
     fn queued_actions_show_under_the_list_and_on_the_dialog() {
         use crate::app::Queued;
         let mut app = app(false);
@@ -2431,7 +2588,7 @@ mod tests {
         assert!(screen.contains("AsP3X"));
         assert!(screen.contains("Not now"));
         assert!(!screen.contains("…│"), "a line is cut off");
-        assert!(screen.contains("artcraft-repos.toml"));
+        assert!(screen.contains("devassist.toml"));
         assert!(
             app.hits
                 .rows

@@ -1,5 +1,5 @@
 [package]
-name = "artcraft-repos"
+name = "devassist"
 version = "0.2.0"
 edition = "2024"
 description = "Mouse and keyboard manager for local GitHub repositories"

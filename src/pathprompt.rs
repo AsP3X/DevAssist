@@ -209,10 +209,8 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "artcraft-repos-prompt-{name}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("devassist-prompt-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root

@@ -1,6 +1,6 @@
-; Setup wizard for artcraft-repos. Built with Inno Setup 6.3 or newer:
+; Setup wizard for devassist. Built with Inno Setup 6.3 or newer:
 ;
-;   ISCC /DAppVersion=0.2.0 /DExePath=..\target\release\artcraft-repos.exe installer\artcraft-repos.iss
+;   ISCC /DAppVersion=0.2.0 /DExePath=..\target\release\devassist.exe installer\devassist.iss
 ;
 ; installer\build.ps1 does this with the version from Cargo.toml.
 ;
@@ -9,14 +9,14 @@
 ; desktop icon, and optionally puts the folder on PATH.
 ; The AppId must never change: it is how an update finds the old install.
 
-#define AppName "Artcraft Repos"
-#define AppExe "artcraft-repos.exe"
-#define Publisher "Artcraft"
+#define AppName "DevAssist"
+#define AppExe "devassist.exe"
+#define Publisher "DevAssist"
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
 #ifndef ExePath
-  #define ExePath "..\target\release\artcraft-repos.exe"
+  #define ExePath "..\target\release\devassist.exe"
 #endif
 
 [Setup]
@@ -32,7 +32,7 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\target\installer
-OutputBaseFilename=artcraft-repos-{#AppVersion}-setup
+OutputBaseFilename=devassist-{#AppVersion}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -44,7 +44,7 @@ UninstallDisplayIcon={app}\{#AppExe}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "addtopath"; Description: "Add to PATH, so artcraft-repos works in any terminal"
+Name: "addtopath"; Description: "Add to PATH, so devassist works in any terminal"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
 
 [Files]

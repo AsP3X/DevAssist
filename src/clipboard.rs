@@ -126,7 +126,7 @@ mod tests {
             Some(guard) => guard,
             None => return,
         };
-        let sample = "artcraft-repos ä 中";
+        let sample = "devassist ä 中";
         set_text(sample).unwrap();
         assert_eq!(read_text().as_deref(), Some(sample));
     }

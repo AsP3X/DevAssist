@@ -235,7 +235,7 @@ mod tests {
             &[],
             Protocol::Auto,
             None,
-            PathBuf::from("artcraft-repos.toml"),
+            PathBuf::from("devassist.toml"),
         )
     }
 
@@ -299,7 +299,7 @@ mod tests {
             &[],
             Protocol::Auto,
             None,
-            PathBuf::from("artcraft-repos.toml"),
+            PathBuf::from("devassist.toml"),
         );
         form.suggest_account("AsP3X");
         assert_eq!(form.accounts, "AsP3X");

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  MSI installer for artcraft-repos. Built with the WiX Toolset (v4 or v5):
+  MSI installer for devassist. Built with the WiX Toolset (v4 or v5):
 
-    wix build installer\artcraft-repos.wxs -arch x64 ^
-      -d Version=0.2.0 -d ExePath=target\release\artcraft-repos.exe ^
-      -o target\installer\artcraft-repos-0.2.0-x64.msi
+    wix build installer\devassist.wxs -arch x64 ^
+      -d Version=0.2.0 -d ExePath=target\release\devassist.exe ^
+      -o target\installer\devassist-0.2.0-x64.msi
 
   installer\build.ps1 does this with the version from Cargo.toml.
 
@@ -15,8 +15,8 @@
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
-      Name="Artcraft Repos"
-      Manufacturer="Artcraft"
+      Name="DevAssist"
+      Manufacturer="DevAssist"
       Version="$(var.Version)"
       UpgradeCode="F21E52B4-5D95-42C8-9E4A-C266FB78B010"
       Scope="perMachine"
@@ -24,7 +24,7 @@
       InstallerVersion="500">
 
     <SummaryInformation Description="Manager for local GitHub repositories" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Artcraft Repos is already installed." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of DevAssist is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- The app has no repair or change options: Programs and Features only
@@ -33,10 +33,10 @@
     <Property Id="ARPNOREPAIR" Value="1" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Artcraft Repos">
+      <Directory Id="INSTALLFOLDER" Name="DevAssist">
         <Component Id="MainExecutable" Guid="*">
-          <File Id="AppExe" Name="artcraft-repos.exe" Source="$(var.ExePath)" KeyPath="yes" />
-          <!-- So `artcraft-repos` works in any terminal. Removed on uninstall. -->
+          <File Id="AppExe" Name="devassist.exe" Source="$(var.ExePath)" KeyPath="yes" />
+          <!-- So `devassist` works in any terminal. Removed on uninstall. -->
           <Environment
               Id="PathEntry"
               Name="PATH"
@@ -53,12 +53,12 @@
       <Component Id="StartMenuShortcut" Guid="*">
         <Shortcut
             Id="AppShortcut"
-            Name="Artcraft Repos"
+            Name="DevAssist"
             Description="Manage local GitHub repositories"
-            Target="[INSTALLFOLDER]artcraft-repos.exe" />
+            Target="[INSTALLFOLDER]devassist.exe" />
         <RegistryValue
             Root="HKCU"
-            Key="Software\Artcraft Repos"
+            Key="Software\DevAssist"
             Name="StartMenuShortcut"
             Type="integer"
             Value="1"
@@ -66,7 +66,7 @@
       </Component>
     </StandardDirectory>
 
-    <Feature Id="Main" Title="Artcraft Repos" Level="1">
+    <Feature Id="Main" Title="DevAssist" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>

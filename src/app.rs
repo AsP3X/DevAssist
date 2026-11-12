@@ -56,6 +56,8 @@ pub enum Mode {
     Path,
     /// The dialog that asks for a group: where to move, or the new name.
     Group,
+    /// The actions for the chosen repositories, opened with Enter.
+    Menu,
     Help,
     Settings,
     Progress,
@@ -149,6 +151,61 @@ impl Row<'_> {
     }
 }
 
+/// One line of the actions menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuItem {
+    Update,
+    Open,
+    Github,
+    Group,
+    CopyPath,
+    Remove,
+}
+
+impl MenuItem {
+    pub const ALL: [MenuItem; 6] = [
+        MenuItem::Update,
+        MenuItem::Open,
+        MenuItem::Github,
+        MenuItem::Group,
+        MenuItem::CopyPath,
+        MenuItem::Remove,
+    ];
+
+    /// What the line says, for one repository or for several.
+    pub fn label(self, many: bool) -> &'static str {
+        match (self, many) {
+            (MenuItem::Update, _) => "Update",
+            (MenuItem::Open, false) => "Open the folder",
+            (MenuItem::Open, true) => "Open the folders",
+            (MenuItem::Github, _) => "Open on GitHub",
+            (MenuItem::Group, _) => "Move to a group…",
+            (MenuItem::CopyPath, false) => "Copy the path",
+            (MenuItem::CopyPath, true) => "Copy the paths",
+            (MenuItem::Remove, _) => "Remove…",
+        }
+    }
+
+    /// The key that runs it straight from the menu. Each is the key that
+    /// does the same in the list, where there is one.
+    pub fn key(self) -> char {
+        match self {
+            MenuItem::Update => 'u',
+            MenuItem::Open => 'o',
+            MenuItem::Github => 'g',
+            MenuItem::Group => 'm',
+            MenuItem::CopyPath => 'c',
+            MenuItem::Remove => 'd',
+        }
+    }
+}
+
+/// The actions menu: what it is about and which line is highlighted.
+pub struct Menu {
+    pub repos: Vec<String>,
+    pub selected: usize,
+}
+
 /// The dialog that moves repositories into a group or renames a group.
 pub struct GroupPrompt {
     /// The repositories to move, by row name. Empty for a rename.
@@ -212,6 +269,8 @@ pub struct App {
     pub collapsed: Vec<String>,
     /// The open group dialog.
     pub group_prompt: Option<GroupPrompt>,
+    /// The open actions menu.
+    pub menu: Option<Menu>,
     pub title: String,
     pub custom_title: Option<String>,
     pub config_path: PathBuf,
@@ -316,6 +375,7 @@ impl App {
             placement: settings.placement,
             collapsed: settings.collapsed,
             group_prompt: None,
+            menu: None,
             title: settings.title,
             custom_title: settings.custom_title,
             config_path: settings.config_path,
@@ -795,6 +855,7 @@ impl App {
             Mode::ConfirmRemove { .. } => self.on_confirm_key(key),
             Mode::Path => self.on_path_key(key),
             Mode::Group => self.on_group_key(key, ctrl),
+            Mode::Menu => self.on_menu_key(key),
             Mode::Add => self.on_add_key(key, ctrl),
             Mode::Filter => self.on_filter_key(key, ctrl),
             Mode::List => self.on_list_key(key, ctrl),
@@ -910,11 +971,128 @@ impl App {
             .collect()
     }
 
-    /// Enter in the list: folds or unfolds a group, updates a repository.
+    /// Enter in the list: folds or unfolds a group, and opens the actions
+    /// menu for a repository or for what is ticked.
     fn enter_row(&mut self) {
         match self.selected_group() {
             Some(group) if self.marked.is_empty() => self.toggle_group(&group),
-            _ => self.update_chosen(),
+            _ => self.open_menu(),
+        }
+    }
+
+    fn open_menu(&mut self) {
+        let repos = self.chosen();
+        if repos.is_empty() {
+            self.notice("Select a repository first.", true);
+            return;
+        }
+        self.menu = Some(Menu { repos, selected: 0 });
+        self.mode = Mode::Menu;
+    }
+
+    fn close_menu(&mut self) {
+        self.menu = None;
+        self.mode = Mode::List;
+    }
+
+    fn on_menu_key(&mut self, key: KeyEvent) {
+        let Some(menu) = self.menu.as_mut() else {
+            self.mode = Mode::List;
+            return;
+        };
+        let last = MenuItem::ALL.len() - 1;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.close_menu(),
+            KeyCode::Up | KeyCode::Char('k') => menu.selected = menu.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => menu.selected = (menu.selected + 1).min(last),
+            KeyCode::Home => menu.selected = 0,
+            KeyCode::End => menu.selected = last,
+            KeyCode::Enter => {
+                let item = MenuItem::ALL[menu.selected.min(last)];
+                self.run_menu(item);
+            }
+            KeyCode::Char(ch) => {
+                let wanted = ch.to_ascii_lowercase();
+                if let Some(item) = MenuItem::ALL.into_iter().find(|item| item.key() == wanted) {
+                    self.run_menu(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Closes the menu and does what the line says, to the repositories
+    /// that are ticked or highlighted.
+    fn run_menu(&mut self, item: MenuItem) {
+        self.close_menu();
+        match item {
+            MenuItem::Update => self.update_chosen(),
+            MenuItem::Open => self.open_selected(),
+            MenuItem::Github => self.open_on_github(),
+            MenuItem::Group => self.open_group_prompt(),
+            MenuItem::CopyPath => self.copy_paths(),
+            MenuItem::Remove => self.begin_remove(),
+        }
+    }
+
+    /// The chosen repositories that still are on the list.
+    fn chosen_repos(&self) -> Vec<&LocalRepo> {
+        let names = self.chosen();
+        self.installed
+            .iter()
+            .filter(|repo| names.contains(&repo.folder))
+            .collect()
+    }
+
+    fn open_on_github(&mut self) {
+        let pages: Vec<String> = self
+            .chosen_repos()
+            .into_iter()
+            .filter(|repo| !repo.owner.is_empty())
+            .map(|repo| format!("https://github.com/{}/{}", repo.owner, repo.repo))
+            .collect();
+        if pages.is_empty() {
+            self.notice("There is no GitHub page for this.", true);
+            return;
+        }
+        if pages.len() > OPEN_LIMIT {
+            self.notice(
+                format!(
+                    "{} pages are too many to open at once. Select {OPEN_LIMIT} or fewer.",
+                    pages.len()
+                ),
+                true,
+            );
+            return;
+        }
+        let failed = pages
+            .iter()
+            .filter_map(|page| gitops::open_url(page).err())
+            .next_back();
+        match (failed, pages.as_slice()) {
+            (Some(err), _) => self.notice(err, true),
+            (None, [page]) => self.notice(format!("Opened {page}."), false),
+            (None, _) => self.notice(format!("Opened {} pages on GitHub.", pages.len()), false),
+        }
+    }
+
+    /// Puts the paths of the chosen repositories on the clipboard, one a line.
+    fn copy_paths(&mut self) {
+        let paths: Vec<String> = self
+            .chosen_repos()
+            .into_iter()
+            .map(|repo| repo.path.display().to_string())
+            .collect();
+        if paths.is_empty() {
+            self.notice("Select a repository first.", true);
+            return;
+        }
+        match crate::clipboard::set_text(&paths.join("\n")) {
+            Err(err) => self.notice(err, true),
+            Ok(()) => match paths.as_slice() {
+                [path] => self.notice(format!("Copied {path}."), false),
+                many => self.notice(format!("Copied {} paths.", many.len()), false),
+            },
         }
     }
 
@@ -1166,7 +1344,7 @@ impl App {
                 self.list_scroll = 0;
                 self.snap_visible_selection();
             }
-            KeyCode::Enter => self.update_one(),
+            KeyCode::Enter => self.enter_row(),
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
             KeyCode::PageUp => self.move_by(-10),
@@ -1571,7 +1749,15 @@ impl App {
                 && now.duration_since(*at) < Duration::from_millis(400)
         });
         self.last_click = Some((name.clone(), now));
-        if self.mode == Mode::Progress {
+        if self.mode == Mode::Menu {
+            if let Some(item) = name
+                .strip_prefix("menu:")
+                .and_then(|index| index.parse::<usize>().ok())
+                .and_then(|index| MenuItem::ALL.get(index).copied())
+            {
+                self.run_menu(item);
+            }
+        } else if self.mode == Mode::Progress {
             if let Some(job) = self.job.as_mut()
                 && let Some(index) = name
                     .strip_prefix("job:")
@@ -1616,6 +1802,7 @@ impl App {
             Action::Quit => self.quit(),
             Action::Confirm if self.mode == Mode::Path => self.accept_path(),
             Action::Confirm if self.mode == Mode::Group => self.accept_group(),
+            Action::Cancel if self.mode == Mode::Menu => self.close_menu(),
             Action::Cancel if self.mode == Mode::Group => self.close_group(),
             Action::Confirm => self.confirm_remove(),
             Action::Forget => self.forget_chosen(),
@@ -1888,10 +2075,7 @@ impl App {
         self.owners_explicit = true;
         self.pinned = saved.pinned;
         self.protocol = saved.protocol;
-        self.title = saved
-            .title
-            .clone()
-            .unwrap_or_else(|| config::default_title(&self.owners, ""));
+        self.title = saved.title.clone().unwrap_or_else(config::default_title);
         self.custom_title = saved.title;
         self.notice(format!("Settings saved to {path}."), false);
         self.reload_github_only();
@@ -2896,7 +3080,7 @@ mod tests {
             checkouts: Vec::new(),
             placement: Vec::new(),
             collapsed: Vec::new(),
-            clone_dir: std::env::temp_dir().join("artcraft-repos-clones"),
+            clone_dir: std::env::temp_dir().join("devassist-clones"),
             owners_explicit: true,
             unsaved: false,
             title: "Test".into(),
@@ -2906,7 +3090,7 @@ mod tests {
             protocol: gitops::Protocol::Https,
             doctor: false,
             config_path: std::env::temp_dir().join(format!(
-                "artcraft-repos-test-{}-{:?}.toml",
+                "devassist-test-{}-{:?}.toml",
                 std::process::id(),
                 thread::current().id()
             )),
@@ -2928,7 +3112,7 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         let root =
-            std::env::temp_dir().join(format!("artcraft-repos-app-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("devassist-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -3325,7 +3509,7 @@ mod tests {
     #[test]
     fn saving_settings_writes_the_file_and_applies_them() {
         let path = std::env::temp_dir().join(format!(
-            "artcraft-repos-test-{}-{:?}.toml",
+            "devassist-test-{}-{:?}.toml",
             std::process::id(),
             thread::current().id()
         ));
@@ -3779,6 +3963,90 @@ mod tests {
         assert_eq!(clean_group_name("   "), Ok(String::new()));
         assert!(clean_group_name(&"x".repeat(GROUP_NAME_LIMIT + 1)).is_err());
         assert!(clean_group_name("group::x").is_err());
+    }
+
+    #[test]
+    fn enter_opens_the_actions_menu_for_the_selection() {
+        let mut app = grouped_app();
+        app.selected = Some("docs".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Menu);
+        assert_eq!(app.menu.as_ref().unwrap().repos, ["docs"]);
+        assert!(!app.busy, "enter alone starts nothing");
+
+        // Esc closes it and nothing happened.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert!(app.menu.is_none());
+        assert!(app.queue.is_empty());
+
+        // With several ticked it is about all of them.
+        app.selected = Some("api".into());
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.menu.as_ref().unwrap().repos, ["api", "docs"]);
+
+        // The arrows move, and stop at the ends.
+        press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.menu.as_ref().unwrap().selected, 0);
+        for _ in 0..20 {
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        }
+        assert_eq!(app.menu.as_ref().unwrap().selected, MenuItem::ALL.len() - 1);
+        assert_eq!(MenuItem::ALL[MenuItem::ALL.len() - 1], MenuItem::Remove);
+
+        // Enter on the last line asks before removing, for both.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.menu.is_none());
+        assert!(
+            app.mode
+                == Mode::ConfirmRemove {
+                    folders: vec!["api".into(), "docs".into()]
+                }
+        );
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // A letter runs its line at once: m opens the group dialog.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(app.mode == Mode::Group);
+        assert_eq!(app.group_prompt.as_ref().unwrap().repos, ["api", "docs"]);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // Update from the menu goes the usual way: here it queues.
+        app.busy = true;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert_eq!(labels(&app), ["update 2 repositories"]);
+        app.drop_queue();
+        app.busy = false;
+
+        // A click on a line runs it too.
+        app.selected = Some("web".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.click_row("menu:5".into());
+        assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
+    }
+
+    #[test]
+    fn enter_on_a_group_still_folds_it_and_every_menu_key_is_its_own() {
+        let mut app = grouped_app();
+        app.placement = vec![(PathBuf::from("/srv/code/api"), "Work".into())];
+        app.assign_groups();
+        app.selected = Some("group::Work".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert_eq!(app.collapsed, ["Work"]);
+
+        let mut keys: Vec<char> = MenuItem::ALL.iter().map(|item| item.key()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), MenuItem::ALL.len());
+        // None of them is a key that moves or closes the menu.
+        assert!(!keys.iter().any(|key| "jkq".contains(*key)));
+        let _ = std::fs::remove_file(&app.config_path);
     }
 
     #[test]
