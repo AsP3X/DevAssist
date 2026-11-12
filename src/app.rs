@@ -13,6 +13,7 @@ use crate::atoms::sys::process;
 use crate::atoms::task::job::{Job, JobEvent};
 use crate::atoms::task::worker::Worker;
 use crate::atoms::ui::hits::Hits;
+use crate::atoms::ui::input::{self, Alt};
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
@@ -891,11 +892,11 @@ impl App {
             Mode::Progress => self.on_progress_key(key),
             Mode::ConfirmRemove { .. } => self.on_confirm_key(key),
             Mode::Path => self.on_path_key(key),
-            Mode::Group => self.on_group_key(key, ctrl),
+            Mode::Group => self.on_group_key(key),
             Mode::Menu => self.on_menu_key(key),
             Mode::Update => self.on_update_key(key),
             Mode::Add => self.on_add_key(key, ctrl),
-            Mode::Filter => self.on_filter_key(key, ctrl),
+            Mode::Filter => self.on_filter_key(key),
             Mode::List => self.on_list_key(key, ctrl),
         }
     }
@@ -1279,7 +1280,7 @@ impl App {
         self.mode = Mode::Group;
     }
 
-    fn on_group_key(&mut self, key: KeyEvent, ctrl: bool) {
+    fn on_group_key(&mut self, key: KeyEvent) {
         let groups = self.groups();
         let Some(prompt) = self.group_prompt.as_mut() else {
             self.mode = Mode::List;
@@ -1303,19 +1304,11 @@ impl App {
                 prompt.input = groups[next].clone();
                 prompt.error = None;
             }
-            KeyCode::Backspace => {
-                prompt.input.pop();
-                prompt.error = None;
+            _ => {
+                if input::edit(&mut prompt.input, key, Alt::Types) {
+                    prompt.error = None;
+                }
             }
-            KeyCode::Char('u') | KeyCode::Char('U') if ctrl => {
-                prompt.input.clear();
-                prompt.error = None;
-            }
-            KeyCode::Char(ch) if !ctrl => {
-                prompt.input.push(ch);
-                prompt.error = None;
-            }
-            _ => {}
         }
     }
 
@@ -1432,27 +1425,12 @@ impl App {
             .retain(|marked| installed.iter().any(|repo| repo.folder == *marked));
     }
 
-    fn on_filter_key(&mut self, key: KeyEvent, ctrl: bool) {
+    fn on_filter_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::List;
                 self.list_filter.clear();
                 self.list_scroll = 0;
-            }
-            KeyCode::Backspace => {
-                self.list_filter.pop();
-                self.list_scroll = 0;
-                self.snap_visible_selection();
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.list_filter.clear();
-                self.list_scroll = 0;
-                self.snap_visible_selection();
-            }
-            KeyCode::Char('w') if ctrl => {
-                delete_word(&mut self.list_filter);
-                self.list_scroll = 0;
-                self.snap_visible_selection();
             }
             KeyCode::Enter => self.enter_row(),
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
@@ -1461,30 +1439,18 @@ impl App {
             KeyCode::PageDown => self.move_by(10),
             KeyCode::Home => self.move_to_end(true),
             KeyCode::End => self.move_to_end(false),
-            KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                self.list_filter.push(ch);
-                self.list_scroll = 0;
-                self.snap_visible_selection();
+            _ => {
+                if input::edit(&mut self.list_filter, key, Alt::Ignored) {
+                    self.list_scroll = 0;
+                    self.snap_visible_selection();
+                }
             }
-            _ => {}
         }
     }
 
     fn on_add_key(&mut self, key: KeyEvent, ctrl: bool) {
         match key.code {
             KeyCode::Esc => self.mode = Mode::List,
-            KeyCode::Backspace => {
-                self.add_filter.pop();
-                self.note_add_filter_changed();
-            }
-            KeyCode::Char('u') if ctrl => {
-                self.add_filter.clear();
-                self.note_add_filter_changed();
-            }
-            KeyCode::Char('w') if ctrl => {
-                delete_word(&mut self.add_filter);
-                self.note_add_filter_changed();
-            }
             KeyCode::Enter => self.clone_selected(),
             KeyCode::Tab => self.list_typed_account(),
             KeyCode::Char(' ') if !ctrl => self.toggle_mark(),
@@ -1494,11 +1460,11 @@ impl App {
             KeyCode::PageDown => self.move_by(10),
             KeyCode::Home => self.move_to_end(true),
             KeyCode::End => self.move_to_end(false),
-            KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                self.add_filter.push(ch);
-                self.note_add_filter_changed();
+            _ => {
+                if input::edit(&mut self.add_filter, key, Alt::Ignored) {
+                    self.note_add_filter_changed();
+                }
             }
-            _ => {}
         }
     }
 
@@ -3193,30 +3159,6 @@ fn count_label(count: usize) -> String {
     }
 }
 
-pub(crate) fn delete_word(text: &mut String) {
-    while text
-        .chars()
-        .next_back()
-        .is_some_and(|ch| ch.is_whitespace())
-    {
-        text.pop();
-    }
-    while text
-        .chars()
-        .next_back()
-        .is_some_and(|ch| !ch.is_whitespace())
-    {
-        text.pop();
-    }
-    while text
-        .chars()
-        .next_back()
-        .is_some_and(|ch| ch.is_whitespace())
-    {
-        text.pop();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4307,12 +4249,5 @@ mod tests {
         let visible = app.visible_installed();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].repo, "tool");
-    }
-
-    #[test]
-    fn delete_word_removes_the_last_word() {
-        let mut text = "hello world".to_string();
-        delete_word(&mut text);
-        assert_eq!(text, "hello");
     }
 }

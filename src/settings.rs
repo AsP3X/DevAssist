@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::atoms::ui::input::{self, Alt};
 use crate::config::{self, Saved};
 use crate::github::RepoSpec;
 use crate::gitops::Protocol;
@@ -110,27 +111,34 @@ impl Form {
             KeyCode::BackTab | KeyCode::Up => self.step(-1),
             KeyCode::Left if self.focus == Field::Protocol => self.cycle_protocol(-1),
             KeyCode::Right if self.focus == Field::Protocol => self.cycle_protocol(1),
-            KeyCode::Backspace => self.edit(|text| {
-                text.pop();
-            }),
-            KeyCode::Char('u') if ctrl => self.edit(String::clear),
-            KeyCode::Char('w') if ctrl => self.edit(crate::app::delete_word),
-            KeyCode::Char(ch) if !ctrl && !alt => {
-                if self.focus == Field::Protocol {
-                    match ch.to_ascii_lowercase() {
-                        ' ' => self.cycle_protocol(1),
-                        'a' => self.protocol = Protocol::Auto,
-                        'h' => self.protocol = Protocol::Https,
-                        's' => self.protocol = Protocol::Ssh,
-                        _ => {}
-                    }
-                } else {
-                    self.edit(|text| text.push(ch));
+            KeyCode::Char(ch) if !ctrl && !alt && self.focus == Field::Protocol => {
+                match ch.to_ascii_lowercase() {
+                    ' ' => self.cycle_protocol(1),
+                    'a' => self.protocol = Protocol::Auto,
+                    'h' => self.protocol = Protocol::Https,
+                    's' => self.protocol = Protocol::Ssh,
+                    _ => {}
                 }
             }
-            _ => {}
+            _ => self.type_key(key),
         }
         Outcome::Stay
+    }
+
+    /// An editing key for the field that has the focus.
+    fn type_key(&mut self, key: KeyEvent) {
+        let text = match self.focus {
+            Field::Accounts => &mut self.accounts,
+            Field::Pinned => &mut self.pinned,
+            Field::Title => &mut self.title,
+            Field::Protocol => return,
+        };
+        if input::edit(text, key, Alt::Ignored) {
+            if self.focus == Field::Accounts {
+                self.accounts_edited = true;
+            }
+            self.error = None;
+        }
     }
 
     pub fn paste(&mut self, text: &str) {

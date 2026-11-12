@@ -6,6 +6,7 @@ use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::atoms::sys::paths;
+use crate::atoms::ui::input::{self, Alt};
 use crate::github::RemoteRepo;
 
 /// How many completion candidates the dialog keeps to show.
@@ -55,13 +56,13 @@ impl PathPrompt {
                 }
             },
             KeyCode::Tab => self.complete(),
-            KeyCode::Backspace => self.edit(|input| {
-                input.pop();
-            }),
-            KeyCode::Char('u') | KeyCode::Char('U') if ctrl => self.edit(String::clear),
             KeyCode::Char('w') | KeyCode::Char('W') if ctrl => self.edit(delete_segment),
-            KeyCode::Char(ch) if !ctrl => self.edit(|input| input.push(ch)),
-            _ => {}
+            _ => {
+                if input::edit(&mut self.input, key, Alt::Types) {
+                    self.error = None;
+                    self.matches.clear();
+                }
+            }
         }
         Outcome::Stay
     }
