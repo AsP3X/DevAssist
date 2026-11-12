@@ -196,6 +196,81 @@ pub fn parse_repo_spec(input: &str) -> Option<RepoSpec> {
     spec(owner.to_string(), name.to_string(), false)
 }
 
+/// An account named in the Add search box, with the text typed after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountQuery {
+    pub owner: String,
+    pub rest: String,
+}
+
+/// Reads `owner/`, `owner/part`, `@owner`, or a GitHub link to an account
+/// or one of its repositories.
+pub fn parse_account_query(input: &str) -> Option<AccountQuery> {
+    let input = input.trim().trim_matches('"').trim();
+    if input.is_empty() {
+        return None;
+    }
+    let lower = input.to_ascii_lowercase();
+    let (owner, rest, url) =
+        if lower.starts_with("git@github.com:") || lower.starts_with("ssh://git@github.com/") {
+            let (owner, name) = gitops::github_owner_repo(input)?;
+            (owner, name, true)
+        } else if lower.contains("github.com") {
+            let mut parts = web_path(input)?
+                .split(['?', '#'])
+                .next()
+                .unwrap_or_default()
+                .split('/')
+                .map(str::trim)
+                .filter(|part| !part.is_empty());
+            let first = parts.next()?;
+            if first.eq_ignore_ascii_case("orgs") {
+                (parts.next()?.to_string(), String::new(), true)
+            } else {
+                let name = parts.next().unwrap_or_default();
+                (first.to_string(), name.to_string(), true)
+            }
+        } else if let Some(owner) = input.strip_prefix('@') {
+            (owner.to_string(), String::new(), false)
+        } else {
+            let (owner, rest) = input.split_once('/')?;
+            let rest = rest.trim_end_matches('/');
+            if rest.contains('/') {
+                return None;
+            }
+            (owner.trim().to_string(), rest.trim().to_string(), false)
+        };
+    let rest = rest.strip_suffix(".git").unwrap_or(&rest).to_string();
+    if !valid_account(&owner) {
+        return None;
+    }
+    if url
+        && RESERVED_OWNERS
+            .iter()
+            .any(|item| owner.eq_ignore_ascii_case(item))
+    {
+        return None;
+    }
+    if !rest
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return None;
+    }
+    Some(AccountQuery { owner, rest })
+}
+
+pub fn valid_account(name: &str) -> bool {
+    valid_segment(name)
+}
+
+/// Every repository of one user or organization.
+pub fn fetch_account(owner: &str) -> Result<Vec<RemoteRepo>, String> {
+    let token = token();
+    let authed = token.as_deref().and_then(authed_login);
+    fetch_owner(owner, token.as_deref(), authed.as_deref())
+}
+
 pub fn repos_url(owner: &str, kind: OwnerKind) -> String {
     match kind {
         OwnerKind::Organization => format!(
@@ -414,6 +489,10 @@ fn parse_one(body: &str) -> Result<RemoteRepo, String> {
     Ok(repo.into())
 }
 
+pub fn current_login() -> Option<String> {
+    token().and_then(|token| authed_login(&token))
+}
+
 fn authed_login(token: &str) -> Option<String> {
     let response = gh_get("https://api.github.com/user", Some(token)).ok()?;
     let account: ApiAccount = serde_json::from_str(&response.body).ok()?;
@@ -591,6 +670,40 @@ mod tests {
         assert!(parse_repo_spec("https://github.com/settings/profile").is_none());
         assert!(parse_repo_spec("https://gitlab.com/storytold/photocraft").is_none());
         assert!(parse_repo_spec("https://github.com/orgs/storytold/repositories").is_none());
+    }
+
+    #[test]
+    fn reads_an_account_from_shorthand_and_links() {
+        let query = |text: &str| parse_account_query(text).map(|q| (q.owner, q.rest));
+        let account = |owner: &str, rest: &str| Some((owner.to_string(), rest.to_string()));
+        assert_eq!(
+            query("https://github.com/UCS-Care-Group"),
+            account("UCS-Care-Group", "")
+        );
+        assert_eq!(
+            query("github.com/UCS-Care-Group/"),
+            account("UCS-Care-Group", "")
+        );
+        assert_eq!(
+            query("https://github.com/orgs/storytold/repositories"),
+            account("storytold", "")
+        );
+        assert_eq!(
+            query("https://github.com/storytold/photocraft/tree/main"),
+            account("storytold", "photocraft")
+        );
+        assert_eq!(
+            query("git@github.com:storytold/photocraft.git"),
+            account("storytold", "photocraft")
+        );
+        assert_eq!(query("storytold/"), account("storytold", ""));
+        assert_eq!(query("storytold/pho"), account("storytold", "pho"));
+        assert_eq!(query("@storytold"), account("storytold", ""));
+        assert_eq!(query("photocraft"), None);
+        assert_eq!(query("https://github.com/settings/profile"), None);
+        assert_eq!(query("https://gitlab.com/storytold"), None);
+        assert_eq!(query("a/b/c"), None);
+        assert_eq!(query("bad name/"), None);
     }
 
     #[test]

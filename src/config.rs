@@ -6,26 +6,63 @@ use crate::gitops::{self, Protocol};
 
 const DEFAULT_OWNER: &str = "storytold";
 
+/// The settings file's name, wherever it lives.
+const FILE_NAME: &str = "artcraft-repos.toml";
+
 #[derive(Clone, Debug)]
 pub struct Settings {
-    pub root: PathBuf,
     pub title: String,
+    /// The title the user chose. None means the title follows the accounts.
+    pub custom_title: Option<String>,
     pub owners: Vec<String>,
+    /// The accounts were chosen, in the file or in the settings dialog.
+    /// Otherwise they follow the checkouts and are not written down.
+    pub owners_explicit: bool,
     pub pinned: Vec<RepoSpec>,
     pub protocol: Protocol,
     pub doctor: bool,
+    /// Every checkout the overview manages, wherever it is on disk.
+    pub checkouts: Vec<PathBuf>,
+    /// The folder the Add dialog offers for a new clone.
+    pub clone_dir: PathBuf,
+    /// Which group of the overview each checkout is in. Groups only sort
+    /// the list: they are not folders on disk.
+    pub placement: Vec<(PathBuf, String)>,
+    /// Groups that are folded shut.
+    pub collapsed: Vec<String>,
+    /// Where the settings are saved.
+    pub config_path: PathBuf,
+    /// No settings file exists yet and no flag chose the accounts.
+    pub first_run: bool,
+    /// The checkouts changed at startup and are not in the file yet.
+    pub unsaved: bool,
+}
+
+/// What is written to the settings file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub title: Option<String>,
+    pub owners: Vec<String>,
+    /// False leaves the accounts out, so they keep following the checkouts.
+    pub owners_set: bool,
+    pub pinned: Vec<RepoSpec>,
+    pub protocol: Protocol,
+    pub clone_dir: Option<PathBuf>,
+    pub checkouts: Vec<PathBuf>,
+    pub placement: Vec<(PathBuf, String)>,
+    pub collapsed: Vec<String>,
 }
 
 pub enum Startup {
     Help,
-    Run(Settings),
+    Run(Box<Settings>),
 }
 
 #[derive(Debug, Default)]
 struct Flags {
     help: bool,
     doctor: bool,
-    root: Option<PathBuf>,
+    import: Vec<PathBuf>,
     config: Option<PathBuf>,
     no_owner: bool,
     owners: Vec<String>,
@@ -42,10 +79,26 @@ struct ParsedConfig {
     owners_explicit: bool,
     pinned: Vec<RepoSpec>,
     protocol: Option<Protocol>,
+    clone_dir: Option<PathBuf>,
+    checkouts: Vec<PathBuf>,
+    placement: Vec<(PathBuf, String)>,
+    collapsed: Vec<String>,
+}
+
+/// The settings file as found at startup.
+struct Loaded {
+    file: Option<ParsedConfig>,
+    /// Where the settings are saved from now on.
+    path: PathBuf,
+    /// The folder older versions managed. Its clones come along once.
+    legacy_root: Option<PathBuf>,
+    /// The settings came from an older location.
+    migrated: bool,
 }
 
 struct Resolved {
     title: String,
+    custom_title: Option<String>,
     owners: Vec<String>,
     pinned: Vec<RepoSpec>,
     protocol: Protocol,
@@ -56,48 +109,105 @@ pub fn startup() -> Result<Startup, String> {
     if flags.help {
         return Ok(Startup::Help);
     }
-    let root = flags.root.clone().unwrap_or_else(gitops::default_root);
-    if !root.is_dir() {
-        return Err(format!("{} is not a folder", root.display()));
+    for folder in &flags.import {
+        if !folder.is_dir() {
+            return Err(format!("{} is not a folder", folder.display()));
+        }
     }
-    let file = load_file(&flags, &root)?;
-    let resolved = resolve(&flags, file);
-    Ok(Startup::Run(Settings {
-        root,
+    let loaded = load_file(&flags)?;
+    let first_run = loaded.file.is_none() && !flags.owners_explicit && !flags.no_owner;
+    let mut checkouts = loaded
+        .file
+        .as_ref()
+        .map(|file| file.checkouts.clone())
+        .unwrap_or_default();
+    let known = checkouts.len();
+    let mut folders: Vec<PathBuf> = flags
+        .import
+        .iter()
+        .map(|folder| std::path::absolute(folder).unwrap_or_else(|_| folder.clone()))
+        .collect();
+    folders.extend(loaded.legacy_root.clone());
+    for folder in &folders {
+        for repo in gitops::scan(folder) {
+            push_path(&mut checkouts, repo.path);
+        }
+    }
+    let clone_dir = loaded
+        .file
+        .as_ref()
+        .and_then(|file| file.clone_dir.clone())
+        .or_else(|| flags.import.first().and(folders.first().cloned()))
+        .or_else(|| {
+            checkouts
+                .first()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+        })
+        .or_else(home_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let owners_explicit = loaded
+        .file
+        .as_ref()
+        .is_some_and(|file| file.owners_explicit);
+    let unsaved = checkouts.len() != known || loaded.migrated;
+    let (placement, collapsed) = loaded
+        .file
+        .as_ref()
+        .map(|file| (file.placement.clone(), file.collapsed.clone()))
+        .unwrap_or_default();
+    let discovered = discovered_owners(&checkouts);
+    let resolved = resolve(&flags, loaded.file, &discovered, "");
+    Ok(Startup::Run(Box::new(Settings {
         title: resolved.title,
+        custom_title: resolved.custom_title,
         owners: resolved.owners,
+        owners_explicit,
         pinned: resolved.pinned,
         protocol: resolved.protocol,
         doctor: flags.doctor,
-    }))
+        checkouts,
+        clone_dir,
+        placement,
+        collapsed,
+        config_path: loaded.path,
+        first_run,
+        unsaved,
+    })))
 }
 
 pub fn print_help() {
     println!(
         "\
 artcraft-repos
-  Add, update, and remove local GitHub clones in one folder.
+  Add, update, and remove local GitHub clones, wherever they are on disk.
 
 Usage
-  artcraft-repos [--root PATH] [--owner NAME]... [--repo OWNER/NAME]...
+  artcraft-repos [--owner NAME]... [--repo OWNER/NAME]... [--import PATH]...
   artcraft-repos --doctor
   artcraft-repos --help
 
+The app can be started from any folder. It keeps a list of the clones it
+manages in its settings file. Adding a repository asks where to put it.
+
 Options
-  --root PATH        Folder that holds the clones. Defaults to the current
-                     directory when it already contains GitHub clones.
+  --import PATH      Add every GitHub clone directly inside PATH to the
+                     list. --root is the same option.
   --owner NAME       GitHub user or organization to list. Repeat to track
-                     several. --org is the same option. Default: storytold.
+                     several. --org is the same option. Default: your signed-in
+                     account when the clones use several, otherwise the one
+                     account they already use.
   --no-owner         Do not list a user or organization. Add repositories by
                      owner/name from the Add screen instead.
   --repo OWNER/NAME  Pin one repository. A GitHub URL is also accepted.
-  --protocol MODE    auto, https, or ssh. auto follows the remotes already
-                     in the folder, otherwise https.
+  --protocol MODE    auto, https, or ssh. auto follows the remotes of the
+                     clones already listed, otherwise https.
   --title TEXT       Heading shown in the app.
-  --config PATH      Settings file. Without this flag the app reads
-                     ROOT/artcraft-repos.toml, then a file beside the
-                     executable.
-  --doctor           Print the folder and GitHub check, then exit.
+  --config PATH      Settings file. Default: artcraft-repos.toml in
+                     %APPDATA%\\artcraft-repos on Windows, in
+                     ~/.config/artcraft-repos elsewhere. A file an older
+                     version kept in the clone folder or beside the
+                     executable is taken over once, with that folder's clones.
+  --doctor           Print the settings and the GitHub check, then exit.
 
 Settings file
   title = My Tools
@@ -105,16 +215,31 @@ Settings file
   owner = my-org
   repo = someone/tool
   protocol = ssh
+  clone_dir = C:\\dev
+  checkout = C:\\dev\\tool
+  group = Client work
+  checkout = D:\\work\\client\\api
 
-  Lines starting with # are comments.
+  Checkouts after a group line are in that group. Groups only sort the
+  overview: nothing moves on disk.
+
+  owners = none lists no account. Lines starting with # are comments.
+  The app rewrites this file when the settings or the list change.
 
 Keys
-  a add      u update one     U update all      d remove
-  r refresh  s sort           o open folder     q quit
+  a add      u update         U update all      d remove or forget
+  i import   r refresh        s sort            o open folder
+  c settings l last update or clone             q quit
 
+Drag across text and release to copy it. Ctrl-C copies a selection,
+or quits when nothing is selected. Esc clears a selection.
 In Add, type owner/repo or paste a GitHub URL to clone any repository.
-Refresh fetches remotes. Update pulls with --ff-only.
-Esc cancels the git command in progress.
+Type owner/ or paste a link to an account to list all of its repositories.
+Space selects several repositories there. Enter asks for the folder.
+Import adds clones you already have, from any folder.
+Starting and Refresh fetch remotes. Update fast-forwards every branch
+and adds a local branch for each new remote one. It never merges.
+Esc also cancels the git command in progress.
 "
     );
 }
@@ -130,7 +255,9 @@ where
             "-h" | "--help" => flags.help = true,
             "--doctor" => flags.doctor = true,
             "--no-owner" => flags.no_owner = true,
-            "--root" => flags.root = Some(PathBuf::from(need(&mut args, "--root")?)),
+            "--import" | "--root" => flags
+                .import
+                .push(PathBuf::from(need(&mut args, "--import")?)),
             "--config" => flags.config = Some(PathBuf::from(need(&mut args, "--config")?)),
             "--title" => flags.title = Some(need(&mut args, "--title")?),
             "--protocol" => {
@@ -183,8 +310,67 @@ fn push_owner(flags: &mut Flags, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve(flags: &Flags, file: Option<ParsedConfig>) -> Resolved {
-    let mut owners = vec![DEFAULT_OWNER.to_string()];
+fn discovered_owners(checkouts: &[PathBuf]) -> Vec<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for repo in gitops::load(checkouts) {
+        if repo.owner.is_empty() {
+            continue;
+        }
+        if let Some((_, count)) = counts
+            .iter_mut()
+            .find(|(owner, _)| owner.eq_ignore_ascii_case(&repo.owner))
+        {
+            *count += 1;
+        } else {
+            counts.push((repo.owner, 1));
+        }
+    }
+    let login = if counts.len() > 1 {
+        github::current_login()
+    } else {
+        None
+    };
+    choose_accounts(&counts, login.as_deref())
+}
+
+/// One account is that account. Several accounts use the signed-in user,
+/// so a cloned dependency does not become a second catalog.
+fn choose_accounts(counts: &[(String, usize)], login: Option<&str>) -> Vec<String> {
+    if counts.len() <= 1 {
+        return counts.iter().map(|(owner, _)| owner.clone()).collect();
+    }
+    if let Some(login) = login {
+        if let Some((owner, _)) = counts
+            .iter()
+            .find(|(owner, _)| owner.eq_ignore_ascii_case(login))
+        {
+            return vec![owner.clone()];
+        }
+        return vec![login.to_string()];
+    }
+    let mut ranked = counts.to_vec();
+    ranked.sort_by(|left, right| {
+        right.1.cmp(&left.1).then_with(|| {
+            left.0
+                .to_ascii_lowercase()
+                .cmp(&right.0.to_ascii_lowercase())
+        })
+    });
+    let most = ranked[0].1;
+    if ranked.iter().filter(|(_, count)| *count == most).count() == 1 {
+        vec![ranked[0].0.clone()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn resolve(
+    flags: &Flags,
+    file: Option<ParsedConfig>,
+    discovered: &[String],
+    folder: &str,
+) -> Resolved {
+    let mut owners = discovered.to_vec();
     let mut pinned = Vec::new();
     let mut title = None;
     let mut protocol = Protocol::Auto;
@@ -213,47 +399,233 @@ fn resolve(flags: &Flags, file: Option<ParsedConfig>) -> Resolved {
     if let Some(value) = flags.protocol {
         protocol = value;
     }
-    let title = title.unwrap_or_else(|| default_title(&owners));
+    let custom_title = title.clone();
+    let title = title.unwrap_or_else(|| default_title(&owners, folder));
     Resolved {
         title,
+        custom_title,
         owners,
         pinned,
         protocol,
     }
 }
 
-fn default_title(owners: &[String]) -> String {
+pub fn default_title(owners: &[String], folder: &str) -> String {
+    if let [owner] = owners
+        && owner.eq_ignore_ascii_case(DEFAULT_OWNER)
+    {
+        return "Artcraft Repos".to_string();
+    }
+    if !folder.is_empty() {
+        return folder.to_string();
+    }
     match owners {
-        [owner] if owner.eq_ignore_ascii_case(DEFAULT_OWNER) => "Artcraft Repos".to_string(),
         [owner] => format!("{owner} repos"),
         _ => "GitHub Repos".to_string(),
     }
 }
 
-fn load_file(flags: &Flags, root: &Path) -> Result<Option<ParsedConfig>, String> {
-    let path = if let Some(path) = &flags.config {
-        if !path.is_file() {
-            return Err(format!("settings file {} was not found", path.display()));
-        }
-        path.clone()
-    } else {
-        let in_root = root.join("artcraft-repos.toml");
-        if in_root.is_file() {
-            in_root
-        } else if let Some(beside) = exe_dir()
-            .map(|dir| dir.join("artcraft-repos.toml"))
-            .filter(|path| path.is_file())
-        {
-            beside
+/// Finds the settings file. It lives in the user's own settings folder, so
+/// the app does not care where it is started from or where it is installed.
+fn load_file(flags: &Flags) -> Result<Loaded, String> {
+    if let Some(path) = &flags.config {
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+        let file = if path.is_file() {
+            Some(read_config(&path)?)
         } else {
-            return Ok(None);
+            None
+        };
+        return Ok(Loaded {
+            file,
+            path,
+            legacy_root: None,
+            migrated: false,
+        });
+    }
+    let path = user_config_path();
+    if path.is_file() {
+        return Ok(Loaded {
+            file: Some(read_config(&path)?),
+            path,
+            legacy_root: None,
+            migrated: false,
+        });
+    }
+    // Older versions managed one folder and kept the settings in it, or
+    // beside the executable. Take both over once.
+    let root = gitops::default_root();
+    let legacy = [
+        Some(root.join(FILE_NAME)),
+        exe_dir().map(|dir| dir.join(FILE_NAME)),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|file| file.is_file());
+    let file = match &legacy {
+        Some(file) => Some(read_config(file)?),
+        None => None,
+    };
+    Ok(Loaded {
+        migrated: file.is_some(),
+        file,
+        path,
+        legacy_root: Some(root),
+    })
+}
+
+fn read_config(path: &Path) -> Result<ParsedConfig, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|err| format!("could not read {}: {err}", path.display()))?;
+    parse_config(&text).map_err(|err| format!("{}: {err}", path.display()))
+}
+
+/// %APPDATA%\artcraft-repos on Windows, ~/.config/artcraft-repos elsewhere.
+fn user_config_path() -> PathBuf {
+    let base = if cfg!(windows) {
+        env_dir("APPDATA")
+    } else {
+        env_dir("XDG_CONFIG_HOME").or_else(|| home_dir().map(|home| home.join(".config")))
+    };
+    match base.or_else(home_dir) {
+        Some(base) => base.join("artcraft-repos").join(FILE_NAME),
+        None => exe_dir().unwrap_or_default().join(FILE_NAME),
+    }
+}
+
+fn env_dir(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+pub fn home_dir() -> Option<PathBuf> {
+    env_dir(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+}
+
+/// Windows does not tell `C:\Dev` from `c:\dev\`.
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    let plain = |path: &Path| {
+        let text = path.to_string_lossy().replace('\\', "/");
+        let text = text.trim_end_matches('/').to_string();
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
         }
     };
-    let text = fs::read_to_string(&path)
-        .map_err(|err| format!("could not read {}: {err}", path.display()))?;
-    parse_config(&text)
-        .map(Some)
-        .map_err(|err| format!("{}: {err}", path.display()))
+    plain(left) == plain(right)
+}
+
+/// Adds `path` unless it is listed already. True when it was added.
+pub fn push_path(list: &mut Vec<PathBuf>, path: PathBuf) -> bool {
+    if list.iter().any(|item| same_path(item, &path)) {
+        return false;
+    }
+    list.push(path);
+    true
+}
+
+pub fn save(path: &Path, saved: &Saved) -> Result<(), String> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
+    }
+    fs::write(path, render(saved))
+        .map_err(|err| format!("could not save {}: {err}", path.display()))
+}
+
+fn render(saved: &Saved) -> String {
+    let mut out =
+        String::from("# artcraft-repos settings. Edit this file, or press c in the app.\n");
+    if let Some(title) = &saved.title {
+        out.push_str(&format!("title = {title}\n"));
+    }
+    if saved.owners_set {
+        if saved.owners.is_empty() {
+            out.push_str("owners = none\n");
+        }
+        for owner in &saved.owners {
+            out.push_str(&format!("owner = {owner}\n"));
+        }
+    }
+    for spec in &saved.pinned {
+        out.push_str(&format!("repo = {}\n", spec.id()));
+    }
+    out.push_str(&format!("protocol = {}\n", saved.protocol));
+    if let Some(dir) = &saved.clone_dir {
+        out.push_str(&format!("clone_dir = {}\n", dir.display()));
+    }
+    // Checkouts without a group come first; each group follows as a
+    // `group =` line with its checkouts under it.
+    let group_of = |checkout: &Path| {
+        saved
+            .placement
+            .iter()
+            .find(|(path, _)| same_path(path, checkout))
+            .map(|(_, group)| group.as_str())
+            .filter(|group| !group.trim().is_empty())
+    };
+    let mut groups: Vec<&str> = Vec::new();
+    for checkout in &saved.checkouts {
+        match group_of(checkout) {
+            Some(group) if !groups.contains(&group) => groups.push(group),
+            Some(_) => {}
+            None => out.push_str(&format!("checkout = {}\n", checkout.display())),
+        }
+    }
+    groups.sort_by_key(|group| group.to_lowercase());
+    for group in groups {
+        out.push_str(&format!("group = {group}\n"));
+        for checkout in &saved.checkouts {
+            if group_of(checkout) == Some(group) {
+                out.push_str(&format!("checkout = {}\n", checkout.display()));
+            }
+        }
+    }
+    for group in &saved.collapsed {
+        out.push_str(&format!("collapsed = {group}\n"));
+    }
+    out
+}
+
+/// Accounts typed into the settings dialog, separated by commas or spaces.
+/// A link to an account or `@name` is accepted too.
+pub fn parse_owner_list(text: &str) -> Result<Vec<String>, String> {
+    let mut owners = Vec::new();
+    for part in split_list(text) {
+        let name = match github::parse_account_query(part) {
+            Some(query) if query.rest.is_empty() => query.owner,
+            Some(_) => {
+                return Err(format!(
+                    "{part} is a repository. Put it under Pinned repos."
+                ));
+            }
+            None if github::valid_account(part) => part.to_string(),
+            None => return Err(format!("{part} is not a GitHub account name.")),
+        };
+        push_unique(&mut owners, &name);
+    }
+    Ok(owners)
+}
+
+/// Repositories typed into the settings dialog as owner/name or links.
+pub fn parse_pinned_list(text: &str) -> Result<Vec<RepoSpec>, String> {
+    let mut pinned = Vec::new();
+    for part in split_list(text) {
+        let spec = github::parse_repo_spec(part)
+            .ok_or_else(|| format!("{part} should look like owner/name."))?;
+        push_spec(&mut pinned, spec);
+    }
+    Ok(pinned)
+}
+
+fn split_list(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
 }
 
 fn exe_dir() -> Option<PathBuf> {
@@ -265,6 +637,9 @@ fn exe_dir() -> Option<PathBuf> {
 fn parse_config(text: &str) -> Result<ParsedConfig, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut parsed = ParsedConfig::default();
+    let mut no_owners = false;
+    // The `group =` line the following checkouts belong to.
+    let mut group: Option<String> = None;
     for (index, raw) in text.lines().enumerate() {
         let line_no = index + 1;
         let trimmed = raw.trim();
@@ -295,6 +670,15 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                 push_unique(&mut parsed.owners, value);
                 parsed.owners_explicit = true;
             }
+            "owners" => {
+                if !value.eq_ignore_ascii_case("none") {
+                    return Err(format!(
+                        "line {line_no}: owners only accepts none. Use owner = name for an account"
+                    ));
+                }
+                no_owners = true;
+                parsed.owners_explicit = true;
+            }
             "repo" => {
                 let spec = github::parse_repo_spec(value)
                     .ok_or_else(|| format!("line {line_no}: repo should look like owner/name"))?;
@@ -307,8 +691,24 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                 parsed.protocol =
                     Some(Protocol::parse(value).map_err(|err| format!("line {line_no}: {err}"))?);
             }
+            "clone_dir" => parsed.clone_dir = Some(PathBuf::from(value)),
+            "group" => group = Some(value.to_string()),
+            "checkout" => {
+                let path = PathBuf::from(value);
+                if let Some(group) = &group {
+                    parsed
+                        .placement
+                        .retain(|(known, _)| !same_path(known, &path));
+                    parsed.placement.push((path.clone(), group.clone()));
+                }
+                push_path(&mut parsed.checkouts, path);
+            }
+            "collapsed" => push_unique(&mut parsed.collapsed, value),
             other => return Err(format!("line {line_no}: unknown setting {other}")),
         }
+    }
+    if no_owners && !parsed.owners.is_empty() {
+        return Err("owners = none cannot be combined with owner lines".into());
     }
     Ok(parsed)
 }
@@ -351,12 +751,52 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_storytold_and_the_artcraft_title() {
-        let resolved = resolve(&Flags::default(), None);
-        assert_eq!(resolved.owners, vec!["storytold".to_string()]);
-        assert_eq!(resolved.title, "Artcraft Repos");
+    fn an_empty_folder_has_no_preset_account() {
+        let resolved = resolve(&Flags::default(), None, &[], "");
+        assert!(resolved.owners.is_empty());
+        assert_eq!(resolved.title, "GitHub Repos");
         assert_eq!(resolved.protocol, Protocol::Auto);
         assert!(resolved.pinned.is_empty());
+    }
+
+    #[test]
+    fn owners_come_from_the_folder_and_storytold_keeps_its_title() {
+        let resolved = resolve(
+            &Flags::default(),
+            None,
+            &["storytold".into()],
+            "AdobeCloneApps",
+        );
+        assert_eq!(resolved.owners, vec!["storytold".to_string()]);
+        assert_eq!(resolved.title, "Artcraft Repos");
+
+        let resolved = resolve(
+            &Flags::default(),
+            None,
+            &["ahwootech".into(), "AsP3X".into()],
+            "development",
+        );
+        assert_eq!(
+            resolved.owners,
+            vec!["ahwootech".to_string(), "AsP3X".to_string()]
+        );
+        assert_eq!(resolved.title, "development");
+    }
+
+    #[test]
+    fn several_accounts_keep_only_the_signed_in_one() {
+        let counts = vec![("ahwootech".to_string(), 1), ("AsP3X".to_string(), 2)];
+        assert_eq!(
+            choose_accounts(&counts, Some("AsP3X")),
+            vec!["AsP3X".to_string()]
+        );
+        assert_eq!(choose_accounts(&counts, None), vec!["AsP3X".to_string()]);
+        let tied = vec![("ahwootech".to_string(), 1), ("AsP3X".to_string(), 1)];
+        assert!(choose_accounts(&tied, None).is_empty());
+        assert_eq!(
+            choose_accounts(&tied, Some("AsP3X")),
+            vec!["AsP3X".to_string()]
+        );
     }
 
     #[test]
@@ -365,7 +805,12 @@ mod tests {
             "\u{feff}# workspace\n\nowner = my-user\nprotocol = ssh\ntitle = \"My Tools\"\n",
         )
         .unwrap();
-        let resolved = resolve(&Flags::default(), Some(file));
+        let resolved = resolve(
+            &Flags::default(),
+            Some(file),
+            &["storytold".into()],
+            "development",
+        );
         assert_eq!(resolved.owners, vec!["my-user".to_string()]);
         assert_eq!(resolved.protocol, Protocol::Ssh);
         assert_eq!(resolved.title, "My Tools");
@@ -374,12 +819,17 @@ mod tests {
     #[test]
     fn several_owners_use_a_generic_title() {
         let file = parse_config("owner = alpha\nowner = beta\nowner = ALPHA\n").unwrap();
-        let resolved = resolve(&Flags::default(), Some(file));
+        let resolved = resolve(
+            &Flags::default(),
+            Some(file),
+            &["storytold".into()],
+            "development",
+        );
         assert_eq!(
             resolved.owners,
             vec!["alpha".to_string(), "beta".to_string()]
         );
-        assert_eq!(resolved.title, "GitHub Repos");
+        assert_eq!(resolved.title, "development");
     }
 
     #[test]
@@ -389,10 +839,10 @@ mod tests {
             ..Flags::default()
         };
         let file = parse_config("owner = my-user\nrepo = someone/tool\n").unwrap();
-        let resolved = resolve(&flags, Some(file));
+        let resolved = resolve(&flags, Some(file), &["storytold".into()], "development");
         assert!(resolved.owners.is_empty());
         assert_eq!(resolved.pinned[0].id(), "someone/tool");
-        assert_eq!(resolved.title, "GitHub Repos");
+        assert_eq!(resolved.title, "development");
     }
 
     #[test]
@@ -405,19 +855,180 @@ mod tests {
             ..Flags::default()
         };
         let file = parse_config("owner = file-user\nprotocol = ssh\ntitle = File\n").unwrap();
-        let resolved = resolve(&flags, Some(file));
+        let resolved = resolve(&flags, Some(file), &["storytold".into()], "development");
         assert_eq!(resolved.owners, vec!["cli".to_string()]);
         assert_eq!(resolved.protocol, Protocol::Https);
         assert_eq!(resolved.title, "Desk");
     }
 
     #[test]
-    fn repo_flag_keeps_the_default_owner() {
+    fn repo_flag_keeps_the_accounts_found_in_the_folder() {
         let flags = flags_from(&["--repo", "https://github.com/other/tool"]);
-        let resolved = resolve(&flags, None);
-        assert_eq!(resolved.owners, vec!["storytold".to_string()]);
-        assert_eq!(resolved.title, "Artcraft Repos");
+        let resolved = resolve(&flags, None, &["AsP3X".into()], "development");
+        assert_eq!(resolved.owners, vec!["AsP3X".to_string()]);
+        assert_eq!(resolved.title, "development");
         assert_eq!(resolved.pinned[0].id(), "other/tool");
+    }
+
+    #[test]
+    fn saved_settings_read_back_the_same() {
+        let saved = Saved {
+            title: Some("My Tools".into()),
+            owners: vec!["AsP3X".into(), "UCS-Care-Group".into()],
+            pinned: vec![RepoSpec {
+                owner: "someone".into(),
+                name: "tool".into(),
+            }],
+            owners_set: true,
+            protocol: Protocol::Ssh,
+            clone_dir: Some(PathBuf::from("C:\\dev")),
+            checkouts: vec![
+                PathBuf::from("C:\\dev\\tool"),
+                PathBuf::from("D:\\work = client\\api"),
+            ],
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+        };
+        let parsed = parse_config(&render(&saved)).unwrap();
+        assert_eq!(parsed.title, saved.title);
+        assert_eq!(parsed.owners, saved.owners);
+        assert!(parsed.owners_explicit);
+        assert_eq!(parsed.pinned, saved.pinned);
+        assert_eq!(parsed.protocol, Some(Protocol::Ssh));
+        assert_eq!(parsed.clone_dir, saved.clone_dir);
+        assert_eq!(parsed.checkouts, saved.checkouts);
+    }
+
+    #[test]
+    fn accounts_that_were_never_chosen_are_not_written_down() {
+        let saved = Saved {
+            title: None,
+            owners: vec!["AsP3X".into()],
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: vec![PathBuf::from("/srv/code/api")],
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+        };
+        let parsed = parse_config(&render(&saved)).unwrap();
+        assert!(!parsed.owners_explicit);
+        assert!(parsed.owners.is_empty());
+        assert_eq!(parsed.checkouts, saved.checkouts);
+    }
+
+    #[test]
+    fn a_checkout_is_listed_once_and_import_is_a_flag() {
+        let mut list = vec![PathBuf::from("/srv/code/api")];
+        assert!(!push_path(&mut list, PathBuf::from("/srv/code/api/")));
+        assert!(push_path(&mut list, PathBuf::from("/srv/code/web")));
+        assert_eq!(list.len(), 2);
+        assert!(same_path(Path::new("a\\b"), Path::new("a/b/")));
+        assert_eq!(
+            same_path(Path::new("/A/b"), Path::new("/a/b")),
+            cfg!(windows)
+        );
+
+        let flags = flags_from(&["--import", "one", "--root", "two"]);
+        assert_eq!(
+            flags.import,
+            vec![PathBuf::from("one"), PathBuf::from("two")]
+        );
+        let parsed = parse_config("checkout = /a\ncheckout = /a/\ncheckout = /b\n").unwrap();
+        assert_eq!(parsed.checkouts.len(), 2);
+    }
+
+    #[test]
+    fn groups_are_written_as_sections_and_read_back() {
+        let path = |name: &str| PathBuf::from("/srv").join(name);
+        let saved = Saved {
+            title: None,
+            owners: Vec::new(),
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: vec![path("api"), path("loose"), path("notes"), path("web")],
+            placement: vec![
+                (path("web"), "Work".into()),
+                (path("notes"), "home".into()),
+                (path("api"), "Work".into()),
+                // Not a listed checkout: it is not written.
+                (path("gone"), "Old".into()),
+            ],
+            collapsed: vec!["home".into()],
+        };
+        let text = render(&saved);
+        let lines: Vec<&str> = text.lines().skip(2).collect();
+        assert_eq!(
+            lines,
+            [
+                format!("checkout = {}", path("loose").display()),
+                "group = home".to_string(),
+                format!("checkout = {}", path("notes").display()),
+                "group = Work".to_string(),
+                format!("checkout = {}", path("api").display()),
+                format!("checkout = {}", path("web").display()),
+                "collapsed = home".to_string(),
+            ]
+        );
+        let parsed = parse_config(&text).unwrap();
+        assert_eq!(parsed.checkouts.len(), 4);
+        assert_eq!(
+            parsed.placement,
+            vec![
+                (path("notes"), "home".to_string()),
+                (path("api"), "Work".to_string()),
+                (path("web"), "Work".to_string()),
+            ]
+        );
+        assert_eq!(parsed.collapsed, vec!["home".to_string()]);
+    }
+
+    #[test]
+    fn saving_no_accounts_stays_empty_instead_of_following_the_folder() {
+        let saved = Saved {
+            title: None,
+            owners: Vec::new(),
+            pinned: Vec::new(),
+            owners_set: true,
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: Vec::new(),
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+        };
+        let parsed = parse_config(&render(&saved)).unwrap();
+        let resolved = resolve(
+            &Flags::default(),
+            Some(parsed),
+            &["storytold".into()],
+            "development",
+        );
+        assert!(resolved.owners.is_empty());
+        assert!(resolved.custom_title.is_none());
+        assert!(parse_config("owners = none\nowner = ada\n").is_err());
+        assert!(parse_config("owners = ada\n").is_err());
+    }
+
+    #[test]
+    fn the_settings_dialog_accepts_names_links_and_separators() {
+        assert_eq!(
+            parse_owner_list("AsP3X, https://github.com/UCS-Care-Group  @storytold asp3x").unwrap(),
+            vec![
+                "AsP3X".to_string(),
+                "UCS-Care-Group".to_string(),
+                "storytold".to_string()
+            ]
+        );
+        assert!(parse_owner_list("").unwrap().is_empty());
+        assert!(parse_owner_list("ada/tool").unwrap_err().contains("Pinned"));
+        assert!(parse_owner_list("not!valid").is_err());
+        let pinned = parse_pinned_list("someone/tool, https://github.com/other/thing").unwrap();
+        assert_eq!(pinned[0].id(), "someone/tool");
+        assert_eq!(pinned[1].id(), "other/thing");
+        assert!(parse_pinned_list("justaname").is_err());
     }
 
     #[test]

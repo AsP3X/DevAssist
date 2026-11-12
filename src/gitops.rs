@@ -56,20 +56,40 @@ pub struct StatusInfo {
     pub ahead: Option<u32>,
     pub behind: Option<u32>,
     pub upstream_gone: bool,
+    /// Commits ahead of upstream, summed across every local branch.
+    pub total_ahead: u32,
+    /// Commits behind upstream, summed across every local branch.
+    pub total_behind: u32,
+    /// True only when every local branch has an upstream and matches it.
+    pub all_branches_current: bool,
+    /// Local branches that are behind the branch they follow.
+    pub behind_branches: u32,
+    /// Commits on remote branches that no local branch follows or contains.
+    pub remote_new: u32,
+    /// Those remote branches, the most recently committed first.
+    pub remote_branches: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LocalRepo {
     pub folder: String,
     pub owner: String,
     pub repo: String,
     pub origin: String,
     pub path: PathBuf,
+    /// The group of the overview this checkout is in. Empty for none.
+    pub group: String,
     pub branch: String,
     pub dirty: bool,
     pub ahead: Option<u32>,
     pub behind: Option<u32>,
     pub upstream_gone: bool,
+    pub total_ahead: u32,
+    pub total_behind: u32,
+    pub all_branches_current: bool,
+    pub behind_branches: u32,
+    pub remote_new: u32,
+    pub remote_branches: Vec<String>,
     pub ready: bool,
     pub fetched: bool,
     pub error: Option<String>,
@@ -89,6 +109,46 @@ impl LocalRepo {
         }
     }
 
+    /// Ahead and behind counts that cover every local branch.
+    /// The checked-out branch still counts when the full scan did not run.
+    pub fn sync_counts(&self) -> (u32, u32) {
+        (
+            self.total_ahead.max(self.ahead.unwrap_or(0)),
+            self.total_behind.max(self.behind.unwrap_or(0)),
+        )
+    }
+
+    /// True when a remote holds commits that an update could bring in.
+    pub fn has_incoming(&self) -> bool {
+        self.sync_counts().1 > 0 || self.remote_new > 0
+    }
+
+    /// How many branches an update would move or add, as far as the last
+    /// check knows. The update itself counts again after it has fetched.
+    pub fn incoming_branches(&self) -> u32 {
+        let behind = self
+            .behind_branches
+            .max(u32::from(self.behind.unwrap_or(0) > 0));
+        behind.saturating_add(u32::try_from(self.remote_branches.len()).unwrap_or(u32::MAX))
+    }
+
+    /// Copies a finished status check into the row.
+    pub fn apply(&mut self, info: StatusInfo) {
+        self.branch = info.branch;
+        self.dirty = info.dirty;
+        self.ahead = info.ahead;
+        self.behind = info.behind;
+        self.upstream_gone = info.upstream_gone;
+        self.total_ahead = info.total_ahead;
+        self.total_behind = info.total_behind;
+        self.all_branches_current = info.all_branches_current;
+        self.behind_branches = info.behind_branches;
+        self.remote_new = info.remote_new;
+        self.remote_branches = info.remote_branches;
+        self.error = None;
+        self.ready = true;
+    }
+
     pub fn sync_label(&self) -> String {
         if !self.ready {
             return "…".to_string();
@@ -99,21 +159,63 @@ impl LocalRepo {
         if self.warning.is_some() {
             return "fetch failed".to_string();
         }
-        if self.branch == "detached" {
-            return "detached".to_string();
+        let current = "up to date";
+        let local = match self.sync_counts() {
+            (0, 0) if self.branch == "detached" => "detached".to_string(),
+            (0, 0) if self.upstream_gone => "upstream gone".to_string(),
+            (0, 0) if self.all_branches_current => current.to_string(),
+            (0, 0) => "no upstream".to_string(),
+            (a, 0) => format!("ahead {a}"),
+            (0, b) => format!("behind {b}"),
+            (a, b) => format!("ahead {a}, behind {b}"),
+        };
+        match self.remote_label() {
+            Some(remote) if local == current => remote,
+            Some(remote) => format!("{local}, {remote}"),
+            None => local,
         }
-        if self.upstream_gone {
-            return "upstream gone".to_string();
+    }
+
+    /// What waits on remote branches that have no local branch, such as
+    /// "3 new on dev". None when there is nothing.
+    pub fn remote_label(&self) -> Option<String> {
+        match self.remote_branches.as_slice() {
+            [] => None,
+            [only] => Some(format!("{} new on {only}", self.remote_new)),
+            many => Some(format!(
+                "{} new on {} branches",
+                self.remote_new,
+                many.len()
+            )),
         }
-        match (self.ahead, self.behind) {
-            (None, None) => "no upstream".to_string(),
-            (Some(0), Some(0)) => "up to date".to_string(),
-            (Some(a), Some(0)) => format!("ahead {a}"),
-            (Some(0), Some(b)) => format!("behind {b}"),
-            (Some(a), Some(b)) => format!("ahead {a}, behind {b}"),
-            (Some(a), None) => format!("ahead {a}"),
-            (None, Some(b)) => format!("behind {b}"),
+    }
+
+    /// The same with the branch names spelled out, for the detail line.
+    pub fn remote_detail(&self) -> Option<String> {
+        let names = &self.remote_branches;
+        if names.is_empty() {
+            return None;
         }
+        let commits = if self.remote_new == 1 {
+            "1 new commit".to_string()
+        } else {
+            format!("{} new commits", self.remote_new)
+        };
+        let shown = names
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let word = if names.len() == 1 {
+            "branch"
+        } else {
+            "branches"
+        };
+        Some(match names.len().saturating_sub(3) {
+            0 => format!("{commits} on remote {word} {shown}"),
+            rest => format!("{commits} on remote {word} {shown} and {rest} more"),
+        })
     }
 }
 
@@ -128,23 +230,30 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `folder` must be a single path segment inside `root`.
-pub fn safe_child(root: &Path, folder: &str) -> Result<PathBuf, String> {
-    validate_name(folder)?;
-    let root = root
-        .canonicalize()
-        .map_err(|err| format!("workspace: {err}"))?;
-    let dest = root.join(folder);
-    if !dest.exists() {
-        return Err(format!("{folder} is not in this folder"));
-    }
-    let dest = dest.canonicalize().map_err(|err| err.to_string())?;
-    if dest.parent() != Some(root.as_path()) {
-        return Err("refusing to touch a path outside the workspace".into());
-    }
-    Ok(dest)
+/// Reads a folder as a GitHub checkout. None when it is not one.
+pub fn read_checkout(path: &Path) -> Option<LocalRepo> {
+    let git_dir = git_dir(path)?;
+    let config = fs::read_to_string(git_dir.join("config")).ok()?;
+    let url = origin_url(&config)?;
+    let (owner, repo) = github_owner_repo(&url)?;
+    Some(LocalRepo {
+        folder: folder_name(path),
+        owner,
+        repo,
+        origin: url,
+        path: path.to_path_buf(),
+        branch: "…".to_string(),
+        ..LocalRepo::default()
+    })
 }
 
+fn folder_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The GitHub checkouts directly inside `root`.
 pub fn scan(root: &Path) -> Vec<LocalRepo> {
     let mut found = Vec::new();
     let Ok(entries) = fs::read_dir(root) else {
@@ -157,39 +266,72 @@ pub fn scan(root: &Path) -> Vec<LocalRepo> {
         if !file_type.is_dir() {
             continue;
         }
-        let path = entry.path();
-        let Some(git_dir) = git_dir(&path) else {
-            continue;
-        };
-        let Ok(config) = fs::read_to_string(git_dir.join("config")) else {
-            continue;
-        };
-        let Some(url) = origin_url(&config) else {
-            continue;
-        };
-        let Some((owner, repo)) = github_owner_repo(&url) else {
-            continue;
-        };
-        let folder = entry.file_name().to_string_lossy().to_string();
-        found.push(LocalRepo {
-            folder,
-            owner,
-            repo,
-            origin: url,
-            path,
-            branch: "…".to_string(),
-            dirty: false,
-            ahead: None,
-            behind: None,
-            upstream_gone: false,
-            ready: false,
-            fetched: false,
-            error: None,
-            warning: None,
-        });
+        found.extend(read_checkout(&entry.path()));
     }
-    found.sort_by(|a, b| a.folder.to_lowercase().cmp(&b.folder.to_lowercase()));
+    found.sort_by_key(|repo| repo.folder.to_lowercase());
     found
+}
+
+/// The rows of the overview: one per listed checkout, wherever it is.
+/// A path that is gone or no longer a GitHub checkout stays as a row that
+/// says so, so it can be taken off the list.
+pub fn load(paths: &[PathBuf]) -> Vec<LocalRepo> {
+    let mut found: Vec<LocalRepo> = paths
+        .iter()
+        .map(|path| {
+            read_checkout(path).unwrap_or_else(|| LocalRepo {
+                folder: folder_name(path),
+                repo: folder_name(path),
+                path: path.clone(),
+                branch: "?".to_string(),
+                ready: true,
+                error: Some(
+                    if path.is_dir() {
+                        "not a GitHub checkout"
+                    } else {
+                        "folder is missing"
+                    }
+                    .to_string(),
+                ),
+                ..LocalRepo::default()
+            })
+        })
+        .collect();
+    label_checkouts(&mut found);
+    found.sort_by_key(|repo| repo.folder.to_lowercase());
+    found
+}
+
+/// Gives every row a name of its own. Two folders called `api` become
+/// `work/api` and `home/api`, and the full path if that is still the same.
+fn label_checkouts(repos: &mut [LocalRepo]) {
+    for depth in 2..=4 {
+        let labels: Vec<String> = repos
+            .iter()
+            .map(|repo| repo.folder.to_lowercase())
+            .collect();
+        for index in 0..repos.len() {
+            let label = &labels[index];
+            if labels.iter().filter(|other| *other == label).count() < 2 {
+                continue;
+            }
+            let path = &repos[index].path;
+            repos[index].folder = if depth == 4 {
+                path.display().to_string()
+            } else {
+                let parts: Vec<String> = path
+                    .components()
+                    .filter_map(|part| match part {
+                        std::path::Component::Normal(name) => {
+                            Some(name.to_string_lossy().to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                parts[parts.len().saturating_sub(depth)..].join("/")
+            };
+        }
+    }
 }
 
 pub fn default_root() -> PathBuf {
@@ -220,14 +362,21 @@ pub fn attention_rank(repo: &LocalRepo) -> u32 {
     if repo.upstream_gone {
         rank += 1_500;
     }
-    if let Some(behind) = repo.behind.filter(|count| *count > 0) {
+    let (ahead, behind) = repo.sync_counts();
+    if behind > 0 {
         rank += 1_000 + behind.min(100);
+    }
+    if repo.remote_new > 0 {
+        rank += 400 + repo.remote_new.min(100);
     }
     if repo.dirty {
         rank += 200;
     }
-    if repo.ahead.unwrap_or(0) > 0 {
+    if ahead > 0 {
         rank += 50;
+    }
+    if repo.error.is_none() && !repo.all_branches_current && ahead == 0 && behind == 0 {
+        rank += 30;
     }
     rank
 }
@@ -253,6 +402,13 @@ pub fn clone_url(
     } else {
         format!("https://github.com/{owner}/{name}.git")
     }
+}
+
+/// The checkout of this repository that already sits in `root`, if any.
+pub fn existing_checkout(root: &Path, owner: &str, name: &str) -> Option<PathBuf> {
+    validate_name(name).ok()?;
+    let path = root.join(name);
+    same_repo(&path, owner, name).then_some(path)
 }
 
 pub fn clone_destination(root: &Path, owner: &str, name: &str) -> Result<PathBuf, String> {
@@ -293,7 +449,16 @@ pub fn status(path: &Path) -> Result<StatusInfo, String> {
         }
         return Err(first_line(err));
     }
-    Ok(parse_status(&String::from_utf8_lossy(&output.stdout)))
+    let mut info = parse_status(&String::from_utf8_lossy(&output.stdout));
+    if let Ok(branches) = branch_divergence(path) {
+        info.total_ahead = branches.ahead;
+        info.total_behind = branches.behind;
+        info.all_branches_current = branches.all_current;
+        info.behind_branches = branches.behind_branches;
+        info.remote_new = branches.remote_new;
+        info.remote_branches = branches.remote_branches;
+    }
+    Ok(info)
 }
 
 pub fn check(path: &Path, fetch_remote: bool, token: Option<&str>) -> RepoCheck {
@@ -325,22 +490,268 @@ pub fn fetch(path: &Path, token: Option<&str>) -> Result<(), String> {
     run_git(args, |_, _| {})
 }
 
-pub fn pull(
+/// What an update changed in one checkout.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Updated {
+    /// The checked-out branch moved.
+    pub current: bool,
+    /// Other local branches that were fast-forwarded.
+    pub forwarded: Vec<String>,
+    /// Local branches created for remote branches that had none.
+    pub created: Vec<String>,
+    /// Branches left alone, each with the reason.
+    pub left: Vec<(String, String)>,
+}
+
+impl Updated {
+    pub fn changed(&self) -> bool {
+        self.current || !self.forwarded.is_empty() || !self.created.is_empty()
+    }
+}
+
+/// Brings one checkout up to date with its remote, on every branch.
+///
+/// Fetches once, fast-forwards the checked-out branch and every other
+/// local branch that is only behind, and creates a local branch for each
+/// branch of origin that has new commits and no local branch yet. Nothing
+/// is merged or rebased: a branch with commits of its own is left alone.
+/// An error means the fetch or the checked-out branch failed; the other
+/// branches have had their turn by then.
+///
+/// `on_steps` hears how many branches are done out of how many have
+/// something to bring in: once after the fetch, then after each branch.
+pub fn update(
     path: &Path,
     token: Option<&str>,
-    on_line: impl FnMut(&str, bool),
-) -> Result<(), String> {
+    mut on_line: impl FnMut(&str, bool),
+    on_steps: impl FnMut(u32, u32),
+) -> Result<Updated, String> {
     let mut args = auth_args(token);
     args.extend([
-        OsString::from("-c"),
-        OsString::from("pull.rebase=false"),
         OsString::from("-C"),
         path.as_os_str().to_os_string(),
-        OsString::from("pull"),
-        OsString::from("--ff-only"),
+        OsString::from("fetch"),
+        OsString::from("--prune"),
+        OsString::from("--progress"),
         OsString::from("--recurse-submodules=no"),
     ]);
-    run_git(args, on_line)
+    run_git(args, &mut on_line)?;
+    if was_cancelled() {
+        return Err("cancelled".into());
+    }
+    bring_in(path, true, on_line, on_steps)
+}
+
+/// After a clone, which only makes a local branch for the default branch:
+/// creates a local branch for every other branch of origin that holds
+/// commits of its own, the same way an update does. `created` names them.
+pub fn track_remote_branches(
+    path: &Path,
+    on_line: impl FnMut(&str, bool),
+) -> Result<Updated, String> {
+    bring_in(path, false, on_line, |_, _| {})
+}
+
+/// The part of an update that happens after the fetch: moves and creates
+/// local branches from what the remote-tracking branches hold. Without
+/// `with_current` the checked-out branch is left as it is.
+fn bring_in(
+    path: &Path,
+    with_current: bool,
+    mut on_line: impl FnMut(&str, bool),
+    mut on_steps: impl FnMut(u32, u32),
+) -> Result<Updated, String> {
+    let refs = list_refs(path)?;
+    let mut done = Updated::default();
+
+    // What there is to bring in: branches that are behind, and branches of
+    // origin with new commits that no local branch follows. Other remotes
+    // may reuse a name, so only origin's branches are taken.
+    let due =
+        |branch: &&LocalBranch| !branch.upstream.is_empty() && !branch.gone && branch.behind > 0;
+    let head_due = with_current
+        && refs
+            .locals
+            .iter()
+            .filter(|branch| branch.head)
+            .any(|branch| due(&branch));
+    let others: Vec<&LocalBranch> = refs
+        .locals
+        .iter()
+        .filter(|branch| !branch.head)
+        .filter(due)
+        .collect();
+    let unseen = unseen_remote_commits(path, &refs.tracked()).unwrap_or_default();
+    let fresh: Vec<(String, String)> = refs
+        .untracked()
+        .into_iter()
+        .filter(|(reference, tip)| {
+            reference.starts_with("refs/remotes/origin/") && unseen.contains(tip)
+        })
+        .collect();
+    let total =
+        u32::try_from(usize::from(head_due) + others.len() + fresh.len()).unwrap_or(u32::MAX);
+    let mut steps = 0u32;
+    on_steps(steps, total);
+
+    let mut current = Ok(());
+    if with_current {
+        let before = head_commit(path);
+        current = run_git(
+            [
+                OsStr::new("--no-optional-locks"),
+                OsStr::new("-C"),
+                path.as_os_str(),
+                OsStr::new("merge"),
+                OsStr::new("--ff-only"),
+                OsStr::new("@{upstream}"),
+            ],
+            &mut on_line,
+        );
+        done.current = current.is_ok() && before != head_commit(path);
+        if done.current && head_due {
+            steps += 1;
+            on_steps(steps, total);
+        }
+    }
+
+    for branch in others {
+        let name = short_local(&branch.name);
+        if branch.ahead > 0 {
+            leave(&mut done, &mut on_line, name, "has commits of its own");
+            continue;
+        }
+        match fast_forward(path, &branch.upstream, &branch.name) {
+            Ok(()) => {
+                let commits = if branch.behind == 1 {
+                    "1 commit".to_string()
+                } else {
+                    format!("{} commits", branch.behind)
+                };
+                on_line(&format!("{name}: fast-forwarded {commits}"), false);
+                done.forwarded.push(name.to_string());
+                steps += 1;
+                on_steps(steps, total);
+            }
+            Err(err) => leave(&mut done, &mut on_line, name, &err),
+        }
+    }
+
+    for (reference, _) in fresh {
+        let name = reference
+            .strip_prefix("refs/remotes/origin/")
+            .unwrap_or(&reference);
+        let local = format!("refs/heads/{name}");
+        let moved = match refs.locals.iter().find(|branch| branch.name == local) {
+            None => track_branch(path, name, &reference).map(|()| {
+                on_line(
+                    &format!("{name}: new local branch that follows origin/{name}"),
+                    false,
+                );
+                done.created.push(name.to_string());
+            }),
+            Some(branch) if branch.head => Err("does not follow origin".to_string()),
+            Some(_) if is_ancestor(path, &local, &reference) => {
+                fast_forward(path, &reference, &local).map(|()| {
+                    on_line(&format!("{name}: fast-forwarded to origin/{name}"), false);
+                    done.forwarded.push(name.to_string());
+                })
+            }
+            Some(_) => Err("has commits of its own".to_string()),
+        };
+        match moved {
+            Ok(()) => {
+                steps += 1;
+                on_steps(steps, total);
+            }
+            Err(reason) => leave(&mut done, &mut on_line, name, &reason),
+        }
+    }
+
+    current.map(|()| done)
+}
+
+fn leave(done: &mut Updated, on_line: &mut impl FnMut(&str, bool), name: &str, reason: &str) {
+    on_line(&format!("{name}: left alone, {reason}"), false);
+    done.left.push((name.to_string(), reason.to_string()));
+}
+
+fn short_local(reference: &str) -> &str {
+    reference.strip_prefix("refs/heads/").unwrap_or(reference)
+}
+
+fn head_commit(path: &Path) -> Option<String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "-q", "--verify", "HEAD"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Moves a branch that is not checked out forward to `from`. Git refuses
+/// anything that is not a fast-forward, and a branch another worktree has
+/// checked out.
+fn fast_forward(path: &Path, from: &str, to: &str) -> Result<(), String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .args([
+            "fetch",
+            "--no-tags",
+            "--no-prune",
+            "--recurse-submodules=no",
+            ".",
+        ])
+        .arg(format!("{from}:{to}"))
+        .output()
+        .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(last_line(&String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+/// Creates a local branch that follows a remote one.
+fn track_branch(path: &Path, name: &str, remote: &str) -> Result<(), String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .args(["branch", "-q", "--track", "--"])
+        .arg(name)
+        .arg(remote)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(last_line(&String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+fn is_ancestor(path: &Path, older: &str, newer: &str) -> bool {
+    git_command()
+        .arg("-C")
+        .arg(path)
+        .args(["merge-base", "--is-ancestor"])
+        .arg(older)
+        .arg(newer)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn last_line(text: &str) -> String {
+    text.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(text)
+        .trim()
+        .to_string()
 }
 
 pub fn clone_repo(
@@ -368,10 +779,21 @@ pub fn clone_repo(
     result
 }
 
-pub fn remove_repo(root: &Path, folder: &str) -> Result<(), String> {
-    let dest = safe_child(root, folder)?;
+/// Deletes a checkout from disk. Only a git checkout below some other
+/// folder is deleted: never a drive, a filesystem root or the home folder.
+pub fn remove_checkout(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{} is not a full path", path.display()));
+    }
+    let dest = path
+        .canonicalize()
+        .map_err(|_| format!("{} is not there anymore", path.display()))?;
+    let home = crate::config::home_dir().and_then(|home| home.canonicalize().ok());
+    if dest.parent().is_none() || home.as_deref() == Some(dest.as_path()) {
+        return Err(format!("refusing to delete {}", path.display()));
+    }
     if git_dir(&dest).is_none() {
-        return Err(format!("{folder} is not a git checkout"));
+        return Err(format!("{} is not a git checkout", path.display()));
     }
     remove_tree(&dest)
 }
@@ -447,13 +869,314 @@ pub fn parse_status(text: &str) -> StatusInfo {
         }
     }
 
+    let total_ahead = ahead.unwrap_or(0);
+    let total_behind = behind.unwrap_or(0);
+    // Until the full branch scan lands, trust the checked-out branch only.
+    let all_branches_current =
+        ahead == Some(0) && behind == Some(0) && !upstream_gone && branch != "detached";
     StatusInfo {
         branch,
         dirty,
         ahead,
         behind,
         upstream_gone,
+        total_ahead,
+        total_behind,
+        all_branches_current,
+        behind_branches: u32::from(total_behind > 0),
+        remote_new: 0,
+        remote_branches: Vec::new(),
     }
+}
+
+/// What a walk over every local and remote branch found.
+#[derive(Debug, Default)]
+struct Branches {
+    ahead: u32,
+    behind: u32,
+    all_current: bool,
+    behind_branches: u32,
+    remote_new: u32,
+    remote_branches: Vec<String>,
+}
+
+struct ParsedRefs {
+    ahead: u32,
+    behind: u32,
+    all_current: bool,
+    /// Local branches that are behind the branch they follow.
+    behind_branches: u32,
+    /// Local branches that follow nothing.
+    local_only: Vec<String>,
+    /// The upstreams local branches follow, where they still exist.
+    tracked: Vec<String>,
+    /// Remote branches no local branch follows, as (ref, tip), in git's order.
+    untracked: Vec<(String, String)>,
+    has_remotes: bool,
+}
+
+/// One local branch as `for-each-ref` reports it.
+struct LocalBranch {
+    /// The full ref, such as "refs/heads/main".
+    name: String,
+    /// The full upstream ref. Empty when the branch follows nothing.
+    upstream: String,
+    ahead: u32,
+    behind: u32,
+    gone: bool,
+    /// Checked out in this folder.
+    head: bool,
+}
+
+struct RefList {
+    locals: Vec<LocalBranch>,
+    /// Remote branches as (ref, tip), the most recently committed first.
+    remotes: Vec<(String, String)>,
+    has_remotes: bool,
+}
+
+impl RefList {
+    /// The upstreams local branches follow, where they still exist.
+    fn tracked(&self) -> Vec<String> {
+        self.locals
+            .iter()
+            .filter(|branch| !branch.upstream.is_empty() && !branch.gone)
+            .map(|branch| branch.upstream.clone())
+            .collect()
+    }
+
+    /// Remote branches no local branch follows.
+    fn untracked(&self) -> Vec<(String, String)> {
+        let tracked = self.tracked();
+        self.remotes
+            .iter()
+            .filter(|(name, _)| !tracked.contains(name))
+            .cloned()
+            .collect()
+    }
+}
+
+fn list_refs(path: &Path) -> Result<RefList, String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("for-each-ref")
+        .arg("--sort=-committerdate")
+        .arg("--format=%(refname)%09%(objectname)%09%(upstream)%09%(upstream:track)%09%(HEAD)")
+        .arg("refs/heads")
+        .arg("refs/remotes")
+        .output()
+        .map_err(|err| format!("git for-each-ref: {err}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let err = err.trim();
+        if err.is_empty() {
+            return Err(format!("git for-each-ref exited {}", output.status));
+        }
+        return Err(first_line(err));
+    }
+    Ok(parse_ref_list(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn branch_divergence(path: &Path) -> Result<Branches, String> {
+    let parsed = summarize(&list_refs(path)?);
+    let mut branches = Branches {
+        ahead: parsed.ahead,
+        behind: parsed.behind,
+        all_current: parsed.all_current,
+        behind_branches: parsed.behind_branches,
+        ..Branches::default()
+    };
+    if !parsed.local_only.is_empty()
+        && parsed.has_remotes
+        && let Ok(extra) = local_only_commits(path, &parsed.local_only)
+    {
+        branches.ahead = branches.ahead.saturating_add(extra);
+    }
+    if !parsed.untracked.is_empty()
+        && let Ok(unseen) = unseen_remote_commits(path, &parsed.tracked)
+    {
+        (branches.remote_new, branches.remote_branches) = remote_only(&parsed.untracked, &unseen);
+    }
+    Ok(branches)
+}
+
+#[cfg(test)]
+fn parse_refs(text: &str) -> ParsedRefs {
+    summarize(&parse_ref_list(text))
+}
+
+/// Reads `for-each-ref` output over refs/heads and refs/remotes.
+fn parse_ref_list(text: &str) -> RefList {
+    let mut locals = Vec::new();
+    let mut remotes = Vec::new();
+    let mut has_remotes = false;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(5, '\t');
+        let name = parts.next().unwrap_or("").trim();
+        let tip = parts.next().unwrap_or("").trim();
+        let upstream = parts.next().unwrap_or("").trim();
+        let track = parts.next().unwrap_or("").trim();
+        let head = parts.next().unwrap_or("").trim() == "*";
+        if name.starts_with("refs/remotes/") {
+            has_remotes = true;
+            // origin/HEAD only points at another branch.
+            if !name.ends_with("/HEAD") {
+                remotes.push((name.to_string(), tip.to_string()));
+            }
+        } else if name.starts_with("refs/heads/") {
+            let (ahead, behind, gone) = parse_track(track);
+            locals.push(LocalBranch {
+                name: name.to_string(),
+                upstream: upstream.to_string(),
+                ahead,
+                behind,
+                gone,
+                head,
+            });
+        }
+    }
+    RefList {
+        locals,
+        remotes,
+        has_remotes,
+    }
+}
+
+/// Sums what the local branches are ahead and behind.
+fn summarize(refs: &RefList) -> ParsedRefs {
+    let mut ahead = 0u32;
+    let mut behind = 0u32;
+    let mut all_current = !refs.locals.is_empty();
+    let mut behind_branches = 0u32;
+    let mut local_only = Vec::new();
+    for branch in &refs.locals {
+        if branch.upstream.is_empty() {
+            all_current = false;
+            local_only.push(branch.name.clone());
+            continue;
+        }
+        if branch.gone {
+            all_current = false;
+            continue;
+        }
+        ahead = ahead.saturating_add(branch.ahead);
+        behind = behind.saturating_add(branch.behind);
+        behind_branches += u32::from(branch.behind > 0);
+        if branch.ahead > 0 || branch.behind > 0 {
+            all_current = false;
+        }
+    }
+    ParsedRefs {
+        ahead,
+        behind,
+        all_current,
+        behind_branches,
+        local_only,
+        tracked: refs.tracked(),
+        untracked: refs.untracked(),
+        has_remotes: refs.has_remotes,
+    }
+}
+
+fn parse_track(track: &str) -> (u32, u32, bool) {
+    let inside = track.trim().trim_start_matches('[').trim_end_matches(']');
+    if inside == "gone" {
+        return (0, 0, true);
+    }
+    let mut ahead = 0u32;
+    let mut behind = 0u32;
+    for part in inside.split(',') {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("ahead ") {
+            ahead = value.trim().parse().unwrap_or(0);
+        } else if let Some(value) = part.strip_prefix("behind ") {
+            behind = value.trim().parse().unwrap_or(0);
+        }
+    }
+    (ahead, behind, false)
+}
+
+fn local_only_commits(path: &Path, refs: &[String]) -> Result<u32, String> {
+    if refs.is_empty() {
+        return Ok(0);
+    }
+    let mut cmd = git_command();
+    cmd.arg("-C").arg(path).arg("rev-list").arg("--count");
+    for reference in refs {
+        cmd.arg(reference);
+    }
+    cmd.arg("--not").arg("--remotes");
+    let output = cmd.output().map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(first_line(&String::from_utf8_lossy(&output.stderr)));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim()
+        .parse()
+        .map_err(|_| format!("unexpected rev-list count: {}", text.trim()))
+}
+
+/// The commits the remotes have that no local branch has or follows.
+/// What a followed upstream holds already counts as "behind".
+fn unseen_remote_commits(
+    path: &Path,
+    tracked: &[String],
+) -> Result<std::collections::HashSet<String>, String> {
+    let mut cmd = git_command();
+    cmd.arg("-C")
+        .arg(path)
+        .arg("rev-list")
+        .arg("--ignore-missing")
+        .arg("--remotes")
+        .arg("--not")
+        .arg("--branches")
+        .arg("HEAD");
+    for reference in tracked {
+        cmd.arg(reference);
+    }
+    let output = cmd.output().map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(first_line(&String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Counts the unseen commits and names the remote branches that hold them.
+/// A branch holds some exactly when its tip is one of them.
+fn remote_only(
+    untracked: &[(String, String)],
+    unseen: &std::collections::HashSet<String>,
+) -> (u32, Vec<String>) {
+    let mut names: Vec<String> = Vec::new();
+    for (reference, tip) in untracked {
+        if !unseen.contains(tip) {
+            continue;
+        }
+        let name = short_remote(reference);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return (0, names);
+    }
+    (u32::try_from(unseen.len()).unwrap_or(u32::MAX), names)
+}
+
+/// "refs/remotes/origin/dev" reads as "dev"; other remotes keep their name.
+fn short_remote(reference: &str) -> String {
+    let name = reference.strip_prefix("refs/remotes/").unwrap_or(reference);
+    name.strip_prefix("origin/").unwrap_or(name).to_string()
 }
 
 pub fn github_owner_repo(url: &str) -> Option<(String, String)> {
@@ -570,7 +1293,43 @@ fn auth_header(token: Option<&str>) -> Option<String> {
     {
         return None;
     }
-    Some(format!("AUTHORIZATION: bearer {token}"))
+    // GitHub's git HTTP endpoint rejects Authorization: Bearer and answers
+    // 401 with a Basic challenge. A disabled terminal prompt then fails the fetch.
+    let mut raw = b"x-access-token:".to_vec();
+    raw.extend(token.as_bytes());
+    Some(format!("AUTHORIZATION: Basic {}", base64(&raw)))
+}
+
+fn base64(data: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut index = 0;
+    while index + 3 <= data.len() {
+        let chunk =
+            ((data[index] as u32) << 16) | ((data[index + 1] as u32) << 8) | data[index + 2] as u32;
+        for shift in [18, 12, 6, 0] {
+            out.push(TABLE[((chunk >> shift) & 63) as usize] as char);
+        }
+        index += 3;
+    }
+    match data.len() - index {
+        1 => {
+            let chunk = (data[index] as u32) << 16;
+            out.push(TABLE[((chunk >> 18) & 63) as usize] as char);
+            out.push(TABLE[((chunk >> 12) & 63) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let chunk = ((data[index] as u32) << 16) | ((data[index + 1] as u32) << 8);
+            out.push(TABLE[((chunk >> 18) & 63) as usize] as char);
+            out.push(TABLE[((chunk >> 12) & 63) as usize] as char);
+            out.push(TABLE[((chunk >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
 }
 
 fn pids() -> std::sync::MutexGuard<'static, Vec<u32>> {
@@ -843,6 +1602,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn git_https_sends_the_token_as_basic_auth() {
+        assert_eq!(
+            auth_header(Some("secret")).as_deref(),
+            Some("AUTHORIZATION: Basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0")
+        );
+        assert!(auth_header(Some("bad token")).is_none());
+        assert!(auth_header(None).is_none());
+    }
+
+    #[test]
     fn parses_owner_and_repo_from_common_urls() {
         assert_eq!(
             github_owner_repo("https://github.com/storytold/photocraft"),
@@ -910,13 +1679,57 @@ mod tests {
     }
 
     #[test]
-    fn rejects_names_that_escape_the_workspace() {
-        let root = std::env::temp_dir().join("artcraft-repos-name-test");
+    fn only_a_checkout_is_deleted() {
+        let root = std::env::temp_dir().join(format!("artcraft-repos-rm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        assert!(safe_child(&root, "..").is_err());
-        assert!(safe_child(&root, r"foo\bar").is_err());
-        assert!(safe_child(&root, "missing").is_err());
+        fs::create_dir_all(root.join("plain")).unwrap();
+        write_origin(&root, "demo", "https://github.com/acme/demo.git");
+        assert!(remove_checkout(Path::new("demo")).is_err());
+        assert!(remove_checkout(&root.join("missing")).is_err());
+        assert!(remove_checkout(&root.join("plain")).is_err());
+        assert!(root.join("plain").is_dir());
+        if let Some(top) = root.ancestors().last() {
+            assert!(remove_checkout(top).is_err());
+        }
+        remove_checkout(&root.join("demo")).unwrap();
+        assert!(!root.join("demo").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn listed_checkouts_load_from_anywhere_with_names_of_their_own() {
+        let root = std::env::temp_dir().join(format!("artcraft-repos-load-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let work = root.join("work");
+        let home = root.join("home");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(root.join("plain")).unwrap();
+        write_origin(&work, "api", "https://github.com/acme/api.git");
+        write_origin(&home, "api", "https://github.com/me/api.git");
+        write_origin(&home, "notes", "git@github.com:me/notes.git");
+        let rows = load(&[
+            work.join("api"),
+            home.join("notes"),
+            home.join("api"),
+            root.join("plain"),
+            root.join("gone"),
+        ]);
+        let names: Vec<&str> = rows.iter().map(|repo| repo.folder.as_str()).collect();
+        assert_eq!(names, ["gone", "home/api", "notes", "plain", "work/api"]);
+        assert_eq!(rows[1].owner, "me");
+        assert_eq!(rows[4].owner, "acme");
+        assert!(!rows[2].ready);
+        assert_eq!(rows[0].error.as_deref(), Some("folder is missing"));
+        assert_eq!(rows[3].error.as_deref(), Some("not a GitHub checkout"));
+        assert!(rows[0].ready);
+
+        assert_eq!(
+            existing_checkout(&work, "ACME", "api"),
+            Some(work.join("api"))
+        );
+        assert_eq!(existing_checkout(&work, "me", "api"), None);
+        assert_eq!(existing_checkout(&work, "acme", "web"), None);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -932,10 +1745,17 @@ mod tests {
             ahead: Some(0),
             behind: Some(0),
             upstream_gone: false,
+            total_ahead: 0,
+            total_behind: 0,
+            all_branches_current: true,
+            behind_branches: 0,
+            remote_new: 0,
+            remote_branches: Vec::new(),
             ready: true,
             fetched: false,
             error: None,
             warning: None,
+            group: String::new(),
         }
     }
 
@@ -1051,5 +1871,370 @@ mod tests {
         let mut repo = sample("");
         repo.warning = Some("network down".into());
         assert_eq!(repo.sync_label(), "fetch failed");
+    }
+
+    #[test]
+    fn sync_label_says_up_to_date_only_when_every_branch_matches() {
+        let current = sample("");
+        assert_eq!(current.sync_label(), "up to date");
+
+        let mut other = sample("");
+        other.all_branches_current = false;
+        other.total_ahead = 2;
+        other.total_behind = 5;
+        assert_eq!(other.sync_label(), "ahead 2, behind 5");
+
+        let mut ahead = sample("");
+        ahead.all_branches_current = false;
+        ahead.total_ahead = 4;
+        assert_eq!(ahead.sync_label(), "ahead 4");
+
+        let mut missing = sample("");
+        missing.all_branches_current = false;
+        assert_eq!(missing.sync_label(), "no upstream");
+    }
+
+    #[test]
+    fn sync_label_names_what_waits_on_other_remote_branches() {
+        let mut one = sample("");
+        one.remote_new = 3;
+        one.remote_branches = vec!["dev".into()];
+        assert_eq!(one.sync_label(), "3 new on dev");
+        assert_eq!(
+            one.remote_detail().unwrap(),
+            "3 new commits on remote branch dev"
+        );
+
+        let mut several = sample("");
+        several.behind = Some(2);
+        several.remote_new = 12;
+        several.remote_branches = ["dev", "docs", "fix/a", "fix/b", "fix/c"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(several.sync_label(), "behind 2, 12 new on 5 branches");
+        assert_eq!(
+            several.remote_detail().unwrap(),
+            "12 new commits on remote branches dev, docs, fix/a and 2 more"
+        );
+
+        let mut detached = sample("");
+        detached.branch = "detached".into();
+        detached.remote_new = 1;
+        detached.remote_branches = vec!["dev".into()];
+        assert_eq!(detached.sync_label(), "detached, 1 new on dev");
+        assert_eq!(
+            detached.remote_detail().unwrap(),
+            "1 new commit on remote branch dev"
+        );
+
+        assert!(attention_rank(&one) > attention_rank(&sample("")));
+        assert!(attention_rank(&several) > attention_rank(&one));
+    }
+
+    #[test]
+    fn refs_sum_every_local_branch_and_find_unfollowed_remote_branches() {
+        let text = "\
+refs/heads/main\taaa\trefs/remotes/origin/main\t
+refs/heads/feature\tbbb\trefs/remotes/origin/feature\t[ahead 2, behind 1]
+refs/heads/old\tccc\trefs/remotes/origin/old\t[behind 4]
+refs/heads/local\tddd\t\t
+refs/heads/gone\teee\trefs/remotes/origin/gone\t[gone]
+refs/remotes/origin/HEAD\taaa\t\t
+refs/remotes/origin/main\taaa\t\t
+refs/remotes/origin/feature\tfff\t\t
+refs/remotes/origin/old\tggg\t\t
+refs/remotes/origin/dev\thhh\t\t
+refs/remotes/fork/dev\tiii\t\t
+";
+        let parsed = parse_refs(text);
+        assert_eq!(parsed.ahead, 2);
+        assert_eq!(parsed.behind, 5);
+        assert!(!parsed.all_current);
+        assert!(parsed.has_remotes);
+        assert_eq!(parsed.local_only, vec!["refs/heads/local".to_string()]);
+        assert_eq!(parsed.tracked.len(), 3);
+        assert_eq!(
+            parsed.untracked,
+            vec![
+                ("refs/remotes/origin/dev".to_string(), "hhh".to_string()),
+                ("refs/remotes/fork/dev".to_string(), "iii".to_string()),
+            ]
+        );
+
+        let current = parse_refs(
+            "refs/heads/main\ta\trefs/remotes/origin/main\t\nrefs/heads/dev\tb\trefs/remotes/origin/dev\t\n",
+        );
+        assert!(current.all_current);
+        assert_eq!(current.ahead, 0);
+        assert_eq!(current.behind, 0);
+        assert!(current.local_only.is_empty());
+        assert!(current.untracked.is_empty());
+        assert!(!current.has_remotes);
+
+        let empty = parse_refs("");
+        assert!(!empty.all_current);
+    }
+
+    #[test]
+    fn only_remote_branches_with_unseen_commits_are_named() {
+        let untracked = vec![
+            ("refs/remotes/origin/dev".to_string(), "hhh".to_string()),
+            ("refs/remotes/origin/merged".to_string(), "aaa".to_string()),
+            ("refs/remotes/fork/dev".to_string(), "iii".to_string()),
+        ];
+        let unseen = ["hhh", "h2", "iii"].map(String::from).into_iter().collect();
+        let (commits, names) = remote_only(&untracked, &unseen);
+        assert_eq!(commits, 3);
+        assert_eq!(names, vec!["dev".to_string(), "fork/dev".to_string()]);
+
+        let none = std::collections::HashSet::new();
+        assert_eq!(remote_only(&untracked, &none), (0, Vec::new()));
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = git_command()
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit(dir: &Path, file: &str) {
+        fs::write(dir.join(file), file).unwrap();
+        git(dir, &["add", file]);
+        git(dir, &["commit", "-q", "-m", file]);
+    }
+
+    #[test]
+    fn the_ref_list_knows_which_branch_is_checked_out() {
+        let refs = parse_ref_list(
+            "refs/heads/main\ta\trefs/remotes/origin/main\t[behind 2]\t*\n\
+             refs/heads/dev\tb\trefs/remotes/origin/dev\t\t \n",
+        );
+        assert_eq!(refs.locals.len(), 2);
+        assert!(refs.locals[0].head);
+        assert_eq!(refs.locals[0].behind, 2);
+        assert!(!refs.locals[1].head);
+        assert_eq!(refs.locals[1].upstream, "refs/remotes/origin/dev");
+    }
+
+    #[test]
+    fn update_moves_every_branch_that_can_move_and_adds_new_ones() {
+        let root =
+            std::env::temp_dir().join(format!("artcraft-repos-update-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        git(&upstream, &["branch", "-q", "dev"]);
+        git(&upstream, &["branch", "-q", "mine"]);
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+        git(&clone, &["branch", "-q", "--track", "dev", "origin/dev"]);
+        git(
+            &clone,
+            &["checkout", "-q", "--track", "-b", "mine", "origin/mine"],
+        );
+        commit(&clone, "local");
+        git(&clone, &["checkout", "-q", "main"]);
+
+        let mut row = LocalRepo::default();
+        row.apply(status(&clone).unwrap());
+        assert_eq!(row.incoming_branches(), 0);
+
+        // The remote moves on every branch and gets a new one.
+        commit(&upstream, "four");
+        git(&upstream, &["checkout", "-q", "dev"]);
+        commit(&upstream, "two");
+        git(&upstream, &["checkout", "-q", "mine"]);
+        commit(&upstream, "three");
+        git(&upstream, &["checkout", "-q", "-b", "feature", "main"]);
+        commit(&upstream, "five");
+        git(&upstream, &["checkout", "-q", "main"]);
+
+        git(&clone, &["fetch", "-q"]);
+        row.apply(status(&clone).unwrap());
+        assert_eq!(row.incoming_branches(), 4);
+
+        let mut lines = Vec::new();
+        let mut steps = Vec::new();
+        let done = update(
+            &clone,
+            None,
+            |line, _| lines.push(line.to_string()),
+            |done, total| steps.push((done, total)),
+        )
+        .unwrap();
+        // Four branches have something new; the one with local commits stays.
+        assert_eq!(steps, vec![(0, 4), (1, 4), (2, 4), (3, 4)]);
+        assert!(done.current);
+        assert_eq!(done.forwarded, vec!["dev".to_string()]);
+        assert_eq!(done.created, vec!["feature".to_string()]);
+        assert_eq!(
+            done.left,
+            vec![("mine".to_string(), "has commits of its own".to_string())]
+        );
+        assert!(done.changed());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "dev: fast-forwarded 1 commit")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "feature: new local branch that follows origin/feature")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "mine: left alone, has commits of its own")
+        );
+        assert!(clone.join("four").exists());
+
+        // Only the branch with local commits still differs from the remote.
+        let after = status(&clone).unwrap();
+        assert_eq!(after.branch, "main");
+        assert_eq!(after.behind, Some(0));
+        assert_eq!(after.total_behind, 1);
+        assert_eq!(after.total_ahead, 1);
+        assert_eq!(after.remote_new, 0);
+        assert!(after.remote_branches.is_empty());
+
+        // A second run finds nothing to do.
+        let mut steps = Vec::new();
+        let again = update(
+            &clone,
+            None,
+            |_, _| {},
+            |done, total| steps.push((done, total)),
+        )
+        .unwrap();
+        assert_eq!(steps, vec![(0, 1)]);
+        assert!(!again.changed());
+        assert_eq!(again.left.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fresh_clone_gets_a_local_branch_for_every_branch_with_commits() {
+        let root =
+            std::env::temp_dir().join(format!("artcraft-repos-clone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        git(&upstream, &["checkout", "-q", "-b", "dev"]);
+        commit(&upstream, "two");
+        git(
+            &upstream,
+            &["checkout", "-q", "-b", "feature/login", "main"],
+        );
+        commit(&upstream, "three");
+        git(&upstream, &["checkout", "-q", "main"]);
+        // Holds nothing main does not have.
+        git(&upstream, &["branch", "-q", "merged"]);
+
+        clone_repo(&upstream.display().to_string(), &clone, None, |_, _| {}).unwrap();
+        let before = status(&clone).unwrap();
+        assert_eq!(before.remote_new, 2);
+
+        let mut lines = Vec::new();
+        let done = track_remote_branches(&clone, |line, _| lines.push(line.to_string())).unwrap();
+        let mut created = done.created.clone();
+        created.sort();
+        assert_eq!(created, ["dev", "feature/login"]);
+        assert!(!done.current);
+        assert!(done.forwarded.is_empty());
+        assert!(done.left.is_empty());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "dev: new local branch that follows origin/dev")
+        );
+        // Nothing was merged or printed for the branch that is checked out.
+        assert!(!lines.iter().any(|line| line.contains("up to date")));
+
+        let mut row = LocalRepo::default();
+        row.apply(status(&clone).unwrap());
+        assert_eq!(row.branch, "main");
+        assert_eq!(row.sync_label(), "up to date");
+        assert_eq!(row.remote_new, 0);
+        // The working tree still is main's.
+        assert!(clone.join("one").exists());
+        assert!(!clone.join("two").exists());
+
+        // A second pass has nothing left to do.
+        let again = track_remote_branches(&clone, |_, _| {}).unwrap();
+        assert!(!again.changed());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn status_sees_commits_on_remote_branches_that_are_not_checked_out() {
+        let root =
+            std::env::temp_dir().join(format!("artcraft-repos-remote-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+
+        let mut row = LocalRepo::default();
+        row.apply(status(&clone).unwrap());
+        assert_eq!(row.sync_label(), "up to date");
+
+        // The remote gets a new branch with two commits, and one on main.
+        git(&upstream, &["checkout", "-q", "-b", "dev"]);
+        commit(&upstream, "two");
+        commit(&upstream, "three");
+        git(&upstream, &["checkout", "-q", "main"]);
+        commit(&upstream, "four");
+        git(&upstream, &["branch", "-q", "merged"]);
+        git(&clone, &["fetch", "-q"]);
+
+        let fetched = status(&clone).unwrap();
+        assert_eq!(fetched.behind, Some(1));
+        assert_eq!(fetched.remote_new, 2);
+        assert_eq!(fetched.remote_branches, vec!["dev".to_string()]);
+        row.apply(fetched);
+        assert_eq!(row.sync_label(), "behind 1, 2 new on dev");
+
+        // Pulling main leaves the other branch waiting.
+        git(&clone, &["merge", "-q", "--ff-only", "origin/main"]);
+        row.apply(status(&clone).unwrap());
+        assert_eq!(row.sync_label(), "2 new on dev");
+
+        // Having the branch locally settles it.
+        git(&clone, &["branch", "-q", "--track", "dev", "origin/dev"]);
+        row.apply(status(&clone).unwrap());
+        assert_eq!(row.sync_label(), "up to date");
+
+        // A local branch that was never pushed counts as ahead.
+        git(&clone, &["checkout", "-q", "--no-track", "-b", "scratch"]);
+        commit(&clone, "five");
+        row.apply(status(&clone).unwrap());
+        assert_eq!(row.sync_label(), "ahead 1");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

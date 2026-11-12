@@ -1,7 +1,12 @@
 mod app;
+mod clipboard;
 mod config;
 mod github;
 mod gitops;
+mod job;
+mod pathprompt;
+mod select;
+mod settings;
 mod ui;
 
 use std::io::{self, IsTerminal};
@@ -30,14 +35,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         config::Startup::Run(settings) if settings.doctor => doctor(&settings),
-        config::Startup::Run(settings) => run_tui(settings),
+        config::Startup::Run(settings) => run_tui(*settings),
     }
 }
 
 fn run_tui(settings: config::Settings) -> Result<(), Box<dyn std::error::Error>> {
     if !io::stdout().is_terminal() {
         eprintln!("artcraft-repos is a full-screen terminal app.");
-        eprintln!("Open Windows Terminal or PowerShell and run artcraft-repos.cmd");
+        eprintln!("Open Windows Terminal or PowerShell and run artcraft-repos");
         std::process::exit(1);
     }
     enable_utf8();
@@ -68,7 +73,8 @@ fn run_tui(settings: config::Settings) -> Result<(), Box<dyn std::error::Error>>
 }
 
 fn doctor(settings: &config::Settings) -> Result<(), Box<dyn std::error::Error>> {
-    println!("root      {}", settings.root.display());
+    println!("settings  {}", settings.config_path.display());
+    println!("clone dir {}", settings.clone_dir.display());
     println!("title     {}", settings.title);
     println!("protocol  {}", settings.protocol);
     if settings.owners.is_empty() {
@@ -80,8 +86,8 @@ fn doctor(settings: &config::Settings) -> Result<(), Box<dyn std::error::Error>>
         let pinned: Vec<String> = settings.pinned.iter().map(|spec| spec.id()).collect();
         println!("pinned    {}", pinned.join(", "));
     }
-    let installed = gitops::scan(&settings.root);
-    println!("found {} local GitHub repositories", installed.len());
+    let installed = gitops::load(&settings.checkouts);
+    println!("listed    {} local checkouts", installed.len());
     let catalog = github::fetch_catalog(&settings.owners, &settings.pinned);
     println!("github    {} repositories", catalog.repos.len());
     for err in &catalog.errors {
@@ -92,12 +98,7 @@ fn doctor(settings: &config::Settings) -> Result<(), Box<dyn std::error::Error>>
         match gitops::status(&repo.path) {
             Ok(info) => {
                 let mut view = repo.clone();
-                view.branch = info.branch;
-                view.dirty = info.dirty;
-                view.ahead = info.ahead;
-                view.behind = info.behind;
-                view.upstream_gone = info.upstream_gone;
-                view.ready = true;
+                view.apply(info);
                 println!(
                     "  {:<36} {:<16} {:<8} {}",
                     format!("{}/{}", view.owner, view.folder),
