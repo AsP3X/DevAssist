@@ -8,4 +8,6 @@ pub mod menu;
 pub mod path;
 pub mod progress;
 pub mod select;
+#[allow(dead_code)]
+pub mod tabs;
 pub mod text;
