@@ -49,9 +49,9 @@ cargo test --locked
 - **One thing per pull request.** A fix and an unrelated clean-up are two
   pull requests.
 - **Tests come with it.** Logic gets a unit test next to the code. Anything
-  on screen gets a screen test in `src/ui.rs`: those draw into an in-memory
+  on screen gets a screen test in `src/features/repos/ui.rs`: those draw into an in-memory
   terminal and check the text. Git behaviour is tested against a real
-  throwaway repository; see the tests at the end of `src/gitops.rs`.
+  throwaway repository; see the tests at the end of `src/features/repos/gitops.rs`.
 - **Tests stay local.** No test may call GitHub, open a browser, change the
   clipboard, or write outside the system's temporary folder. A test that
   needs the network is marked `#[ignore]`, so it only runs when asked for.

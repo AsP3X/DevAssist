@@ -84,19 +84,26 @@ Windows recognises a newer version of the same program: the `UpgradeCode` in
 
 | File | What is in it |
 |---|---|
-| `src/main.rs` | Start-up, the terminal loop, `--doctor` |
-| `src/app.rs` | The app's state and everything the keys do |
-| `src/ui.rs` | Drawing: the overview and every dialog |
-| `src/gitops.rs` | Everything that runs `git`: status, fetch, update, clone, remove |
-| `src/github.rs` | The GitHub API: listing repositories, the sign-in token |
+| `src/main.rs` | Start-up: the command line, then the shell |
 | `src/config.rs` | The settings file and the command line |
-| `src/job.rs` | The model of one update or clone run, for the progress dialog |
 | `src/update.rs` | Looking for a newer release and installing it |
-| `src/settings.rs` | The settings dialog's form |
-| `src/pathprompt.rs` | The folder dialog, with Tab completion |
-| `src/select.rs`, `src/clipboard.rs` | Selecting text with the mouse and copying it |
+| `src/shell/` | The terminal, the main loop, and the `Feature` trait every feature implements |
+| `src/features/repos/app.rs` | The repository overview's state and everything the keys do |
+| `src/features/repos/ui.rs` | Drawing: the overview and every dialog |
+| `src/features/repos/gitops.rs` | Everything that runs `git`: status, fetch, update, clone, remove |
+| `src/features/repos/github.rs` | The GitHub API: listing repositories, the sign-in token |
+| `src/features/repos/gitprogress.rs` | Reading git's progress output |
+| `src/features/repos/settings.rs` | The settings dialog's form |
+| `src/features/repos/mod.rs` | The feature's link to the shell, and `--doctor` |
+| `src/atoms/sys/` | Building blocks for the system: running programs, HTTP, clipboard, paths |
+| `src/atoms/task/` | Building blocks for background work: the job model, worker threads |
+| `src/atoms/ui/` | Building blocks for the screen: text fields, lists, menus, dialogs, the folder prompt, text selection |
 | `installer/` | The installer definitions and their build script |
 | `.github/workflows/` | CI and the release build |
+
+A feature is built from atoms and never imports another feature. An atom
+names no feature type. The design is in
+`docs/superpowers/specs/2026-11-12-atom-module-split-design.md`.
 
 ## Other systems
 
