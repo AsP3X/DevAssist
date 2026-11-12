@@ -89,8 +89,8 @@ fn capture_screen(buf: &Buffer) -> Vec<Vec<String>> {
     rows
 }
 
-fn paint_selection(buf: &mut Buffer, sel: crate::select::TextSel) {
-    let (start, end) = crate::select::range(sel.anchor, sel.head);
+fn paint_selection(buf: &mut Buffer, sel: crate::atoms::ui::select::TextSel) {
+    let (start, end) = crate::atoms::ui::select::range(sel.anchor, sel.head);
     let area = buf.area;
     let last_x = area.x.saturating_add(area.width).saturating_sub(1);
     let style = Style::default().fg(Color::White).bg(Color::Blue);

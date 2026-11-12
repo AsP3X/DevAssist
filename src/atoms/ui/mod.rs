@@ -7,4 +7,5 @@ pub mod list;
 pub mod menu;
 pub mod path;
 pub mod progress;
+pub mod select;
 pub mod text;

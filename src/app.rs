@@ -17,11 +17,11 @@ use crate::atoms::ui::input::{self, Alt};
 use crate::atoms::ui::list;
 use crate::atoms::ui::menu;
 use crate::atoms::ui::path::{self as pathprompt, PathPrompt};
+use crate::atoms::ui::select::{PointerEffect, PointerEvent};
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
 use crate::gitprogress;
-use crate::select::{PointerEffect, PointerEvent};
 use crate::settings::{Form, Outcome};
 use crate::update::{self, Release};
 
@@ -365,7 +365,7 @@ pub struct App {
     pub fetching: bool,
     pub tick: u64,
     pub mouse: Option<(u16, u16)>,
-    pub pointer: crate::select::Pointer,
+    pub pointer: crate::atoms::ui::select::Pointer,
     pub screen: Vec<Vec<String>>,
     pub copy_note: Option<String>,
     pub copy_failed: bool,
@@ -473,7 +473,7 @@ impl App {
             fetching: false,
             tick: 0,
             mouse: None,
-            pointer: crate::select::Pointer::default(),
+            pointer: crate::atoms::ui::select::Pointer::default(),
             screen: Vec::new(),
             copy_note: None,
             copy_failed: false,
@@ -1793,7 +1793,7 @@ impl App {
     }
 
     fn dismiss_selection(&mut self) {
-        self.pointer = crate::select::Pointer::default();
+        self.pointer = crate::atoms::ui::select::Pointer::default();
         self.copy_note = None;
         self.copy_failed = false;
     }
@@ -1802,7 +1802,7 @@ impl App {
         let Some(sel) = self.pointer.selection else {
             return;
         };
-        let text = crate::select::selected_text(&self.screen, sel.anchor, sel.head);
+        let text = crate::atoms::ui::select::selected_text(&self.screen, sel.anchor, sel.head);
         if text.is_empty() {
             self.pointer.selection = None;
             self.copy_note = None;
