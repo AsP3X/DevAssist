@@ -1,0 +1,74 @@
+name: Release
+
+# Pushing a tag like v1.2.3 builds the program and both installers and
+# publishes them as a GitHub release. Installed copies of DevAssist find
+# the release on their own. See docs/RELEASING.md.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Build and publish
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag is the version in Cargo.toml
+        shell: pwsh
+        run: |
+          $found = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          $version = $found.Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:TAG) {
+            throw "The tag is $env:TAG but Cargo.toml says $version."
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Take the release notes from the changelog
+        shell: pwsh
+        run: |
+          $text = (Get-Content CHANGELOG.md -Raw) -replace "`r`n", "`n"
+          $pattern = '(?ms)^## \[' + [regex]::Escape($env:VERSION) + '\][^\n]*\n(.*?)(?=^## \[|^\[[^\]\n]+\]: |\z)'
+          $match = [regex]::Match($text, $pattern)
+          if (-not $match.Success) {
+            throw "CHANGELOG.md has no section for $env:VERSION."
+          }
+          $match.Groups[1].Value.Trim() | Set-Content release-notes.md -Encoding utf8
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Install the WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build the program and the installers
+        shell: pwsh
+        run: ./installer/build.ps1
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem target/installer -File | ForEach-Object { $_.FullName }
+          gh release create $env:TAG @files --title "DevAssist $env:VERSION" --notes-file release-notes.md --verify-tag

@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time. Please do not report security problems here: see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start devassist
+        2. Press ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `devassist --doctor`
+      description: It prints the version, the settings and the state of each clone. Remove anything you do not want to share.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: DevAssist version
+      description: Shown in the title of the dialog that `v` opens.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How was it installed?
+      options:
+        - Setup wizard (setup.exe), for me only
+        - Setup wizard (setup.exe), for all users
+        - MSI
+        - Plain executable
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System and terminal
+      placeholder: Windows 11, Windows Terminal, git 2.47

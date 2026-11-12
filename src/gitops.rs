@@ -1199,10 +1199,9 @@ pub fn github_owner_repo(url: &str) -> Option<(String, String)> {
         rest
     } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
         rest
-    } else if let Some(index) = url.find("github.com/") {
-        &url[index + "github.com/".len()..]
     } else {
-        return None;
+        let index = url.find("github.com/")?;
+        &url[index + "github.com/".len()..]
     };
     let rest = rest.trim_end_matches('/').trim_end_matches(".git");
     let mut parts = rest.split('/');

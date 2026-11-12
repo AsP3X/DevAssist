@@ -8,6 +8,7 @@ mod pathprompt;
 mod select;
 mod settings;
 mod ui;
+mod update;
 
 use std::io::{self, IsTerminal};
 use std::time::Duration;
@@ -69,10 +70,24 @@ fn run_tui(settings: config::Settings) -> Result<(), Box<dyn std::error::Error>>
         }
     };
     restore_terminal(&mut terminal)?;
+    if app.restart {
+        // An update was installed: hand the terminal to the new version.
+        let exe = std::env::current_exe()?;
+        let status = std::process::Command::new(exe)
+            .args(std::env::args_os().skip(1))
+            .status()?;
+        std::process::exit(status.code().unwrap_or(0));
+    }
     result
 }
 
 fn doctor(settings: &config::Settings) -> Result<(), Box<dyn std::error::Error>> {
+    println!("version   {}", update::VERSION);
+    match update::check(github::token().as_deref()) {
+        Ok(Some(release)) => println!("update    {} is available", release.version),
+        Ok(None) => println!("update    none, this is the latest"),
+        Err(err) => println!("update    could not look: {err}"),
+    }
     println!("settings  {}", settings.config_path.display());
     println!("clone dir {}", settings.clone_dir.display());
     println!("title     {}", settings.title);

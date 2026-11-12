@@ -35,6 +35,10 @@ pub struct Settings {
     pub placement: Vec<(PathBuf, String)>,
     /// Groups that are folded shut.
     pub collapsed: Vec<String>,
+    /// Look for a newer version at startup. Saved in the settings file.
+    pub update_check: bool,
+    /// False when this start was told not to look, with --no-update-check.
+    pub update_check_now: bool,
     /// Where the settings are saved.
     pub config_path: PathBuf,
     /// No settings file exists yet and no flag chose the accounts.
@@ -56,6 +60,7 @@ pub struct Saved {
     pub checkouts: Vec<PathBuf>,
     pub placement: Vec<(PathBuf, String)>,
     pub collapsed: Vec<String>,
+    pub update_check: bool,
 }
 
 pub enum Startup {
@@ -70,6 +75,7 @@ struct Flags {
     import: Vec<PathBuf>,
     config: Option<PathBuf>,
     no_owner: bool,
+    no_update_check: bool,
     owners: Vec<String>,
     owners_explicit: bool,
     pinned: Vec<RepoSpec>,
@@ -88,6 +94,7 @@ struct ParsedConfig {
     checkouts: Vec<PathBuf>,
     placement: Vec<(PathBuf, String)>,
     collapsed: Vec<String>,
+    update_check: Option<bool>,
 }
 
 /// The settings file as found at startup.
@@ -160,6 +167,11 @@ pub fn startup() -> Result<Startup, String> {
         .as_ref()
         .map(|file| (file.placement.clone(), file.collapsed.clone()))
         .unwrap_or_default();
+    let update_check = loaded
+        .file
+        .as_ref()
+        .and_then(|file| file.update_check)
+        .unwrap_or(true);
     let discovered = discovered_owners(&checkouts);
     let resolved = resolve(&flags, loaded.file, &discovered);
     Ok(Startup::Run(Box::new(Settings {
@@ -174,6 +186,8 @@ pub fn startup() -> Result<Startup, String> {
         clone_dir,
         placement,
         collapsed,
+        update_check,
+        update_check_now: update_check && !flags.no_update_check,
         config_path: loaded.path,
         first_run,
         unsaved,
@@ -212,6 +226,8 @@ Options
                      ~/.config/devassist elsewhere. A file an older
                      version kept in the clone folder or beside the
                      executable is taken over once, with that folder's clones.
+  --no-update-check  Do not look for a newer version at this start. Put
+                     update_check = off in the settings file to never look.
   --doctor           Print the settings and the GitHub check, then exit.
 
 Settings file
@@ -235,6 +251,7 @@ Keys
   a add      u update         U update all      d remove or forget
   i import   r refresh        s sort            o open folder
   c settings l last update or clone             q quit
+  v version: look for an update and install it
 
 Drag across text and release to copy it. Ctrl-C copies a selection,
 or quits when nothing is selected. Esc clears a selection.
@@ -260,6 +277,7 @@ where
             "-h" | "--help" => flags.help = true,
             "--doctor" => flags.doctor = true,
             "--no-owner" => flags.no_owner = true,
+            "--no-update-check" => flags.no_update_check = true,
             "--import" | "--root" => flags
                 .import
                 .push(PathBuf::from(need(&mut args, "--import")?)),
@@ -599,6 +617,9 @@ fn render(saved: &Saved) -> String {
     for group in &saved.collapsed {
         out.push_str(&format!("collapsed = {group}\n"));
     }
+    if !saved.update_check {
+        out.push_str("update_check = off\n");
+    }
     out
 }
 
@@ -715,6 +736,13 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                 push_path(&mut parsed.checkouts, path);
             }
             "collapsed" => push_unique(&mut parsed.collapsed, value),
+            "update_check" => {
+                parsed.update_check = Some(match value.to_ascii_lowercase().as_str() {
+                    "on" | "yes" | "true" => true,
+                    "off" | "no" | "false" => false,
+                    _ => return Err(format!("line {line_no}: update_check is on or off")),
+                });
+            }
             other => return Err(format!("line {line_no}: unknown setting {other}")),
         }
     }
@@ -883,6 +911,7 @@ mod tests {
             ],
             placement: Vec::new(),
             collapsed: Vec::new(),
+            update_check: true,
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         assert_eq!(parsed.title, saved.title);
@@ -906,6 +935,7 @@ mod tests {
             checkouts: vec![PathBuf::from("/srv/code/api")],
             placement: Vec::new(),
             collapsed: Vec::new(),
+            update_check: true,
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         assert!(!parsed.owners_explicit);
@@ -953,6 +983,7 @@ mod tests {
                 (path("gone"), "Old".into()),
             ],
             collapsed: vec!["home".into()],
+            update_check: true,
         };
         let text = render(&saved);
         let lines: Vec<&str> = text.lines().skip(2).collect();
@@ -982,6 +1013,38 @@ mod tests {
     }
 
     #[test]
+    fn the_update_check_can_be_turned_off() {
+        assert_eq!(
+            parse_config("update_check = off\n").unwrap().update_check,
+            Some(false)
+        );
+        assert_eq!(
+            parse_config("update_check = Yes\n").unwrap().update_check,
+            Some(true)
+        );
+        assert_eq!(parse_config("title = x\n").unwrap().update_check, None);
+        assert!(parse_config("update_check = maybe\n").is_err());
+        assert!(flags_from(&["--no-update-check"]).no_update_check);
+
+        let mut saved = Saved {
+            title: None,
+            owners: Vec::new(),
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: Vec::new(),
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+            update_check: true,
+        };
+        // On is the default and is not written down.
+        assert!(!render(&saved).contains("update_check"));
+        saved.update_check = false;
+        assert!(render(&saved).contains("update_check = off\n"));
+    }
+
+    #[test]
     fn saving_no_accounts_stays_empty_instead_of_following_the_folder() {
         let saved = Saved {
             title: None,
@@ -993,6 +1056,7 @@ mod tests {
             checkouts: Vec::new(),
             placement: Vec::new(),
             collapsed: Vec::new(),
+            update_check: true,
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         let resolved = resolve(&Flags::default(), Some(parsed), &["storytold".into()]);

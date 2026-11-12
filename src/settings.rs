@@ -182,6 +182,7 @@ impl Form {
             checkouts: Vec::new(),
             placement: Vec::new(),
             collapsed: Vec::new(),
+            update_check: true,
         })
     }
 

@@ -6,6 +6,8 @@
   Writes to target\installer:
     devassist-<version>-x64.msi     Windows Installer package (WiX)
     devassist-<version>-setup.exe   setup wizard (Inno Setup)
+    devassist-<version>-x64.exe     the plain program; self-update downloads this
+    SHA256SUMS.txt                  the SHA-256 of the files above
 
   The version comes from Cargo.toml. An installer whose tool is missing is
   skipped with a note on how to get the tool; the script then exits with 1.
@@ -42,6 +44,8 @@ if (-not $SkipBuild) {
 }
 if (-not (Test-Path $exe)) { throw "$exe is missing. Run without -SkipBuild." }
 New-Item -ItemType Directory -Force $out | Out-Null
+# Files of other versions would end up in a release. Start clean.
+Get-ChildItem $out -File | Remove-Item -Force
 
 $missing = @()
 
@@ -73,6 +77,20 @@ if ($iscc) {
 } else {
     $missing += 'setup.exe skipped: Inno Setup is not installed. Get it with: winget install JRSoftware.InnoSetup'
 }
+
+# ---- the plain program
+# For people who want no installer, and what self-update downloads. The name
+# must end in -x64.exe: src/update.rs looks for that.
+Copy-Item $exe (Join-Path $out "devassist-$version-x64.exe") -Force
+
+# ---- checksums
+# One "<sha256>  <name>" line per file, with LF endings, as sha256sum writes
+# them. Self-update checks its download against this list.
+$lines = Get-ChildItem $out -File |
+    Where-Object { $_.Name -ne 'SHA256SUMS.txt' } |
+    Sort-Object Name |
+    ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
+[IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), (($lines -join "`n") + "`n"))
 
 Write-Host ''
 Get-ChildItem $out -File | ForEach-Object {

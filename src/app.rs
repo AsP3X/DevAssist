@@ -16,6 +16,7 @@ use crate::job::{Job, JobEvent};
 use crate::pathprompt::{self, PathPrompt, Purpose};
 use crate::select::{PointerEffect, PointerEvent};
 use crate::settings::{Form, Outcome};
+use crate::update::{self, Release};
 
 /// How long the Add search waits after the last key before asking GitHub.
 const LOOKUP_DELAY: Duration = Duration::from_millis(350);
@@ -58,6 +59,8 @@ pub enum Mode {
     Group,
     /// The actions for the chosen repositories, opened with Enter.
     Menu,
+    /// The version dialog: look for an update, install it, restart.
+    Update,
     Help,
     Settings,
     Progress,
@@ -151,6 +154,25 @@ impl Row<'_> {
     }
 }
 
+/// What is known about a newer version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateState {
+    /// Nobody has looked yet.
+    Unknown,
+    Checking,
+    /// The running version is the latest.
+    Current,
+    Available(Release),
+    Installing {
+        release: Release,
+        done: u64,
+        total: u64,
+    },
+    /// This version was put in place. It runs after a restart.
+    Installed(String),
+    Failed(String),
+}
+
 /// One line of the actions menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
@@ -240,6 +262,10 @@ enum Msg {
         result: Result<Vec<RemoteRepo>, String>,
     },
     Login(Option<String>),
+    /// The answer to "is there a newer version?".
+    Update(Result<Option<Release>, String>),
+    UpdateProgress(u64, u64),
+    UpdateDone(Result<(), String>),
     Job(JobEvent),
     /// A clone landed here, or a checkout that was already here was found.
     Cloned(PathBuf),
@@ -314,6 +340,13 @@ pub struct App {
     pub copy_failed: bool,
     pub hits: Hits,
     pub should_quit: bool,
+    /// Start the program again after quitting: an update was installed.
+    pub restart: bool,
+    pub update: UpdateState,
+    /// A failed look at startup stays quiet; one the user asked for says why.
+    update_quiet: bool,
+    /// Look for a newer version at startup, as the settings file says.
+    update_check: bool,
     generation: u64,
     remote_generation: u64,
     status_pending: usize,
@@ -333,7 +366,12 @@ impl App {
     pub fn new(settings: Settings) -> Self {
         let first_run = settings.first_run;
         let unsaved = settings.unsaved;
+        let look_for_update = settings.update_check_now;
         let mut app = Self::empty(settings);
+        update::clean_up();
+        if look_for_update {
+            app.check_for_update(true);
+        }
         app.reload_lists(false, false);
         app.fetch_after_read = true;
         if unsaved {
@@ -413,6 +451,10 @@ impl App {
             copy_failed: false,
             hits: Hits::default(),
             should_quit: false,
+            restart: false,
+            update: UpdateState::Unknown,
+            update_quiet: false,
+            update_check: settings.update_check,
             generation: 0,
             remote_generation: 0,
             status_pending: 0,
@@ -449,6 +491,10 @@ impl App {
             || self.lookup_running.is_some()
             || self.job_close_at.is_some()
             || !self.queue.is_empty()
+            || matches!(
+                self.update,
+                UpdateState::Checking | UpdateState::Installing { .. }
+            )
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -856,6 +902,7 @@ impl App {
             Mode::Path => self.on_path_key(key),
             Mode::Group => self.on_group_key(key, ctrl),
             Mode::Menu => self.on_menu_key(key),
+            Mode::Update => self.on_update_key(key),
             Mode::Add => self.on_add_key(key, ctrl),
             Mode::Filter => self.on_filter_key(key, ctrl),
             Mode::List => self.on_list_key(key, ctrl),
@@ -886,6 +933,7 @@ impl App {
             KeyCode::Char('i') | KeyCode::Char('I') => self.open_import(),
             KeyCode::Char('c') | KeyCode::Char(',') | KeyCode::F(2) => self.open_settings(false),
             KeyCode::Char('l') | KeyCode::Char('L') => self.show_job(),
+            KeyCode::Char('v') | KeyCode::Char('V') => self.open_update(),
             KeyCode::Char('q') => self.quit(),
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('/') => {
@@ -978,6 +1026,79 @@ impl App {
             Some(group) if self.marked.is_empty() => self.toggle_group(&group),
             _ => self.open_menu(),
         }
+    }
+
+    /// Asks GitHub for a newer version, on a thread of its own.
+    fn check_for_update(&mut self, quiet: bool) {
+        if matches!(
+            self.update,
+            UpdateState::Checking | UpdateState::Installing { .. } | UpdateState::Installed(_)
+        ) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        self.update_quiet = quiet;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let token = github::token();
+            let _ = tx.send(Msg::Update(update::check(token.as_deref())));
+        });
+    }
+
+    /// `v`: the version dialog. It looks for an update unless one is
+    /// already known or being installed.
+    fn open_update(&mut self) {
+        self.mode = Mode::Update;
+        if matches!(
+            self.update,
+            UpdateState::Unknown | UpdateState::Current | UpdateState::Failed(_)
+        ) {
+            self.check_for_update(false);
+        }
+    }
+
+    fn on_update_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = Mode::List,
+            KeyCode::Enter => self.update_enter(),
+            _ => {}
+        }
+    }
+
+    /// Enter in the version dialog: install what is available, restart
+    /// into what was installed, or look again.
+    fn update_enter(&mut self) {
+        match self.update.clone() {
+            UpdateState::Available(release) => self.install_update(release),
+            UpdateState::Installed(_) => {
+                self.restart = true;
+                self.quit();
+            }
+            UpdateState::Current | UpdateState::Failed(_) | UpdateState::Unknown => {
+                self.check_for_update(false);
+            }
+            UpdateState::Checking | UpdateState::Installing { .. } => {}
+        }
+    }
+
+    fn install_update(&mut self, release: Release) {
+        let total = release
+            .download
+            .as_ref()
+            .map_or(0, |download| download.size);
+        self.update = UpdateState::Installing {
+            release: release.clone(),
+            done: 0,
+            total,
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let token = github::token();
+            let result = update::install(&release, token.as_deref(), |done, total| {
+                let _ = tx.send(Msg::UpdateProgress(done, total));
+            });
+            let _ = tx.send(Msg::UpdateDone(result));
+        });
     }
 
     fn open_menu(&mut self) {
@@ -1473,6 +1594,7 @@ impl App {
             checkouts: self.checkouts.clone(),
             placement: self.placement.clone(),
             collapsed: self.collapsed.clone(),
+            update_check: self.update_check,
         };
         if let Err(err) = config::save(&self.config_path, &saved) {
             self.notice(err, true);
@@ -1803,6 +1925,7 @@ impl App {
             Action::Confirm if self.mode == Mode::Path => self.accept_path(),
             Action::Confirm if self.mode == Mode::Group => self.accept_group(),
             Action::Cancel if self.mode == Mode::Menu => self.close_menu(),
+            Action::Confirm if self.mode == Mode::Update => self.update_enter(),
             Action::Cancel if self.mode == Mode::Group => self.close_group(),
             Action::Confirm => self.confirm_remove(),
             Action::Forget => self.forget_chosen(),
@@ -2064,6 +2187,7 @@ impl App {
         saved.checkouts = self.checkouts.clone();
         saved.placement = self.placement.clone();
         saved.collapsed = self.collapsed.clone();
+        saved.update_check = self.update_check;
         if let Err(err) = config::save(&form.path, &saved) {
             form.error = Some(err);
             return;
@@ -2902,6 +3026,53 @@ impl App {
                     self.settle_add_selection();
                 }
             }
+            Msg::Update(result) => {
+                self.update = match result {
+                    Ok(Some(release)) => {
+                        if !self.busy && self.mode != Mode::Update {
+                            self.notice(
+                                format!(
+                                    "DevAssist {} is available. Press v to install it.",
+                                    release.version
+                                ),
+                                false,
+                            );
+                        }
+                        UpdateState::Available(release)
+                    }
+                    Ok(None) => UpdateState::Current,
+                    // Nobody asked: a failed look at startup is not news.
+                    Err(_) if self.update_quiet => UpdateState::Unknown,
+                    Err(err) => UpdateState::Failed(err),
+                };
+            }
+            Msg::UpdateProgress(done, total) => {
+                if let UpdateState::Installing {
+                    done: shown,
+                    total: of,
+                    ..
+                } = &mut self.update
+                {
+                    *shown = done;
+                    *of = total;
+                }
+            }
+            Msg::UpdateDone(result) => {
+                let version = match &self.update {
+                    UpdateState::Installing { release, .. } => release.version.clone(),
+                    _ => String::new(),
+                };
+                self.update = match result {
+                    Ok(()) => {
+                        self.notice(
+                            format!("DevAssist {version} is installed. Restart to use it."),
+                            false,
+                        );
+                        UpdateState::Installed(version)
+                    }
+                    Err(err) => UpdateState::Failed(err),
+                };
+            }
             Msg::Login(login) => {
                 if let (Some(form), Some(login)) = (self.form.as_mut(), login) {
                     form.suggest_account(&login);
@@ -3080,6 +3251,8 @@ mod tests {
             checkouts: Vec::new(),
             placement: Vec::new(),
             collapsed: Vec::new(),
+            update_check: false,
+            update_check_now: false,
             clone_dir: std::env::temp_dir().join("devassist-clones"),
             owners_explicit: true,
             unsaved: false,
@@ -4047,6 +4220,105 @@ mod tests {
         // None of them is a key that moves or closes the menu.
         assert!(!keys.iter().any(|key| "jkq".contains(*key)));
         let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    fn release(version: &str) -> Release {
+        Release {
+            version: version.into(),
+            notes: "- Something new".into(),
+            page: format!("https://github.com/AsP3X/DevAssist/releases/tag/v{version}"),
+            download: Some(update::Asset {
+                name: format!("devassist-{version}-x64.exe"),
+                url: "https://api.github.com/assets/1".into(),
+                size: 4_000_000,
+            }),
+            sums: None,
+        }
+    }
+
+    #[test]
+    fn a_newer_version_is_announced_and_installing_ends_in_a_restart() {
+        let mut app = App::empty(test_settings());
+        assert_eq!(app.update, UpdateState::Unknown);
+        assert!(!app.restart);
+
+        // The look at startup found one: the status line says so.
+        app.update = UpdateState::Checking;
+        app.on_msg(Msg::Update(Ok(Some(release("9.0.0")))));
+        assert_eq!(app.update, UpdateState::Available(release("9.0.0")));
+        assert_eq!(
+            app.status,
+            "DevAssist 9.0.0 is available. Press v to install it."
+        );
+
+        // While it downloads, progress arrives; then it is in place.
+        app.update = UpdateState::Installing {
+            release: release("9.0.0"),
+            done: 0,
+            total: 4_000_000,
+        };
+        assert!(app.waiting());
+        app.on_msg(Msg::UpdateProgress(1_000_000, 4_000_000));
+        assert!(matches!(
+            app.update,
+            UpdateState::Installing {
+                done: 1_000_000,
+                ..
+            }
+        ));
+        app.on_msg(Msg::UpdateDone(Ok(())));
+        assert_eq!(app.update, UpdateState::Installed("9.0.0".into()));
+        assert_eq!(
+            app.status,
+            "DevAssist 9.0.0 is installed. Restart to use it."
+        );
+
+        // Enter in the version dialog restarts into it.
+        app.mode = Mode::Update;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.restart);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn a_failed_look_is_quiet_at_startup_and_said_when_asked_for() {
+        let mut app = App::empty(test_settings());
+        app.update = UpdateState::Checking;
+        app.update_quiet = true;
+        app.on_msg(Msg::Update(Err("could not reach GitHub".into())));
+        assert_eq!(app.update, UpdateState::Unknown);
+        assert!(!app.status_error);
+
+        app.update = UpdateState::Checking;
+        app.update_quiet = false;
+        app.on_msg(Msg::Update(Err("could not reach GitHub".into())));
+        assert_eq!(
+            app.update,
+            UpdateState::Failed("could not reach GitHub".into())
+        );
+
+        app.update = UpdateState::Checking;
+        app.on_msg(Msg::Update(Ok(None)));
+        assert_eq!(app.update, UpdateState::Current);
+
+        // A failed install says why and can be tried again.
+        app.update = UpdateState::Installing {
+            release: release("9.0.0"),
+            done: 10,
+            total: 20,
+        };
+        app.on_msg(Msg::UpdateDone(Err("the download stopped".into())));
+        assert_eq!(
+            app.update,
+            UpdateState::Failed("the download stopped".into())
+        );
+        assert!(!app.restart);
+
+        // Esc leaves the dialog without doing anything.
+        app.mode = Mode::Update;
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert!(!app.should_quit);
     }
 
     #[test]

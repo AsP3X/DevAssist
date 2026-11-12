@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, group_key};
+use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
 use crate::gitops::LocalRepo;
 use crate::job::{ItemState, clock, split_progress};
 use crate::pathprompt::Purpose;
@@ -50,6 +50,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Mode::Path => draw_path(frame, app, area),
         Mode::Group => draw_group(frame, app, area),
         Mode::Menu => draw_menu(frame, app, area),
+        Mode::Update => draw_update(frame, app, area),
         Mode::Help => draw_help(frame, app, area),
         Mode::Settings => draw_settings(frame, app, area),
         Mode::Progress => draw_progress(frame, app, area),
@@ -156,6 +157,17 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         meta_text.push_str(&format!(" · {dirty} dirty"));
     }
     meta_text.push_str(&format!(" · {github}"));
+    match &app.update {
+        UpdateState::Available(release) => {
+            meta_text.push_str(&format!(" · version {} is out, press v", release.version));
+        }
+        UpdateState::Installed(version) => {
+            meta_text.push_str(&format!(
+                " · version {version} runs after a restart, press v"
+            ));
+        }
+        _ => {}
+    }
     let meta = Line::from(Span::styled(
         fit(&meta_text, width),
         Style::default().fg(Color::Gray),
@@ -871,6 +883,146 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
             ("Cancel", Action::Cancel),
         ],
     );
+}
+
+/// The version dialog: what runs, what is out, and installing it.
+fn draw_update(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let tick = app.tick as usize;
+    let state = app.update.clone();
+    let popup = centered(
+        screen,
+        72.min(screen.width.saturating_sub(2)),
+        16.min(screen.height.saturating_sub(2)),
+    );
+    let accent = match &state {
+        UpdateState::Failed(_) => Color::Red,
+        UpdateState::Available(_) | UpdateState::Installed(_) => Color::Green,
+        _ => Color::Cyan,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(accent))
+        .title(Span::styled(
+            format!(" DevAssist {} ", crate::update::VERSION),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let text = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height.saturating_sub(1),
+    };
+    let width = text.width as usize;
+    let dim = Style::default().fg(Color::DarkGray);
+    let bold = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let megabytes = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1_048_576.0);
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    let buttons: Vec<(&str, Action)> = match &state {
+        UpdateState::Unknown | UpdateState::Checking => {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", SPINNER[(tick / 2) % SPINNER.len()]),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw("Looking for a newer version…"),
+            ]));
+            vec![("Close", Action::Cancel)]
+        }
+        UpdateState::Current => {
+            lines.push(Line::from(Span::styled(
+                "✓ This is the latest version.",
+                bold,
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("enter looks again", dim)));
+            vec![("Look again", Action::Confirm), ("Close", Action::Cancel)]
+        }
+        UpdateState::Available(release) => {
+            lines.push(Line::from(Span::styled(
+                format!("Version {} is available.", release.version),
+                bold,
+            )));
+            lines.push(Line::from(""));
+            // What is new, as far as there is room for it.
+            let room = (text.height as usize).saturating_sub(lines.len() + 3);
+            let notes: Vec<&str> = release
+                .notes
+                .lines()
+                .map(str::trim_end)
+                .filter(|line| !line.trim().is_empty())
+                .collect();
+            for line in notes.iter().take(room) {
+                lines.push(Line::from(Span::styled(
+                    fit(line, width),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            if notes.len() > room {
+                lines.push(Line::from(Span::styled("…", dim)));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                fit("enter downloads it and replaces this program.", width),
+                dim,
+            )));
+            vec![("Install", Action::Confirm), ("Later", Action::Cancel)]
+        }
+        UpdateState::Installing {
+            release,
+            done,
+            total,
+        } => {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} ", SPINNER[(tick / 2) % SPINNER.len()]),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(format!("Downloading version {}…", release.version)),
+            ]));
+            lines.push(Line::from(""));
+            let fraction = (*total > 0).then(|| *done as f64 / *total as f64);
+            lines.push(Line::from(bar_spans(width, fraction, Color::Cyan, tick)));
+            lines.push(Line::from(Span::styled(
+                format!("{} of {}", megabytes(*done), megabytes(*total)),
+                dim,
+            )));
+            vec![("Hide", Action::Cancel)]
+        }
+        UpdateState::Installed(version) => {
+            lines.push(Line::from(Span::styled(
+                format!("✓ Version {version} is installed."),
+                bold,
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(
+                "It runs the next time DevAssist starts. enter restarts now.",
+            ));
+            vec![("Restart now", Action::Confirm), ("Later", Action::Cancel)]
+        }
+        UpdateState::Failed(err) => {
+            lines.push(Line::from(Span::styled("✗ That did not work.", bold)));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                err.clone(),
+                Style::default().fg(Color::Red),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("enter tries again", dim)));
+            vec![("Try again", Action::Confirm), ("Close", Action::Cancel)]
+        }
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text);
+    let row = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    draw_dialog_buttons(frame, app, row, &buttons);
 }
 
 /// The actions for the chosen repositories, opened with Enter.
@@ -1982,7 +2134,7 @@ fn draw_help(frame: &mut Frame, app: &mut App, screen: Rect) {
     let popup = centered(
         screen,
         72.min(screen.width.saturating_sub(2)),
-        30.min(screen.height.saturating_sub(2)),
+        31.min(screen.height.saturating_sub(2)),
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2012,6 +2164,7 @@ s              sort by name or by attention
 o              open the selection in the file manager
 c              settings: default accounts, protocol, title
 l              show the last update or clone
+v              version: look for an update and install it
 /              filter the installed list
 drag           select text and copy it
 wheel          scroll
@@ -2252,6 +2405,8 @@ mod tests {
             checkouts: Vec::new(),
             placement: Vec::new(),
             collapsed: Vec::new(),
+            update_check: false,
+            update_check_now: false,
             clone_dir: PathBuf::from("development"),
             owners_explicit: true,
             unsaved: false,
@@ -2555,6 +2710,59 @@ mod tests {
         assert!(screen.contains("▌ Update "));
         assert!(screen.contains("Open the folders"));
         assert!(screen.contains("Copy the paths"));
+    }
+
+    #[test]
+    fn the_version_dialog_walks_through_an_update() {
+        use crate::update::{Asset, Release};
+        let release = Release {
+            version: "9.0.0".into(),
+            notes: "## What is new\n\n- Groups fold\n- Faster clones".into(),
+            page: "https://github.com/AsP3X/DevAssist/releases/tag/v9.0.0".into(),
+            download: Some(Asset {
+                name: "devassist-9.0.0-x64.exe".into(),
+                url: "https://api.github.com/assets/1".into(),
+                size: 4_194_304,
+            }),
+            sums: None,
+        };
+        let mut app = app(false);
+
+        // In the overview, the header says a version is out.
+        app.update = UpdateState::Available(release.clone());
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("version 9.0.0 is out, press v"));
+
+        app.mode = Mode::Update;
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains(&format!("╭ DevAssist {} ", crate::update::VERSION)));
+        assert!(screen.contains("Version 9.0.0 is available."));
+        assert!(screen.contains("- Groups fold"));
+        assert!(screen.contains(" Install   Later "));
+
+        app.update = UpdateState::Installing {
+            release,
+            done: 1_048_576,
+            total: 4_194_304,
+        };
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("Downloading version 9.0.0…"));
+        assert!(screen.contains("1.0 MB of 4.0 MB"));
+
+        app.update = UpdateState::Installed("9.0.0".into());
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("✓ Version 9.0.0 is installed."));
+        assert!(screen.contains(" Restart now   Later "));
+
+        app.update = UpdateState::Failed("DevAssist cannot write to C:\\Program Files".into());
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("✗ That did not work."));
+        assert!(screen.contains("DevAssist cannot write to"));
+        assert!(screen.contains(" Try again   Close "));
+
+        app.update = UpdateState::Current;
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("✓ This is the latest version."));
     }
 
     #[test]
