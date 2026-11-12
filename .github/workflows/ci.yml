@@ -20,7 +20,7 @@ jobs:
     name: Format, lint and test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the Rust toolchain
         run: |
@@ -28,7 +28,7 @@ jobs:
           rustup default stable
 
       - name: Cache the build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
