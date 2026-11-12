@@ -8,8 +8,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
 use crate::atoms::sys::paths;
+use crate::atoms::task::job::{ItemState, clock, split_progress};
 use crate::gitops::LocalRepo;
-use crate::job::{ItemState, clock, split_progress};
 use crate::pathprompt::Purpose;
 use crate::settings::{Field, PROTOCOLS};
 
@@ -2845,13 +2845,13 @@ mod tests {
         assert!(screen.contains("2 selected"));
     }
 
-    fn job(names: &[&str], skipped: usize) -> crate::job::Job {
+    fn job(names: &[&str], skipped: usize) -> crate::atoms::task::job::Job {
         let names = names.iter().map(|name| (*name).to_string()).collect();
-        crate::job::Job::new("Cloning 3 repositories", names, skipped)
+        crate::atoms::task::job::Job::new("Cloning 3 repositories", names, skipped)
     }
 
-    fn batch() -> crate::job::Job {
-        use crate::job::JobEvent;
+    fn batch() -> crate::atoms::task::job::Job {
+        use crate::atoms::task::job::JobEvent;
         let mut run = job(&["AsP3X/api", "AsP3X/portal", "AsP3X/docs"], 2);
         run.on(JobEvent::Start(0));
         run.on(JobEvent::Line("Cloning into 'api'...".into(), false));
@@ -2902,10 +2902,10 @@ mod tests {
 
     #[test]
     fn an_update_shows_each_repository_by_its_branches() {
-        use crate::job::JobEvent;
+        use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
         let names = ["api", "portal", "docs"].map(String::from).to_vec();
-        let mut run = crate::job::Job::new("Updating 3 repositories", names, 0);
+        let mut run = crate::atoms::task::job::Job::new("Updating 3 repositories", names, 0);
         run.on(JobEvent::Start(0));
         run.on(JobEvent::Steps(0, 2));
         run.on(JobEvent::Steps(2, 2));
@@ -2959,7 +2959,7 @@ mod tests {
 
     #[test]
     fn a_failed_job_says_what_went_wrong() {
-        use crate::job::JobEvent;
+        use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
         let mut run = job(&["AsP3X/api", "AsP3X/portal"], 0);
         run.on(JobEvent::Start(0));
@@ -2983,9 +2983,10 @@ mod tests {
 
     #[test]
     fn one_repository_gets_the_whole_dialog_for_its_output() {
-        use crate::job::JobEvent;
+        use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
-        let mut run = crate::job::Job::new("Updating artcraft", vec!["artcraft".into()], 0);
+        let mut run =
+            crate::atoms::task::job::Job::new("Updating artcraft", vec!["artcraft".into()], 0);
         run.on(JobEvent::Start(0));
         run.on(JobEvent::Line(
             "From https://github.com/AsP3X/artcraft".into(),
@@ -3008,7 +3009,7 @@ mod tests {
 
     #[test]
     fn the_progress_dialog_fits_the_smallest_terminal() {
-        use crate::job::JobEvent;
+        use crate::atoms::task::job::JobEvent;
         let mut app = app(false);
         let mut run = job(&["one", "two", "three", "four", "five", "six"], 0);
         run.on(JobEvent::Start(4));

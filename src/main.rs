@@ -3,7 +3,6 @@ mod atoms;
 mod config;
 mod github;
 mod gitops;
-mod job;
 mod pathprompt;
 mod select;
 mod settings;
