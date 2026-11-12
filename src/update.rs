@@ -119,12 +119,15 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 /// as new, or when nothing has been released yet.
 pub fn check(token: Option<&str>) -> Result<Option<Release>, String> {
     let url = format!("https://api.github.com/repos/{REPOSITORY}/releases/latest");
-    let response = match request(&url, token, "application/vnd.github+json").call() {
-        Ok(response) => response,
-        Err(ureq::Error::Status(404, _)) => return Ok(None),
-        Err(err) => return Err(explain(err)),
-    };
-    let body = response.into_string().map_err(|err| err.to_string())?;
+    let response = get(&url, token, "application/vnd.github+json")?;
+    // No release yet, or a repository this sign-in cannot see.
+    if response.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    let body = succeeded(response)?
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| err.to_string())?;
     let release = parse_release(&body)?;
     Ok(is_newer(&release.version, VERSION).then_some(release))
 }
@@ -252,37 +255,50 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(15))
-            .timeout_read(Duration::from_secs(30))
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(15)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            // A download may take long as a whole, but must keep moving.
+            .timeout_per_read(Some(Duration::from_secs(30)))
+            // Statuses are judged here: a 404 means "no release yet".
+            .http_status_as_error(false)
             .build()
+            .into()
     })
 }
 
-fn request(url: &str, token: Option<&str>, accept: &str) -> ureq::Request {
+type Answer = ureq::http::Response<ureq::Body>;
+
+/// Asks GitHub for `url`. An answer with any status comes back; an error
+/// means GitHub could not be reached. The sign-in is not passed on when
+/// GitHub redirects a download to its file storage.
+fn get(url: &str, token: Option<&str>, accept: &str) -> Result<Answer, String> {
     let mut request = agent()
         .get(url)
-        .set("User-Agent", "devassist")
-        .set("Accept", accept)
-        .set("X-GitHub-Api-Version", "2022-11-28");
+        .header("User-Agent", "devassist")
+        .header("Accept", accept)
+        .header("X-GitHub-Api-Version", "2022-11-28");
     if let Some(token) = token {
-        request = request.set("Authorization", &format!("Bearer {token}"));
+        request = request.header("Authorization", format!("Bearer {token}"));
     }
     request
+        .call()
+        .map_err(|err| format!("could not reach GitHub: {err}"))
 }
 
-fn explain(err: ureq::Error) -> String {
-    match err {
-        ureq::Error::Status(code, _) => format!("GitHub answered {code}"),
-        other => format!("could not reach GitHub: {other}"),
+/// The answer, if GitHub said yes.
+fn succeeded(response: Answer) -> Result<Answer, String> {
+    if response.status().is_success() {
+        Ok(response)
+    } else {
+        Err(format!("GitHub answered {}", response.status().as_u16()))
     }
 }
 
 fn download_text(url: &str, token: Option<&str>) -> Result<String, String> {
-    request(url, token, "application/octet-stream")
-        .call()
-        .map_err(explain)?
-        .into_string()
+    succeeded(get(url, token, "application/octet-stream")?)?
+        .body_mut()
+        .read_to_string()
         .map_err(|err| err.to_string())
 }
 
@@ -293,14 +309,14 @@ fn download_into(
     size: u64,
     on_progress: &mut impl FnMut(u64, u64),
 ) -> Result<(), String> {
-    let response = request(url, token, "application/octet-stream")
-        .call()
-        .map_err(explain)?;
+    let response = succeeded(get(url, token, "application/octet-stream")?)?;
     let total = response
-        .header("content-length")
+        .headers()
+        .get("content-length")
+        .and_then(|length| length.to_str().ok())
         .and_then(|length| length.parse().ok())
         .unwrap_or(size);
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     let mut chunk = [0u8; 64 * 1024];
     let mut done = 0u64;
     on_progress(done, total);
@@ -328,6 +344,48 @@ fn download_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real thing, against the latest release on GitHub. It needs the
+    /// network, so it only runs when asked for:
+    /// `cargo test -- --ignored live_download`
+    #[test]
+    #[ignore = "downloads the latest release from GitHub"]
+    fn live_download_matches_its_checksum() {
+        if !cfg!(all(windows, target_arch = "x86_64")) {
+            return;
+        }
+        let token = crate::github::token();
+        let token = token.as_deref();
+        let url = format!("https://api.github.com/repos/{REPOSITORY}/releases/latest");
+        let body = succeeded(get(&url, token, "application/vnd.github+json").unwrap())
+            .unwrap()
+            .body_mut()
+            .read_to_string()
+            .unwrap();
+        let release = parse_release(&body).unwrap();
+        let asset = release.download.expect("the release has the program");
+        let sums = release.sums.expect("the release has checksums");
+        let listed = download_text(&sums.url, token).unwrap();
+        let expected = checksum_for(&listed, &asset.name).expect("the program is listed");
+
+        let path = std::env::temp_dir().join(format!("devassist-live-{}", std::process::id()));
+        let mut file = fs::File::create(&path).unwrap();
+        let mut seen = (0, 0);
+        download_into(
+            &asset.url,
+            token,
+            &mut file,
+            asset.size,
+            &mut |done, total| {
+                seen = (done, total);
+            },
+        )
+        .unwrap();
+        drop(file);
+        assert_eq!(seen, (asset.size, asset.size));
+        assert_eq!(sha256_file(&path).unwrap(), expected);
+        let _ = fs::remove_file(&path);
+    }
 
     #[test]
     fn versions_compare_by_number() {
