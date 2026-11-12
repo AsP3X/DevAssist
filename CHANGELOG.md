@@ -6,10 +6,17 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-12
+
+A maintenance release. It is also the first version that an installed 0.3.0
+can update itself to.
+
 ### Changed
 
-- Updated the HTTP library (ureq 3), the terminal library and the hashing
-  library. Nothing changes in how the app behaves.
+- Updated the libraries for HTTP (ureq 3), the terminal (ratatui 0.30) and
+  hashing (sha2 0.11). Nothing changes in how the app looks or behaves.
+- A self-update download that stops moving for 30 seconds is ended with a
+  message, instead of waiting indefinitely.
 
 ## [0.3.0] - 2026-11-12
 
@@ -64,5 +71,6 @@ a list of clones that can be anywhere on disk.
 The first version, as artcraft-repos: a terminal app that adds, updates and
 removes GitHub clones in one folder.
 
-[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/AsP3X/DevAssist/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/AsP3X/DevAssist/releases/tag/v0.3.0
