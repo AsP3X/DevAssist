@@ -1,7 +1,7 @@
 # Atom-based module split
 
 Date: 2026-11-12
-Status: approved design, not yet implemented
+Status: implemented. Steps 1 to 4a were released up to 0.3.6; steps 4b and 5 are designed in `2026-11-12-docker-tool-design.md` and released in 0.4.0.
 
 ## Goal
 

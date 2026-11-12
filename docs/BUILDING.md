@@ -85,25 +85,55 @@ Windows recognises a newer version of the same program: the `UpgradeCode` in
 | File | What is in it |
 |---|---|
 | `src/main.rs` | Start-up: the command line, then the shell |
-| `src/config.rs` | The settings file and the command line |
-| `src/update.rs` | Looking for a newer release and installing it |
-| `src/shell/` | The terminal, the main loop, and the `Feature` trait every feature implements |
+| `src/shell/mod.rs` | The main loop, the `Feature` trait every tool implements, switching tools, and which keys and clicks are the shell's |
+| `src/shell/chrome.rs` | The top line: the tools and a note |
+| `src/shell/select.rs` | Selecting text with the mouse and copying it |
+| `src/shell/help.rs`, `tools.rs` | The help dialog and the Ctrl-P tool menu |
+| `src/shell/updater.rs` | The version dialog and its state |
+| `src/shell/update.rs` | Looking for a newer release and installing it |
+| `src/shell/config.rs` | The settings file and the command line |
+| `src/shell/terminal.rs` | Putting the terminal into full-screen mode and back |
 | `src/features/repos/app.rs` | The repository overview's state and everything the keys do |
 | `src/features/repos/ui.rs` | Drawing: the overview and every dialog |
 | `src/features/repos/gitops.rs` | Everything that runs `git`: status, fetch, update, clone, remove |
 | `src/features/repos/github.rs` | The GitHub API: listing repositories, the sign-in token |
 | `src/features/repos/gitprogress.rs` | Reading git's progress output |
 | `src/features/repos/settings.rs` | The settings dialog's form |
-| `src/features/repos/mod.rs` | The feature's link to the shell, and `--doctor` |
-| `src/atoms/sys/` | Building blocks for the system: running programs, HTTP, clipboard, paths |
+| `src/features/repos/mod.rs` | The tool's link to the shell, its help text, and `--doctor` |
+| `src/features/docker/model.rs` | Containers, projects, images and volumes, read from Docker's JSON |
+| `src/features/docker/cli.rs` | Every `docker` command the tool runs |
+| `src/features/docker/actions.rs` | What each action runs, and what a confirmation lists |
+| `src/features/docker/state.rs` | The Docker tool's state and everything the keys do |
+| `src/features/docker/view.rs` | Drawing: the four lists and the dialogs |
+| `src/features/docker/mod.rs` | The tool's link to the shell, its help text, and its `--doctor` line |
+| `src/atoms/sys/` | Building blocks for the system: running programs and streaming their output, HTTP, clipboard, paths |
 | `src/atoms/task/` | Building blocks for background work: the job model, worker threads |
-| `src/atoms/ui/` | Building blocks for the screen: text fields, lists, menus, dialogs, the folder prompt, text selection |
+| `src/atoms/ui/` | Building blocks for the screen: text fields, lists, menus, tabs, dialogs, the log view, the folder prompt, text selection |
 | `installer/` | The installer definitions and their build script |
 | `.github/workflows/` | CI and the release build |
 
-A feature is built from atoms and never imports another feature. An atom
-names no feature type. The design is in
-`docs/superpowers/specs/2026-11-12-atom-module-split-design.md`.
+A tool is a feature in the code. It is built from atoms and never imports
+another feature. An atom names no feature type. The shell knows the tools
+only through the `Feature` trait; `main.rs` hands them to it. The designs
+are in `docs/superpowers/specs/`.
+
+### Adding a tool
+
+1. Make `src/features/<name>/` with a struct that implements
+   `shell::Feature`.
+2. Add it to the list in `main.rs`. It gets the next number in the top line.
+
+The shell gives every tool text selection, the help dialog (the tool
+supplies its key list), the version dialog and switching. The tool draws
+into the area it is given, below the top line, and reports `modal()` while
+a text field or one of its dialogs has the keyboard.
+
+The Docker tool has one test that talks to a real engine. It only touches
+containers, an image tag and a volume it creates, named `devassist-test-*`:
+
+```
+cargo test -- --ignored live_docker
+```
 
 ## Other systems
 

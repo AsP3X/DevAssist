@@ -957,6 +957,216 @@ mod tests {
         assert!(screen.contains(" Close "));
     }
 
+    /// Drains until `done` holds, for at most `seconds`.
+    fn wait(docker: &mut Docker, seconds: u64, what: &str, done: impl Fn(&Docker) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        loop {
+            docker.drain();
+            if done(docker) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}; status: {}",
+                docker.status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Everything against a real engine, on containers, an image tag and a
+    /// volume made for the test and named `devassist-test-*`. Nothing else
+    /// is touched. It needs Docker running and the `redis:7-alpine` image:
+    /// `cargo test -- --ignored live_docker`
+    #[test]
+    #[ignore = "needs a running Docker and the redis:7-alpine image"]
+    fn live_docker_lists_logs_stops_and_removes() {
+        use crate::features::docker::cli;
+        let run = |arguments: &[&str]| {
+            let arguments: Vec<String> = arguments.iter().map(|a| a.to_string()).collect();
+            cli::output(&arguments)
+        };
+        let clean = || {
+            let _ = run(&["rm", "--force", "devassist-test-a", "devassist-test-b"]);
+            let _ = run(&["volume", "rm", "devassist-test-vol"]);
+            let _ = run(&["rmi", "devassist-test-img:latest"]);
+        };
+        clean();
+        run(&["create", "--name", "devassist-test-a", "redis:7-alpine"]).unwrap();
+        run(&[
+            "run",
+            "--detach",
+            "--name",
+            "devassist-test-b",
+            "--entrypoint",
+            "sh",
+            "redis:7-alpine",
+            "-c",
+            "while true; do echo tick-tock; sleep 1; done",
+        ])
+        .unwrap();
+        run(&["volume", "create", "devassist-test-vol"]).unwrap();
+        run(&["tag", "redis:7-alpine", "devassist-test-img:latest"]).unwrap();
+
+        let id_of = |docker: &Docker, name: &str| {
+            docker
+                .lists
+                .containers
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.id.clone())
+        };
+        let runs = |docker: &Docker, name: &str| {
+            docker
+                .lists
+                .containers
+                .iter()
+                .any(|c| c.name == name && c.running())
+        };
+        let idle = |docker: &Docker| docker.running.is_none() && docker.queue.is_empty();
+
+        // Opening the tool loads the lists.
+        let mut docker = Docker::new();
+        assert_eq!(docker.engine, Engine::Idle);
+        docker.shown();
+        wait(&mut docker, 30, "the first load", |d| {
+            d.engine == Engine::Ready
+        });
+        let screen = render(&mut docker, 160, 50);
+        assert!(screen.contains("devassist-test-a"), "{screen}");
+        assert!(screen.contains("● devassist-test-b"), "{screen}");
+        assert!(runs(&docker, "devassist-test-b"));
+        assert!(!runs(&docker, "devassist-test-a"));
+
+        // Logs follow the running container, and closing stops them.
+        docker.views[CONTAINERS].selected = id_of(&docker, "devassist-test-b");
+        press(&mut docker, KeyCode::Char('l'));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            docker.drain();
+            if render(&mut docker, 160, 50).contains("tick-tock") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "no log line arrived");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        press(&mut docker, KeyCode::Esc);
+        assert!(docker.log.is_none());
+
+        // `s` stops it; the lists follow by themselves, through the events.
+        press(&mut docker, KeyCode::Char('s'));
+        assert_eq!(docker.status, "Stopping devassist-test-b…");
+        wait(&mut docker, 40, "the stop", |d| {
+            idle(d) && !runs(d, "devassist-test-b")
+        });
+        assert!(!docker.status_error, "{}", docker.status);
+
+        // `s` again starts it.
+        press(&mut docker, KeyCode::Char('s'));
+        wait(&mut docker, 40, "the start", |d| {
+            idle(d) && runs(d, "devassist-test-b")
+        });
+
+        // A change made outside the tool shows up without a key.
+        run(&["stop", "--time", "1", "devassist-test-b"]).unwrap();
+        wait(&mut docker, 20, "the outside stop", |d| {
+            !runs(d, "devassist-test-b")
+        });
+        run(&["start", "devassist-test-b"]).unwrap();
+        wait(&mut docker, 20, "the outside start", |d| {
+            runs(d, "devassist-test-b")
+        });
+
+        // Removing both: Enter takes the stopped one only.
+        let both = vec![
+            id_of(&docker, "devassist-test-a").unwrap(),
+            id_of(&docker, "devassist-test-b").unwrap(),
+        ];
+        docker.views[CONTAINERS].marked = both;
+        press(&mut docker, KeyCode::Char('d'));
+        let screen = render(&mut docker, 160, 50);
+        assert!(screen.contains("These stopped containers will be removed:"));
+        assert!(screen.contains("These are running and stay unless you stop them:"));
+        press(&mut docker, KeyCode::Enter);
+        wait(&mut docker, 30, "the remove", |d| {
+            idle(d) && id_of(d, "devassist-test-a").is_none()
+        });
+        assert!(id_of(&docker, "devassist-test-b").is_some());
+
+        // `f` stops and removes the running one.
+        docker.views[CONTAINERS].selected = id_of(&docker, "devassist-test-b");
+        press(&mut docker, KeyCode::Char('d'));
+        press(&mut docker, KeyCode::Char('f'));
+        wait(&mut docker, 40, "the forced remove", |d| {
+            idle(d) && id_of(d, "devassist-test-b").is_none()
+        });
+        assert!(!docker.status_error, "{}", docker.status);
+
+        // The image tag goes; the image it pointed at stays.
+        docker.tab = IMAGES;
+        let tag = docker
+            .lists
+            .images
+            .iter()
+            .find(|i| i.name() == "devassist-test-img:latest")
+            .map(|i| i.key());
+        assert!(tag.is_some());
+        docker.views[IMAGES].selected = tag;
+        press(&mut docker, KeyCode::Char('d'));
+        let screen = render(&mut docker, 160, 50);
+        assert!(screen.contains("devassist-test-img:latest"));
+        press(&mut docker, KeyCode::Enter);
+        wait(&mut docker, 30, "the image remove", |d| {
+            idle(d)
+                && !d
+                    .lists
+                    .images
+                    .iter()
+                    .any(|i| i.name() == "devassist-test-img:latest")
+        });
+        assert!(
+            docker
+                .lists
+                .images
+                .iter()
+                .any(|i| i.name() == "redis:7-alpine")
+        );
+
+        // The volume goes.
+        docker.tab = VOLUMES;
+        docker.views[VOLUMES].selected = Some("devassist-test-vol".to_string());
+        press(&mut docker, KeyCode::Char('d'));
+        press(&mut docker, KeyCode::Enter);
+        wait(&mut docker, 30, "the volume remove", |d| {
+            idle(d)
+                && !d
+                    .lists
+                    .volumes
+                    .iter()
+                    .any(|v| v.name == "devassist-test-vol")
+        });
+
+        // A command Docker refuses ends in the error dialog.
+        docker.tab = CONTAINERS;
+        docker
+            .lists
+            .containers
+            .push(crate::features::docker::model::Container {
+                id: "devassist-test-gone".into(),
+                name: "devassist-test-gone".into(),
+                state: "exited".into(),
+                ..Default::default()
+            });
+        docker.views[CONTAINERS].selected = Some("devassist-test-gone".to_string());
+        press(&mut docker, KeyCode::Char('s'));
+        wait(&mut docker, 30, "the failure", |d| {
+            matches!(d.dialog, Dialog::Error { .. })
+        });
+        let screen = render(&mut docker, 160, 50);
+        assert!(screen.contains("That did not work."), "{screen}");
+        clean();
+    }
+
     #[test]
     fn it_fits_the_smallest_screen() {
         let mut docker = docker();

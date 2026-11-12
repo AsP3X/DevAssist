@@ -1,7 +1,7 @@
 # Docker tool and shared shell chrome
 
 Date: 2026-11-12
-Status: approved design, not yet implemented
+Status: implemented in 0.4.0. Where the code differs from this text, the section "As built" at the end says how.
 
 ## Goal
 
@@ -226,3 +226,16 @@ Each step compiles, passes the tests and leaves the app usable.
 - **Docker's JSON differs between versions** (for example `Labels` as one comma-separated string, `Mounts` as names only). The model parses only the fields it needs and treats a missing one as empty.
 - **`docker events` can end** when the engine restarts. When the stream ends, the tool falls back to the not-running screen and `r` starts it again.
 - **Windows console windows.** Every docker process is started hidden through `process::quiet`, as git is.
+
+## As built
+
+- **`Feature::help` returns text**, one `key   what it does` line per key, not sections. Every tool's help is such a block, and the shell prints it above its own keys.
+- **The shell does not take a first header line from the repos tool.** It adds one line of its own above every tool, holding the tool strip and a note. The repos tool keeps its three header lines, so the smallest screen is 48 by 13.
+- **`Request` has only `Quit`.** Restarting after an update is the shell's own state.
+- **The GitHub token for the update look is passed in** as `Options::token` from `main.rs`, so the shell's new code imports no feature. `shell/config.rs` still parses the repos tool's settings, as `config.rs` did.
+- **Prune removes exactly the listed things** with `docker rm`, `docker rmi` and `docker volume rm`, not with `docker … prune`. What the dialog shows is what goes. The volumes dialog offers unnamed unused volumes, with a tick box for named ones.
+- **`process::capture`** was added for commands whose whole output is wanted. Docker's commands use it and `Stream`, not `process::run`: `run` shares one cancel flag with git, and cancelling a git update must not stop a `docker` command.
+- **`Worker::sender`** was added so a `Stream` can report on the tool's channel.
+- **Actions with long output** are the four Compose ones. Their output opens in the log view; closing it leaves the command running.
+- **`docker events` is filtered:** the `exec_*` and `health_status` events that health checks cause every few seconds do not reload the lists.
+- **`s` in the Compose tab** brings a project up when some of it is not running and stops it when all of it runs.

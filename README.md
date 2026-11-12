@@ -7,7 +7,8 @@
 DevAssist is a terminal app that keeps all your local GitHub clones in one
 overview. It shows which ones have something new, updates them on every
 branch, clones new ones where you want them, and lets you sort them into
-groups. It works with the keyboard and with the mouse.
+groups. A second tool manages Docker: containers, Compose projects, images
+and volumes, with live logs. It works with the keyboard and with the mouse.
 
 ```
  DevAssist   in 3 folders
@@ -46,13 +47,19 @@ groups. It works with the keyboard and with the mouse.
   organise the list; they are not folders on disk.
 - **Does several things in a row.** Actions you start while another is
   running wait in a queue and run one after another.
+- **Manages Docker.** Press `2` for a second tool: containers grouped by
+  Compose project, Compose projects, images and volumes. Start, stop and
+  restart them, follow logs live, and remove or prune behind a dialog that
+  lists exactly what will go. It needs the `docker` command and does
+  nothing until you open it.
 - **Updates itself.** DevAssist looks for a newer version and installs it in
   place.
 
 ## Install
 
-DevAssist needs [Git](https://git-scm.com/) on your `PATH`. Releases are
-built for 64-bit Windows 10 and 11.
+DevAssist needs [Git](https://git-scm.com/) on your `PATH`. The Docker tool
+needs `docker` there too, as Docker Desktop installs it; without it, only
+that tool is unavailable. Releases are built for 64-bit Windows 10 and 11.
 
 Download from the [latest release](https://github.com/AsP3X/DevAssist/releases/latest):
 

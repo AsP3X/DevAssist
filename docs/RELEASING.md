@@ -43,7 +43,7 @@ it: the app asks GitHub for the latest full release.
 
 ## How self-update works
 
-The code is in `src/update.rs`.
+The code is in `src/shell/update.rs`; the dialog is in `src/shell/updater.rs`.
 
 1. **Look.** At start-up, and when the user presses `v`, the app asks
    `https://api.github.com/repos/AsP3X/DevAssist/releases/latest`. If the tag

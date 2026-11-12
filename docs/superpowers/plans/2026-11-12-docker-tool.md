@@ -14,6 +14,18 @@
 
 This plan was written and executed in the same session by the same author, so it fixes the files, the interfaces, the tests and the checks of each task, and leaves the function bodies to the task. The earlier plans in this folder spell out every line; this one does not.
 
+## Execution notes (2026-11-12)
+
+Executed on branch `feat/docker`; final result `263 passed; 0 failed; 2 ignored`, clippy and format clean at every commit.
+
+- **Tasks 1 to 4 are one commit.** The strip, selection, help, the updater and the two file moves all meet in `shell/mod.rs` and in the repos `App`, and no state between them would have compiled without code that the next task deletes.
+- **Task 5 was done in a separate worktree** while tasks 1 to 4 were under way, and cherry-picked: one commit per atom. Its test for "`kill_active` leaves a stream alone" checks that the stream's process is not in the list `kill_active` works from, instead of calling it: a real call would stop the programs other tests run at the same moment.
+- **Tasks 6 to 8 are one commit.** The four tabs share the row, selection, confirmation and drawing code, so the Compose, Images and Volumes tabs were a few lines each on top of Containers.
+- **Task 10 is a test, not a session at the keyboard:** `live_docker_lists_logs_stops_and_removes`, marked `#[ignore]`, drives the tool with key events against the real engine on a container pair, an image tag and a volume it creates. It passed against Docker 29.7.2: first load, live logs, stop and start, a change made outside the tool arriving through `docker events`, remove, forced remove, image, volume, and a refused command ending in the error dialog. Afterwards no `devassist-test-*` object and no stray `docker` process was left, and the two containers that were there before were untouched.
+- **Prune was not run against the real engine.** It would have removed the machine's own stopped containers and unused images. It runs the same three commands as remove, on the items the dialog lists; the lists are covered by unit tests.
+- **The unreachable engine** was checked with `DOCKER_HOST` pointed at a closed port: `--doctor` prints "not reachable" with Docker's message in under a second.
+- **Not checked by hand:** the Docker tool inside the real terminal with real key presses. The dev build was started and the top line and the overview drew; nothing in this session could type into it.
+
 ## Ground rules for every task
 
 - Branch: `feat/docker`.

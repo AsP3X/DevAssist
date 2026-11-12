@@ -6,6 +6,37 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A Docker tool.** Press `2`, or click Docker in the new top line. It
+  lists containers (grouped by Compose project), Compose projects, images
+  and volumes on four tabs, and follows Docker by itself when something
+  changes.
+  - `s` starts and stops, `R` restarts, `l` opens the logs and follows
+    them, `Enter` shows the actions for the selection.
+  - `d` removes and `p` prunes, both behind a dialog that lists by name
+    what will go. Running containers and images in use stay unless you
+    choose the second button; a volume in use always stays. Taking a
+    Compose project down keeps its volumes unless you tick the box.
+  - It needs the `docker` command. If Docker is missing or stopped, the
+    tool says so and the rest of DevAssist works as before. Nothing runs
+    `docker` until you open the tool.
+- **A top line with the tools.** `1` and `2` switch between Repos and
+  Docker, a click on a name does too, and `Ctrl-P` opens a list of tools
+  that narrows as you type.
+- `--doctor` prints a line about Docker.
+
+### Changed
+
+- The screen has one more line at the top, so the smallest terminal
+  DevAssist draws on is now 48 by 13.
+- The note about a newer version, "release to copy" and "Copied to the
+  clipboard" moved from the repository overview to the right end of the
+  top line, where every tool shows them.
+- Help (`?`) lists the keys of the tool on screen, then the keys that work
+  everywhere. Help, the version dialog (`v`) and copying text by dragging
+  work the same in both tools.
+
 ## [0.3.6] - 2026-11-12
 
 A maintenance release that finishes preparing the code for new features.
