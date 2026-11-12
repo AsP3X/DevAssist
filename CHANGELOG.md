@@ -6,6 +6,19 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-11-12
+
+A maintenance release that continues preparing the code for new features.
+
+### Changed
+
+- In the group dialog, Ctrl-W deletes the last word, as it does in the other
+  text fields. Ctrl-Shift-U and Ctrl-Shift-W now work wherever Ctrl-U and
+  Ctrl-W do.
+- Reorganised the internals further: text fields, lists, the actions menu
+  and the folder dialog are now shared building blocks. Apart from the keys
+  above, nothing changes in how the app looks or behaves.
+
 ## [0.3.4] - 2026-11-12
 
 Fixes a settings file that stopped the app from starting, and continues
@@ -109,7 +122,8 @@ a list of clones that can be anywhere on disk.
 The first version, as artcraft-repos: a terminal app that adds, updates and
 removes GitHub clones in one folder.
 
-[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/AsP3X/DevAssist/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/AsP3X/DevAssist/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/AsP3X/DevAssist/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/AsP3X/DevAssist/compare/v0.3.1...v0.3.2
