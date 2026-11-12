@@ -53,7 +53,7 @@ src/
       dialog.rs   centered frame, button row
       menu.rs     keyed action menu
       confirm.rs  yes/no dialog
-      table.rs    column widths, padded rows, fit / fit_end
+      text.rs     fit / fit_end, padded rows
       progress.rs bar, spinner, item icons
       hits.rs     hit map, contains
       select.rs   mouse text selection (today's select.rs)
@@ -99,7 +99,7 @@ This is the pattern `pathprompt::Outcome` and `settings::Outcome` already use; t
 | `dialog` | `centered`, `draw_dialog_buttons` | every dialog |
 | `menu` | `Menu`, `MenuItem`, `draw_menu` | actions menu |
 | `confirm` | `Mode::ConfirmRemove`, `draw_confirm` | remove |
-| `table` | `column_widths`, `padded_row`, `fit`, `fit_end` | installed list, Add list |
+| `text` | `padded_row`, `fit`, `fit_end`, `join_facts` (`column_widths` stays with the repository table) | every screen |
 | `progress` | `bar_spans`, `item_icon`, `SPINNER` | progress dialog, update dialog |
 | `hits` | `Hits`, `contains` (defined twice) | all mouse handling |
 | `select` | `select.rs` unchanged | whole screen |
@@ -173,7 +173,9 @@ Each step is a separate change that compiles and passes `cargo test` with no beh
 
 1. **System atoms.** Create `atoms/sys`; move `process`, `http`, `open`, `encode`, `paths`, `clipboard`; delete the duplicates.
 2. **Task atom.** Move `job.rs` and make it generic; extract `worker` from `App`.
-3. **UI atoms.** One at a time, in this order: `table`, `hits`, `progress`, `dialog`, `input`, `list`, `menu`, `confirm`, `path`. After each, the dialogs that used the old code use the atom.
+3. **UI atoms.** In two parts, each with its own plan:
+   - *Drawing* (`text`, `hits`, `progress`, `dialog`): pure functions leave `ui.rs`; no state moves. Plan: `docs/superpowers/plans/2026-11-12-ui-atoms-drawing.md`.
+   - *Stateful* (`input`, `list`, `menu`, `confirm`, `path`): fields and key handling leave `App`, one dialog at a time.
 4. **Shell and feature trait.** Add `shell/`; move terminal setup out of `main.rs`; split `App` per the table above; `repos` and `update` implement `Feature`.
 5. **Proof.** The Docker spec is written against this structure. If it needs something no atom provides, that becomes a new atom, not feature-local code.
 
