@@ -2,6 +2,7 @@
 
 pub mod clipboard;
 pub mod encode;
+pub mod http;
 pub mod open;
 pub mod paths;
 pub mod process;

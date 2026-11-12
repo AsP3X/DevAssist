@@ -10,11 +10,11 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::atoms::sys::http::{self, Profile};
 
 /// The repository whose releases are the updates.
 pub const REPOSITORY: &str = "AsP3X/DevAssist";
@@ -252,38 +252,19 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
         .collect())
 }
 
-fn agent() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .timeout_connect(Some(Duration::from_secs(15)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            // A download may take long as a whole, but must keep moving.
-            .timeout_per_read(Some(Duration::from_secs(30)))
-            // Statuses are judged here: a 404 means "no release yet".
-            .http_status_as_error(false)
-            .build()
-            .into()
-    })
-}
-
-type Answer = ureq::http::Response<ureq::Body>;
+type Answer = http::Response;
 
 /// Asks GitHub for `url`. An answer with any status comes back; an error
 /// means GitHub could not be reached. The sign-in is not passed on when
 /// GitHub redirects a download to its file storage.
 fn get(url: &str, token: Option<&str>, accept: &str) -> Result<Answer, String> {
-    let mut request = agent()
-        .get(url)
-        .header("User-Agent", "devassist")
-        .header("Accept", accept)
-        .header("X-GitHub-Api-Version", "2022-11-28");
-    if let Some(token) = token {
-        request = request.header("Authorization", format!("Bearer {token}"));
-    }
-    request
-        .call()
-        .map_err(|err| format!("could not reach GitHub: {err}"))
+    http::get(
+        url,
+        Profile::Steady,
+        &[("Accept", accept), ("X-GitHub-Api-Version", "2022-11-28")],
+        token,
+    )
+    .map_err(|err| format!("could not reach GitHub: {err}"))
 }
 
 /// The answer, if GitHub said yes.

@@ -1,9 +1,8 @@
 use std::fmt;
-use std::sync::OnceLock;
-use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::atoms::sys::http::{self, Profile};
 use crate::gitops;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,31 +502,17 @@ fn authed_login(token: &str) -> Option<String> {
     }
 }
 
-fn agent() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(20)))
-            // GitHub says in the body why it refused. Hand every answer
-            // back instead of turning a status into a bare error.
-            .http_status_as_error(false)
-            .build()
-            .into()
-    })
-}
-
 fn gh_get(url: &str, token: Option<&str>) -> Result<RawResponse, GhError> {
-    let mut request = agent()
-        .get(url)
-        .header("User-Agent", "devassist")
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28");
-    if let Some(token) = token {
-        request = request.header("Authorization", format!("Bearer {token}"));
-    }
-    let mut response = request
-        .call()
-        .map_err(|err| GhError::Other(err.to_string()))?;
+    let mut response = http::get(
+        url,
+        Profile::Quick,
+        &[
+            ("Accept", "application/vnd.github+json"),
+            ("X-GitHub-Api-Version", "2022-11-28"),
+        ],
+        token,
+    )
+    .map_err(GhError::Other)?;
     let status = response.status();
     let header = |name: &str| {
         response
