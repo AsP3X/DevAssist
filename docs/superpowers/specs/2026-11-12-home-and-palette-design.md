@@ -1,7 +1,7 @@
 # Welcome screen and tool palette
 
 Date: 2026-11-12
-Status: implemented, not yet released
+Status: implemented in 0.5.0
 
 ## Goal
 
