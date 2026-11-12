@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
-use ratatui::layout::Rect;
 
 use crate::atoms::sys::open;
 use crate::atoms::sys::paths;
 use crate::atoms::sys::process;
 use crate::atoms::task::job::{Job, JobEvent};
 use crate::atoms::task::worker::Worker;
+use crate::atoms::ui::hits::Hits;
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
@@ -81,12 +81,6 @@ pub struct AddStatus {
 pub enum SortMode {
     Name,
     NeedsUpdate,
-}
-
-#[derive(Default)]
-pub struct Hits {
-    pub rows: Vec<(Rect, String)>,
-    pub buttons: Vec<(Rect, Action)>,
 }
 
 /// Something the user asked for. It runs at once when nothing else does,
@@ -342,7 +336,7 @@ pub struct App {
     pub screen: Vec<Vec<String>>,
     pub copy_note: Option<String>,
     pub copy_failed: bool,
-    pub hits: Hits,
+    pub hits: Hits<Action>,
     pub should_quit: bool,
     /// Start the program again after quitting: an update was installed.
     pub restart: bool,
@@ -1843,19 +1837,12 @@ impl App {
     }
 
     fn click(&mut self, x: u16, y: u16) {
-        let buttons = self.hits.buttons.clone();
-        for (rect, action) in &buttons {
-            if contains(*rect, x, y) {
-                self.run(*action);
-                return;
-            }
+        if let Some(action) = self.hits.button_at(x, y) {
+            self.run(action);
+            return;
         }
-        let rows = self.hits.rows.clone();
-        for (rect, name) in &rows {
-            if contains(*rect, x, y) {
-                self.click_row(name.clone());
-                return;
-            }
+        if let Some(name) = self.hits.row_at(x, y) {
+            self.click_row(name);
         }
     }
 
@@ -3228,13 +3215,6 @@ pub(crate) fn delete_word(text: &mut String) {
     {
         text.pop();
     }
-}
-
-fn contains(rect: Rect, x: u16, y: u16) -> bool {
-    x >= rect.x
-        && y >= rect.y
-        && x < rect.x.saturating_add(rect.width)
-        && y < rect.y.saturating_add(rect.height)
 }
 
 #[cfg(test)]

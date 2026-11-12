@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
 use crate::atoms::sys::paths;
 use crate::atoms::task::job::{ItemState, clock};
+use crate::atoms::ui::hits::contains;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::gitops::LocalRepo;
 use crate::gitprogress::{self, split_progress};
@@ -19,8 +20,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.tick = app.tick.wrapping_add(1);
-    app.hits.rows.clear();
-    app.hits.buttons.clear();
+    app.hits.clear();
     app.ensure_selection();
 
     let area = frame.area();
@@ -2310,13 +2310,6 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
-}
-
-fn contains(rect: Rect, x: u16, y: u16) -> bool {
-    x >= rect.x
-        && y >= rect.y
-        && x < rect.x.saturating_add(rect.width)
-        && y < rect.y.saturating_add(rect.height)
 }
 
 #[cfg(test)]
