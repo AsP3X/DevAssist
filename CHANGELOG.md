@@ -6,6 +6,11 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the HTTP library (ureq 3), the terminal library and the hashing
+  library. Nothing changes in how the app behaves.
+
 ## [0.3.0] - 2026-11-12
 
 The app is now called DevAssist, and it no longer manages one folder: it keeps

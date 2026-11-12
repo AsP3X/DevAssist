@@ -53,7 +53,8 @@ cargo test --locked
   terminal and check the text. Git behaviour is tested against a real
   throwaway repository; see the tests at the end of `src/gitops.rs`.
 - **Tests stay local.** No test may call GitHub, open a browser, change the
-  clipboard, or write outside the system's temporary folder.
+  clipboard, or write outside the system's temporary folder. A test that
+  needs the network is marked `#[ignore]`, so it only runs when asked for.
 - **It never loses work.** DevAssist does not merge, rebase, reset or force
   anything in a user's clone, and it deletes a folder only after asking. A
   change that weakens this needs a very good reason.

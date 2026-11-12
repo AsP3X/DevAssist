@@ -44,7 +44,13 @@ About the tests:
   temporary folder and remove them again.
 - Screen tests draw the interface into an in-memory terminal and check the
   text, so no real terminal is needed.
-- No test talks to GitHub, opens a browser or touches the clipboard.
+- No test talks to GitHub, opens a browser or touches the clipboard. The one
+  exception is marked `#[ignore]` and only runs when asked for: it downloads
+  the latest release and checks it against its checksum.
+
+  ```
+  cargo test -- --ignored live_download
+  ```
 
 ## Installers
 

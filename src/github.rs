@@ -506,44 +506,53 @@ fn authed_login(token: &str) -> Option<String> {
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(20))
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(20)))
+            // GitHub says in the body why it refused. Hand every answer
+            // back instead of turning a status into a bare error.
+            .http_status_as_error(false)
             .build()
+            .into()
     })
 }
 
 fn gh_get(url: &str, token: Option<&str>) -> Result<RawResponse, GhError> {
     let mut request = agent()
         .get(url)
-        .set("User-Agent", "devassist")
-        .set("Accept", "application/vnd.github+json")
-        .set("X-GitHub-Api-Version", "2022-11-28");
+        .header("User-Agent", "devassist")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28");
     if let Some(token) = token {
-        request = request.set("Authorization", &format!("Bearer {token}"));
+        request = request.header("Authorization", format!("Bearer {token}"));
     }
-    match request.call() {
-        Ok(response) => {
-            let link = response.header("link").map(str::to_string);
-            let body = response
-                .into_string()
-                .map_err(|err| GhError::Other(err.to_string()))?;
-            Ok(RawResponse { body, link })
-        }
-        Err(ureq::Error::Status(code, response)) => {
-            let remaining = response.header("x-ratelimit-remaining").map(str::to_string);
-            let body = response.into_string().unwrap_or_default();
-            if matches!(code, 403 | 429) && remaining.as_deref() == Some("0") {
-                return Err(GhError::Other(
-                    "rate limit reached. Set GH_TOKEN or run gh auth login".into(),
-                ));
-            }
-            Err(GhError::Status {
-                code,
-                message: github_message(&body),
-            })
-        }
-        Err(err) => Err(GhError::Other(err.to_string())),
+    let mut response = request
+        .call()
+        .map_err(|err| GhError::Other(err.to_string()))?;
+    let status = response.status();
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    let link = header("link");
+    let remaining = header("x-ratelimit-remaining");
+    let body = response.body_mut().read_to_string();
+    if status.is_success() {
+        let body = body.map_err(|err| GhError::Other(err.to_string()))?;
+        return Ok(RawResponse { body, link });
     }
+    let code = status.as_u16();
+    if matches!(code, 403 | 429) && remaining.as_deref() == Some("0") {
+        return Err(GhError::Other(
+            "rate limit reached. Set GH_TOKEN or run gh auth login".into(),
+        ));
+    }
+    Err(GhError::Status {
+        code,
+        message: github_message(&body.unwrap_or_default()),
+    })
 }
 
 fn github_message(body: &str) -> String {
