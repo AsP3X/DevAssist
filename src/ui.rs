@@ -10,13 +10,12 @@ use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, gro
 use crate::atoms::sys::paths;
 use crate::atoms::task::job::{ItemState, clock};
 use crate::atoms::ui::hits::contains;
+use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::gitops::LocalRepo;
 use crate::gitprogress::{self, split_progress};
 use crate::pathprompt::Purpose;
 use crate::settings::{Field, PROTOCOLS};
-
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     app.tick = app.tick.wrapping_add(1);
@@ -391,7 +390,7 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_activity(frame: &mut Frame, app: &App, area: Rect) {
     let spin = if app.busy || app.fetching {
-        SPINNER[(app.tick as usize / 2) % SPINNER.len()]
+        progress::spinner(app.tick as usize)
     } else {
         " "
     };
@@ -586,7 +585,7 @@ fn draw_add(frame: &mut Frame, app: &mut App, screen: Rect) {
 
     let status = app.add_status();
     let spin = if status.busy {
-        SPINNER[(app.tick as usize / 2) % SPINNER.len()]
+        progress::spinner(app.tick as usize)
     } else {
         " "
     };
@@ -925,7 +924,7 @@ fn draw_update(frame: &mut Frame, app: &mut App, screen: Rect) {
         UpdateState::Unknown | UpdateState::Checking => {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{} ", SPINNER[(tick / 2) % SPINNER.len()]),
+                    format!("{} ", progress::spinner(tick)),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::raw("Looking for a newer version…"),
@@ -978,14 +977,19 @@ fn draw_update(frame: &mut Frame, app: &mut App, screen: Rect) {
         } => {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{} ", SPINNER[(tick / 2) % SPINNER.len()]),
+                    format!("{} ", progress::spinner(tick)),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::raw(format!("Downloading version {}…", release.version)),
             ]));
             lines.push(Line::from(""));
             let fraction = (*total > 0).then(|| *done as f64 / *total as f64);
-            lines.push(Line::from(bar_spans(width, fraction, Color::Cyan, tick)));
+            lines.push(Line::from(progress::bar(
+                width,
+                fraction,
+                Color::Cyan,
+                tick,
+            )));
             lines.push(Line::from(Span::styled(
                 format!("{} of {}", megabytes(*done), megabytes(*total)),
                 dim,
@@ -1693,7 +1697,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
         None => {
             let name = current.map(|item| item.name.as_str()).unwrap_or("Starting");
             let mut spans = vec![Span::styled(
-                format!("{} ", SPINNER[(tick / 2) % SPINNER.len()]),
+                format!("{} ", progress::spinner(tick)),
                 Style::default().fg(Color::Cyan),
             )];
             if many {
@@ -1737,7 +1741,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
 
     // One bar across the dialog for the whole run.
     let fraction = job.fraction();
-    let mut bar = bar_spans(width.saturating_sub(6), fraction, accent, tick);
+    let mut bar = progress::bar(width.saturating_sub(6), fraction, accent, tick);
     bar.push(Span::styled(
         match fraction {
             Some(fraction) => format!("{:>5}%", (fraction * 100.0).round() as u16),
@@ -1836,7 +1840,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
         let short_width = 12.min(rows_area.width as usize / 3);
         let label_width = (rows_area.width as usize).saturating_sub(short_width + 4);
         for (offset, item) in job.items.iter().enumerate().skip(first).take(rows) {
-            let (icon, icon_style) = item_icon(item.state, tick);
+            let (icon, icon_style) = progress::icon(item.state, tick);
             let short = match item.state {
                 ItemState::Waiting if item.note.is_empty() => "waiting".to_string(),
                 ItemState::Waiting => item.note.clone(),
@@ -1928,7 +1932,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
         let text_width = text.width as usize;
         let mut lines: Vec<Line> = Vec::new();
         if many && text.height >= 8 {
-            let (icon, icon_style) = item_icon(item.state, tick);
+            let (icon, icon_style) = progress::icon(item.state, tick);
             let (item_phase, item_numbers) = split_progress(&item.progress);
             // An update counts branches: done, out of those with news.
             let steps_text = gitprogress::steps_label(item.steps).unwrap_or_default();
@@ -2003,7 +2007,8 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
             } else {
                 UnicodeWidthStr::width(tag.as_str()).max(4) + 2
             };
-            let mut item_bar = bar_spans(text_width.saturating_sub(tag_width), fill, color, tick);
+            let mut item_bar =
+                progress::bar(text_width.saturating_sub(tag_width), fill, color, tick);
             if !tag.is_empty() {
                 item_bar.push(Span::styled(format!("{tag:>tag_width$}"), gray));
             }
@@ -2082,43 +2087,6 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
             area,
         );
     }
-}
-
-fn item_icon(state: ItemState, tick: usize) -> (&'static str, Style) {
-    match state {
-        ItemState::Waiting => ("·", Style::default().fg(Color::DarkGray)),
-        ItemState::Running => (
-            SPINNER[(tick / 2) % SPINNER.len()],
-            Style::default().fg(Color::Cyan),
-        ),
-        ItemState::Done => ("✓", Style::default().fg(Color::Green)),
-        ItemState::Failed => ("✗", Style::default().fg(Color::Red)),
-    }
-}
-
-/// A line of `width` cells, lit up to `fraction`. Without a fraction a
-/// short block moves back and forth.
-fn bar_spans(width: usize, fraction: Option<f64>, color: Color, tick: usize) -> Vec<Span<'static>> {
-    let width = width.max(1);
-    let (from, to) = match fraction {
-        Some(fraction) => (
-            0,
-            (fraction.clamp(0.0, 1.0) * width as f64).round() as usize,
-        ),
-        None => {
-            let block = (width / 5).clamp(1, 12);
-            let span = width - block;
-            let step = if span == 0 { 0 } else { tick % (span * 2) };
-            let at = if step > span { span * 2 - step } else { step };
-            (at, at + block)
-        }
-    };
-    let dim = Style::default().fg(Color::DarkGray);
-    vec![
-        Span::styled("━".repeat(from), dim),
-        Span::styled("━".repeat(to - from), Style::default().fg(color)),
-        Span::styled("━".repeat(width - to), dim),
-    ]
 }
 
 fn draw_help(frame: &mut Frame, app: &mut App, screen: Rect) {
