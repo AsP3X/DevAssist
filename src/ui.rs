@@ -3,12 +3,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{Action, App, MenuItem, Mode, RemoteState, Row, UpdateState, group_key};
 use crate::atoms::sys::paths;
 use crate::atoms::task::job::{ItemState, clock};
+use crate::atoms::ui::dialog::{self, centered};
 use crate::atoms::ui::hits::contains;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
@@ -550,19 +551,12 @@ fn draw_add(frame: &mut Frame, app: &mut App, screen: Rect) {
         screen.width.saturating_mul(4) / 5,
         screen.height.saturating_mul(3) / 4,
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            format!(" Add from {} ", add_source(app)),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(
+        frame,
+        popup,
+        &format!(" Add from {} ", add_source(app)),
+        Color::Cyan,
+    );
     if inner.height < 5 {
         return;
     }
@@ -782,19 +776,7 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
     } else {
         " Remove repository ".to_string()
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(frame, popup, &title, Color::Yellow);
     let warning = match (many, dirty) {
         (false, 0) => {
             "The local folder will be deleted. The GitHub repository stays online.".to_string()
@@ -898,17 +880,12 @@ fn draw_update(frame: &mut Frame, app: &mut App, screen: Rect) {
         UpdateState::Available(_) | UpdateState::Installed(_) => Color::Green,
         _ => Color::Cyan,
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(accent))
-        .title(Span::styled(
-            format!(" DevAssist {} ", crate::update::VERSION),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(
+        frame,
+        popup,
+        &format!(" DevAssist {} ", crate::update::VERSION),
+        accent,
+    );
     let text = Rect {
         x: inner.x + 1,
         y: inner.y,
@@ -1054,19 +1031,12 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
         46.min(screen.width.saturating_sub(2)),
         (rows + extra + 5).min(screen.height.saturating_sub(2)),
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            fit_end(&title, popup.width.saturating_sub(4) as usize),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(
+        frame,
+        popup,
+        &fit_end(&title, popup.width.saturating_sub(4) as usize),
+        Color::Cyan,
+    );
     let width = inner.width as usize;
     let dim = Style::default().fg(Color::DarkGray);
     let mut y = inner.y;
@@ -1180,19 +1150,7 @@ fn draw_group(frame: &mut Frame, app: &mut App, screen: Rect) {
         80.min(screen.width.saturating_sub(2)),
         12.min(screen.height.saturating_sub(2)),
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(frame, popup, title, Color::Cyan);
     let text = Rect {
         x: inner.x + 1,
         y: inner.y,
@@ -1320,19 +1278,7 @@ fn draw_path(frame: &mut Frame, app: &mut App, screen: Rect) {
         80.min(screen.width.saturating_sub(2)),
         12.min(screen.height.saturating_sub(2)),
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(frame, popup, title, Color::Cyan);
     let text = Rect {
         x: inner.x + 1,
         y: inner.y,
@@ -1407,19 +1353,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     } else {
         " Settings "
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            heading,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(frame, popup, heading, Color::Cyan);
     if inner.height < 7 || inner.width < 30 {
         return;
     }
@@ -1641,20 +1575,11 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
         wide.min(screen.width.saturating_sub(4) as usize) as u16,
         height as u16,
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(accent))
-        .title(Span::styled(
-            match queued {
-                0 => format!(" {} ", job.title),
-                _ => format!(" {} · {queued} queued ", job.title),
-            },
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let heading = match queued {
+        0 => format!(" {} ", job.title),
+        _ => format!(" {} · {queued} queued ", job.title),
+    };
+    let inner = dialog::window(frame, popup, &heading, accent);
     if inner.height < 5 || inner.width < 24 {
         return;
     }
@@ -2095,19 +2020,7 @@ fn draw_help(frame: &mut Frame, app: &mut App, screen: Rect) {
         72.min(screen.width.saturating_sub(2)),
         31.min(screen.height.saturating_sub(2)),
     );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            " Keys ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
+    let inner = dialog::window(frame, popup, " Keys ", Color::Cyan);
     let help = "\
 arrows, j k    move
 space          select several · ctrl-a selects all shown
@@ -2160,37 +2073,14 @@ fn draw_dialog_buttons(
     area: Rect,
     buttons: &[(&str, Action)],
 ) -> u16 {
-    let mut x = area.x;
-    for (label, action) in buttons {
-        let text = format!(" {label} ");
-        let width = text.len() as u16;
-        if x + width > area.x + area.width {
-            break;
-        }
-        let rect = Rect {
-            x,
-            y: area.y,
-            width,
-            height: 1,
-        };
-        let hovered = app.mouse.is_some_and(|(mx, my)| contains(rect, mx, my));
-        let style = if hovered {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if *action == Action::Confirm {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
-        frame.render_widget(Paragraph::new(text).style(style), rect);
-        app.hits.buttons.push((rect, *action));
-        x += width + 1;
-    }
-    x
+    dialog::buttons(
+        frame,
+        area,
+        buttons,
+        Action::Confirm,
+        app.mouse,
+        &mut app.hits,
+    )
 }
 
 fn row_style(repo: &LocalRepo, chosen: bool) -> Style {
@@ -2266,17 +2156,6 @@ fn align_scroll(offset: &mut usize, selected: usize, len: usize, height: usize) 
         *offset = selected;
     } else if selected >= *offset + height {
         *offset = selected + 1 - height;
-    }
-}
-
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.max(8).min(area.width);
-    let height = height.max(4).min(area.height);
-    Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
     }
 }
 
