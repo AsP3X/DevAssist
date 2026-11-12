@@ -14,6 +14,7 @@ use crate::atoms::task::job::{Job, JobEvent};
 use crate::atoms::task::worker::Worker;
 use crate::atoms::ui::hits::Hits;
 use crate::atoms::ui::input::{self, Alt};
+use crate::atoms::ui::list;
 use crate::config::{self, Settings};
 use crate::github::{self, AccountQuery, RemoteRepo};
 use crate::gitops::{self, LocalRepo};
@@ -1900,36 +1901,20 @@ impl App {
             return;
         }
         let names = self.current_names();
-        if names.is_empty() {
-            return;
-        }
-        let slot = self.current_selected();
-        let index = slot
-            .as_ref()
-            .and_then(|name| {
-                names
-                    .iter()
-                    .position(|item| item.eq_ignore_ascii_case(name))
-            })
-            .unwrap_or(0);
-        let next = (index as isize + delta).clamp(0, names.len() as isize - 1) as usize;
-        let name = names[next].clone();
-        if self.mode == Mode::Add {
-            self.add_selected = Some(name);
-        } else {
-            self.selected = Some(name);
-        }
+        list::move_by(self.chosen_slot(), &names, delta);
     }
 
     fn move_to_end(&mut self, start: bool) {
         let names = self.current_names();
-        let Some(name) = (if start { names.first() } else { names.last() }).cloned() else {
-            return;
-        };
+        list::move_to_end(self.chosen_slot(), &names, start);
+    }
+
+    /// The choice of the list that is on screen: Add's, or the overview's.
+    fn chosen_slot(&mut self) -> &mut Option<String> {
         if self.mode == Mode::Add {
-            self.add_selected = Some(name);
+            &mut self.add_selected
         } else {
-            self.selected = Some(name);
+            &mut self.selected
         }
     }
 
@@ -1938,14 +1923,6 @@ impl App {
             self.add_list().into_iter().map(|repo| repo.id()).collect()
         } else {
             self.rows().iter().map(Row::key).collect()
-        }
-    }
-
-    fn current_selected(&self) -> Option<String> {
-        if self.mode == Mode::Add {
-            self.add_selected.clone()
-        } else {
-            self.selected.clone()
         }
     }
 
@@ -1987,16 +1964,7 @@ impl App {
 
     fn snap_visible_selection(&mut self) {
         let names = self.current_names();
-        if names.is_empty() {
-            return;
-        }
-        if self
-            .selected
-            .as_ref()
-            .is_none_or(|name| !names.iter().any(|item| item == name))
-        {
-            self.selected = Some(names[0].clone());
-        }
+        list::snap(&mut self.selected, &names);
     }
 
     fn note_add_filter_changed(&mut self) {

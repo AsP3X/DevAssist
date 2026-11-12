@@ -11,6 +11,7 @@ use crate::atoms::sys::paths;
 use crate::atoms::task::job::{ItemState, clock};
 use crate::atoms::ui::dialog::{self, centered};
 use crate::atoms::ui::hits::contains;
+use crate::atoms::ui::list::align_scroll;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::gitops::LocalRepo;
@@ -2140,22 +2141,6 @@ fn add_source(app: &App) -> String {
         [] => "GitHub".to_string(),
         [owner] => format!("github.com/{owner}"),
         _ => "GitHub".to_string(),
-    }
-}
-
-fn align_scroll(offset: &mut usize, selected: usize, len: usize, height: usize) {
-    if height == 0 {
-        *offset = 0;
-        return;
-    }
-    let max = len.saturating_sub(height);
-    if *offset > max {
-        *offset = max;
-    }
-    if selected < *offset {
-        *offset = selected;
-    } else if selected >= *offset + height {
-        *offset = selected + 1 - height;
     }
 }
 
