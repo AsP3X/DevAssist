@@ -1,6 +1,6 @@
 [package]
 name = "devassist"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 description = "Terminal app that keeps your local GitHub clones in one overview: add, update, group and remove them with keyboard or mouse"
 license-file = "LICENSE"
