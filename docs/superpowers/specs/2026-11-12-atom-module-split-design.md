@@ -52,7 +52,6 @@ src/
       list.rs     selection, scroll, marks, filter
       dialog.rs   centered frame, button row
       menu.rs     keyed action menu
-      confirm.rs  yes/no dialog
       text.rs     fit / fit_end, padded rows
       progress.rs bar, spinner, item icons
       hits.rs     hit map, contains
@@ -84,28 +83,27 @@ src/
 
 ### UI atoms
 
-Each UI atom is a struct that owns its state and exposes three things:
+*Revised 2026-11-12 while planning the stateful atoms; see `docs/superpowers/plans/2026-11-12-ui-atoms-stateful.md`.*
 
-- `on_key` / `on_mouse` → returns an `Outcome` enum (`Pending`, `Done(value)`, `Cancelled`)
-- `draw(frame, area)`
-- plain accessors for its value
+A UI atom is the reusable behaviour, in whichever shape costs least:
 
-This is the pattern `pathprompt::Outcome` and `settings::Outcome` already use; the atoms generalise it.
+- **Functions over state the caller owns** (`input`, `list`, `menu`): the state is a plain value (`String`, `Option<String>`, `usize`) that the feature and its tests read and assign directly. There is no text cursor, so a text field is only its `String`.
+- **A struct that owns its state** (`path`): it has several fields that belong together. It handles keys with `on_key` and answers with an `Outcome` enum (`Stay`, `Accept(value)`, `Close`), the pattern `settings::Outcome` already uses.
+- **Pure drawing functions** (`text`, `progress`, `dialog`) and the click map (`hits`).
 
 | Atom | Comes from | Used today by |
 |---|---|---|
-| `input` | per-dialog string editing, `delete_word` in `app.rs` | filter, Add search, group prompt, path prompt, settings |
-| `list` | `selected` / `*_scroll` / `marked` fields, `align_scroll` | installed list, Add list |
+| `input` | five separate copies of Backspace / Ctrl-U / Ctrl-W / typing | filter, Add search, group prompt, path prompt, settings |
+| `list` | `move_by`, `move_to_end`, `snap_visible_selection`, `align_scroll` | installed list, Add list |
 | `dialog` | `centered`, `draw_dialog_buttons` | every dialog |
-| `menu` | `Menu`, `MenuItem`, `draw_menu` | actions menu |
-| `confirm` | `Mode::ConfirmRemove`, `draw_confirm` | remove |
+| `menu` | `on_menu_key`, the row loop of `draw_menu` | actions menu |
 | `text` | `padded_row`, `fit`, `fit_end`, `join_facts` (`column_widths` stays with the repository table) | every screen |
 | `progress` | `bar_spans`, `item_icon`, `SPINNER` | progress dialog, update dialog |
 | `hits` | `Hits`, `contains` (defined twice) | all mouse handling |
 | `select` | `select.rs` unchanged | whole screen |
-| `path` | `pathprompt.rs` with the `RemoteRepo` dependency removed | clone target, import |
+| `path` | `pathprompt.rs`, generic over what the folder is for, so it no longer names `RemoteRepo` | clone target, import |
 
-`menu` and `confirm` become generic: `menu` takes a list of `(label, key, id)`, `confirm` takes a title, body lines and button labels. The repos feature supplies the content.
+There is no `confirm` atom: the Remove dialog has a third choice and lists which repositories have uncommitted changes, so nothing in it is generic. `menu` takes each line as a label, a key and a warning flag; the repos feature supplies them.
 
 ### System atoms
 
@@ -175,7 +173,7 @@ Each step is a separate change that compiles and passes `cargo test` with no beh
 2. **Task atom.** Move `job.rs` and make it generic; extract `worker` from `App`.
 3. **UI atoms.** In two parts, each with its own plan:
    - *Drawing* (`text`, `hits`, `progress`, `dialog`): pure functions leave `ui.rs`; no state moves. Plan: `docs/superpowers/plans/2026-11-12-ui-atoms-drawing.md`.
-   - *Stateful* (`input`, `list`, `menu`, `confirm`, `path`): fields and key handling leave `App`, one dialog at a time.
+   - *Stateful* (`input`, `list`, `menu`, `path`): key handling leaves `App`, one atom at a time. Plan: `docs/superpowers/plans/2026-11-12-ui-atoms-stateful.md`.
 4. **Shell and feature trait.** Add `shell/`; move terminal setup out of `main.rs`; split `App` per the table above; `repos` and `update` implement `Feature`.
 5. **Proof.** The Docker spec is written against this structure. If it needs something no atom provides, that becomes a new atom, not feature-local code.
 
