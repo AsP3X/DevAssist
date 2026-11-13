@@ -6,6 +6,10 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-13
+
+An update no longer leaves a force-pushed branch behind.
+
 ### Fixed
 
 - **An update follows a branch that was force-pushed on the remote.** A
@@ -208,7 +212,8 @@ a list of clones that can be anywhere on disk.
 The first version, as artcraft-repos: a terminal app that adds, updates and
 removes GitHub clones in one folder.
 
-[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/AsP3X/DevAssist/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AsP3X/DevAssist/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AsP3X/DevAssist/compare/v0.3.6...v0.4.0
 [0.3.6]: https://github.com/AsP3X/DevAssist/compare/v0.3.5...v0.3.6
