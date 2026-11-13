@@ -509,6 +509,7 @@ impl Updated {
 /// local branch that is only behind, and creates a local branch for each
 /// branch of origin that has new commits and no local branch yet. Nothing
 /// is merged or rebased: a branch with commits of its own is left alone.
+/// A branch the remote rewrote follows it when it holds no local work.
 /// An error means the fetch or the checked-out branch failed; the other
 /// branches have had their turn by then.
 ///
@@ -612,7 +613,23 @@ fn bring_in(
     for branch in others {
         let name = short_local(&branch.name);
         if branch.ahead > 0 {
-            leave(&mut done, &mut on_line, name, "has commits of its own");
+            // The remote rewrote the branch, and the commits that look like
+            // the branch's own are only what the remote held before.
+            let moved = if upstream_was_rewritten(path, &branch.upstream, &branch.name) {
+                move_branch(path, &branch.upstream, &branch.name, true)
+            } else {
+                Err("has commits of its own".to_string())
+            };
+            match moved {
+                Ok(()) => {
+                    let upstream = short_upstream(&branch.upstream);
+                    on_line(&format!("{name}: moved to the rewritten {upstream}"), false);
+                    done.forwarded.push(name.to_string());
+                    steps += 1;
+                    on_steps(steps, total);
+                }
+                Err(err) => leave(&mut done, &mut on_line, name, &err),
+            }
             continue;
         }
         match fast_forward(path, &branch.upstream, &branch.name) {
@@ -691,6 +708,33 @@ fn head_commit(path: &Path) -> Option<String> {
 /// anything that is not a fast-forward, and a branch another worktree has
 /// checked out.
 fn fast_forward(path: &Path, from: &str, to: &str) -> Result<(), String> {
+    move_branch(path, from, to, false)
+}
+
+/// "refs/remotes/origin/dev" reads as "origin/dev".
+fn short_upstream(reference: &str) -> &str {
+    reference.strip_prefix("refs/remotes/").unwrap_or(reference)
+}
+
+/// True when a branch holds nothing but what its upstream held earlier:
+/// the remote was force-pushed and nobody committed to the branch here.
+/// Git reads that from the upstream's reflog, so a branch whose history
+/// there has expired counts as having commits of its own.
+fn upstream_was_rewritten(path: &Path, upstream: &str, local: &str) -> bool {
+    let commit = |args: &[&str]| {
+        let output = git_command().arg("-C").arg(path).args(args).output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (output.status.success() && !text.is_empty()).then_some(text)
+    };
+    let tip = commit(&["rev-parse", "-q", "--verify", local]);
+    tip.is_some() && tip == commit(&["merge-base", "--fork-point", upstream, local])
+}
+
+/// Moves a branch that is not checked out to `from`. Without `force` git
+/// refuses anything that is not a fast-forward. Either way it refuses a
+/// branch another worktree has checked out.
+fn move_branch(path: &Path, from: &str, to: &str, force: bool) -> Result<(), String> {
+    let force = if force { "+" } else { "" };
     let output = git_command()
         .arg("-C")
         .arg(path)
@@ -701,7 +745,7 @@ fn fast_forward(path: &Path, from: &str, to: &str) -> Result<(), String> {
             "--recurse-submodules=no",
             ".",
         ])
-        .arg(format!("{from}:{to}"))
+        .arg(format!("{force}{from}:{to}"))
         .output()
         .map_err(|err| err.to_string())?;
     if output.status.success() {
@@ -1873,6 +1917,75 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(steps, vec![(0, 1)]);
         assert!(!again.changed());
         assert_eq!(again.left.len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn update_follows_a_rewritten_branch_that_has_no_local_work() {
+        let root = std::env::temp_dir().join(format!("devassist-rewrite-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        for name in ["bot", "mine"] {
+            git(&upstream, &["checkout", "-q", "-b", name, "main"]);
+            commit(&upstream, &format!("{name}-old"));
+        }
+        git(&upstream, &["checkout", "-q", "main"]);
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+        git(&clone, &["branch", "-q", "--track", "bot", "origin/bot"]);
+        git(
+            &clone,
+            &["checkout", "-q", "--track", "-b", "mine", "origin/mine"],
+        );
+        commit(&clone, "local");
+        git(&clone, &["checkout", "-q", "main"]);
+
+        // The remote moves main on and rewrites both branches on top of it,
+        // the way a bot rebases its pull request.
+        commit(&upstream, "two");
+        for name in ["bot", "mine"] {
+            git(&upstream, &["checkout", "-q", "-B", name, "main"]);
+            commit(&upstream, &format!("{name}-new"));
+        }
+        git(&upstream, &["checkout", "-q", "main"]);
+
+        let mut lines = Vec::new();
+        let mut steps = Vec::new();
+        let done = update(
+            &clone,
+            None,
+            |line, _| lines.push(line.to_string()),
+            |done, total| steps.push((done, total)),
+        )
+        .unwrap();
+        assert_eq!(steps, vec![(0, 3), (1, 3), (2, 3)]);
+        assert_eq!(done.forwarded, vec!["bot".to_string()]);
+        assert_eq!(
+            done.left,
+            vec![("mine".to_string(), "has commits of its own".to_string())]
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "bot: moved to the rewritten origin/bot"),
+            "{lines:?}"
+        );
+
+        // The branch nobody worked on matches the remote again.
+        let after = list_refs(&clone).unwrap();
+        let branch = |name: &str| {
+            after
+                .locals
+                .iter()
+                .find(|branch| branch.name == format!("refs/heads/{name}"))
+                .map(|branch| (branch.ahead, branch.behind))
+        };
+        assert_eq!(branch("bot"), Some((0, 0)));
+        assert_eq!(branch("mine"), Some((2, 2)));
 
         let _ = fs::remove_dir_all(&root);
     }

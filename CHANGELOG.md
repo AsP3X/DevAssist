@@ -6,6 +6,14 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **An update follows a branch that was force-pushed on the remote.** A
+  local branch nobody committed to stayed "ahead 1, behind 20" for good
+  after a bot rebased its pull request, because an update only
+  fast-forwards. It now moves such a branch to the rewritten one. A branch
+  with commits of your own is still left alone.
+
 ## [0.5.0] - 2026-11-12
 
 A welcome screen, and one way to go between tools: the palette.

@@ -137,6 +137,12 @@ An update of one repository does this:
 Nothing is merged or rebased. A branch that has commits of its own is left
 alone, and the progress dialog says so.
 
+A branch that was force-pushed on the remote, as a bot does when it rebases
+its pull request, cannot be fast-forwarded. If it is not checked out and holds
+only what the remote had before, the update moves it to the rewritten branch.
+If you committed to it, it is left alone like any other branch with commits of
+its own.
+
 The progress dialog shows one row per repository. For an update, the bar counts
 branches: how many are done out of how many had something new. For a clone, it
 follows the whole transfer, including resolving deltas. `↑` `↓` or a click pick
