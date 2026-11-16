@@ -6,6 +6,20 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-16
+
+An update no longer leaves behind a branch the remote deleted and made again.
+
+### Fixed
+
+- **An update follows a branch the remote deleted and made again.** A bot's
+  branch that was merged, deleted and opened again on a newer base stayed
+  "ahead 1, behind 1028" for good: deleting the branch on the remote also
+  removes what an update used to tell a rewritten branch from one with
+  commits of your own. An update now also looks at the local branch's own
+  history, and moves a branch that was only ever set from its remote. A
+  branch with commits of your own is still left alone.
+
 ## [0.5.1] - 2026-11-13
 
 An update no longer leaves a force-pushed branch behind.
@@ -212,7 +226,8 @@ a list of clones that can be anywhere on disk.
 The first version, as artcraft-repos: a terminal app that adds, updates and
 removes GitHub clones in one folder.
 
-[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/AsP3X/DevAssist/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/AsP3X/DevAssist/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AsP3X/DevAssist/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AsP3X/DevAssist/compare/v0.3.6...v0.4.0
