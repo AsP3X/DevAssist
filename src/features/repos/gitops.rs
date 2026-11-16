@@ -718,16 +718,40 @@ fn short_upstream(reference: &str) -> &str {
 
 /// True when a branch holds nothing but what its upstream held earlier:
 /// the remote was force-pushed and nobody committed to the branch here.
-/// Git reads that from the upstream's reflog, so a branch whose history
-/// there has expired counts as having commits of its own.
+/// Git reads that from the upstream's reflog. A remote that deletes the
+/// branch and makes it again takes that reflog with it, so the branch's own
+/// reflog is asked as well: whether the upstream is what last put it where
+/// it is. With neither left, the branch counts as having commits of its own.
 fn upstream_was_rewritten(path: &Path, upstream: &str, local: &str) -> bool {
-    let commit = |args: &[&str]| {
+    let read = |args: &[&str]| {
         let output = git_command().arg("-C").arg(path).args(args).output().ok()?;
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (output.status.success() && !text.is_empty()).then_some(text)
     };
-    let tip = commit(&["rev-parse", "-q", "--verify", local]);
-    tip.is_some() && tip == commit(&["merge-base", "--fork-point", upstream, local])
+    let tip = read(&["rev-parse", "-q", "--verify", local]);
+    if tip.is_none() {
+        return false;
+    }
+    if tip == read(&["merge-base", "--fork-point", upstream, local]) {
+        return true;
+    }
+    read(&["log", "-g", "-1", "--format=%gs", local])
+        .is_some_and(|entry| set_from_upstream(&entry, upstream, local))
+}
+
+/// True when a reflog entry of a local branch says the branch was put there
+/// from its upstream: created from it, or moved to it by an update. A
+/// commit, reset, rebase or merge on the branch reads differently.
+fn set_from_upstream(entry: &str, upstream: &str, local: &str) -> bool {
+    if let Some(source) = entry.strip_prefix("branch: Created from ") {
+        return source == upstream || source == short_upstream(upstream);
+    }
+    entry.starts_with("fetch ")
+        && [": fast-forward", ": forced-update"].iter().any(|how| {
+            entry
+                .strip_suffix(how)
+                .is_some_and(|rest| rest.ends_with(&format!("{upstream}:{local}")))
+        })
 }
 
 /// Moves a branch that is not checked out to `from`. Without `force` git
@@ -1986,6 +2010,99 @@ refs/remotes/fork/dev\tiii\t\t
         };
         assert_eq!(branch("bot"), Some((0, 0)));
         assert_eq!(branch("mine"), Some((2, 2)));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_a_branch_set_from_its_upstream_counts_as_untouched() {
+        let upstream = "refs/remotes/origin/bot";
+        let local = "refs/heads/bot";
+        for entry in [
+            "branch: Created from refs/remotes/origin/bot",
+            "branch: Created from origin/bot",
+            "fetch --no-tags --no-prune --recurse-submodules=no . refs/remotes/origin/bot:refs/heads/bot: fast-forward",
+            "fetch --no-tags --no-prune --recurse-submodules=no . +refs/remotes/origin/bot:refs/heads/bot: forced-update",
+        ] {
+            assert!(set_from_upstream(entry, upstream, local), "{entry}");
+        }
+        for entry in [
+            "commit: work",
+            "branch: Created from HEAD",
+            "branch: Created from origin/other",
+            "reset: moving to origin/bot~1",
+            "rebase (finish): refs/heads/bot onto abc",
+            "fetch . refs/heads/other:refs/heads/bot: fast-forward",
+        ] {
+            assert!(!set_from_upstream(entry, upstream, local), "{entry}");
+        }
+    }
+
+    #[test]
+    fn update_follows_a_branch_the_remote_deleted_and_made_again() {
+        let root = std::env::temp_dir().join(format!("devassist-remade-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        for name in ["bot", "mine"] {
+            git(&upstream, &["checkout", "-q", "-b", name, "main"]);
+            commit(&upstream, &format!("{name}-old"));
+        }
+        git(&upstream, &["checkout", "-q", "main"]);
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+        git(&clone, &["branch", "-q", "--track", "bot", "origin/bot"]);
+        git(
+            &clone,
+            &["checkout", "-q", "--track", "-b", "mine", "origin/mine"],
+        );
+        commit(&clone, "local");
+        git(&clone, &["checkout", "-q", "main"]);
+
+        let ahead_behind = |name: &str| {
+            list_refs(&clone)
+                .unwrap()
+                .locals
+                .iter()
+                .find(|branch| branch.name == format!("refs/heads/{name}"))
+                .map(|branch| (branch.ahead, branch.behind))
+        };
+
+        // Twice over, the way a bot's branch is merged, deleted and opened
+        // again: the first time the local branch is as it was created, the
+        // second time it is where the update before put it.
+        for round in ["first", "second"] {
+            // The remote deletes both branches, and the update prunes what
+            // the checkout knew of them, history included.
+            git(&upstream, &["branch", "-q", "-D", "bot", "mine"]);
+            update(&clone, None, |_, _| {}, |_, _| {}).unwrap();
+
+            // Then it makes them again on top of a main that moved on.
+            commit(&upstream, &format!("main-{round}"));
+            for name in ["bot", "mine"] {
+                git(&upstream, &["checkout", "-q", "-b", name, "main"]);
+                commit(&upstream, &format!("{name}-{round}"));
+            }
+            git(&upstream, &["checkout", "-q", "main"]);
+
+            let mut lines = Vec::new();
+            let done = update(
+                &clone,
+                None,
+                |line, _| lines.push(line.to_string()),
+                |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(done.forwarded, vec!["bot".to_string()], "{lines:?}");
+            assert_eq!(
+                done.left,
+                vec![("mine".to_string(), "has commits of its own".to_string())]
+            );
+            assert_eq!(ahead_behind("bot"), Some((0, 0)));
+        }
+        assert_eq!(ahead_behind("mine"), Some((2, 3)));
 
         let _ = fs::remove_dir_all(&root);
     }
