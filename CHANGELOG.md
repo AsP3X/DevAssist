@@ -13,6 +13,11 @@ What changed in each version of DevAssist. The format follows
   open in green, merged in purple, closed without a merge in red. The line
   under the list spells the highlighted row out. The numbers come with one
   request for all repositories at start and on `r`, and need a sign-in.
+- **The column marks pull requests that wait to be fetched.** After the
+  states, `+2` says two pull requests are new and `~1` that one saved pull
+  request got other commits, both in yellow. Every fetch looks at the remote
+  for that without downloading anything, and **Fetch the pull requests** in
+  the actions menu brings them and clears the mark.
 - **The pull requests of a repository can be fetched from the actions menu.**
   The menu on a repository has a line **Fetch the pull requests**, with the
   key `p`. It saves the pull requests of the highlighted or ticked

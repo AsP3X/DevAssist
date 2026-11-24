@@ -41,6 +41,24 @@ pub struct RepoCheck {
     pub info: Result<StatusInfo, String>,
     pub warning: Option<String>,
     pub fetched: bool,
+    /// What the remote has in pull requests that this clone has not
+    /// saved. None when the remote was not asked.
+    pub pulls: Option<PendingPulls>,
+}
+
+/// Pull requests of the remote that differ from what the clone has saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PendingPulls {
+    /// Pull requests the clone has no commits of.
+    pub new: u32,
+    /// Saved pull requests whose commits changed on the remote.
+    pub changed: u32,
+}
+
+impl PendingPulls {
+    pub fn any(self) -> bool {
+        self.new > 0 || self.changed > 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,11 +502,59 @@ pub fn check(path: &Path, fetch_remote: bool, how: Fetch) -> RepoCheck {
             Err(err) => warning = Some(err),
         }
     }
+    // After a fetch that reached the remote, see what it has in pull
+    // requests. A fetch that saves them has left nothing to find.
+    let pulls = if !fetched || process::was_cancelled() {
+        None
+    } else if how.pull_requests {
+        Some(PendingPulls::default())
+    } else {
+        pending_pull_requests(path, how.token).ok()
+    };
     RepoCheck {
         info: status(path),
         warning,
         fetched,
+        pulls,
     }
+}
+
+/// Compares the pull requests of origin with the ones saved in the clone,
+/// without fetching anything: which are new, and which got other commits.
+pub fn pending_pull_requests(path: &Path, token: Option<&str>) -> Result<PendingPulls, String> {
+    let mut args = auth_args(token);
+    args.extend([
+        OsString::from("-C"),
+        path.as_os_str().to_os_string(),
+        OsString::from("ls-remote"),
+        OsString::from("origin"),
+        OsString::from("refs/pull/*/head"),
+    ]);
+    let mut remote: Vec<(String, String)> = Vec::new();
+    run_git(args, |line, _| {
+        if let Some((tip, name)) = line.trim().split_once('\t')
+            && name.starts_with("refs/pull/")
+        {
+            remote.push((name.trim().to_string(), tip.trim().to_string()));
+        }
+    })?;
+    let saved = pull_tips(path)?;
+    let known: std::collections::HashSet<&str> = saved
+        .iter()
+        .filter_map(|line| line.split_once(' ').map(|(name, _)| name))
+        .collect();
+    let mut pending = PendingPulls::default();
+    for (name, tip) in &remote {
+        if saved.contains(&format!("{name} {tip}")) {
+            continue;
+        }
+        if known.contains(name.as_str()) {
+            pending.changed += 1;
+        } else {
+            pending.new += 1;
+        }
+    }
+    Ok(pending)
 }
 
 pub fn fetch(path: &Path, how: Fetch) -> Result<(), String> {
@@ -2039,11 +2105,24 @@ refs/remotes/fork/dev\tiii\t\t
 
         // Fetching them on request needs no setting, and says what came:
         // here a new pull request and one with another commit.
+        assert_eq!(
+            pending_pull_requests(&clone, None).unwrap(),
+            PendingPulls::default()
+        );
         git(&upstream, &["checkout", "-q", "refs/pull/1/head"]);
         commit(&upstream, "even-more");
         git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
         git(&upstream, &["update-ref", "refs/pull/3/head", "HEAD"]);
         git(&upstream, &["checkout", "-q", "main"]);
+        // Before that, a look at the remote says the same without saving
+        // anything. The pull request that is gone there is not counted.
+        let waiting = PendingPulls { new: 1, changed: 1 };
+        assert!(waiting.any());
+        assert_eq!(pending_pull_requests(&clone, None).unwrap(), waiting);
+        assert_eq!(tip(&clone, "refs/pull/3/head"), None);
+        // A check that fetches reports it; one that saves them has none left.
+        assert_eq!(check(&clone, true, Fetch::default()).pulls, Some(waiting));
+        assert_eq!(check(&clone, false, Fetch::default()).pulls, None);
         let saved = save_pull_requests(&clone, None, |_, _| {}).unwrap();
         assert_eq!(
             saved,
@@ -2053,6 +2132,10 @@ refs/remotes/fork/dev\tiii\t\t
             }
         );
         assert_eq!(tip(&clone, "refs/pull/2/head"), kept);
+        assert_eq!(
+            pending_pull_requests(&clone, None).unwrap(),
+            PendingPulls::default()
+        );
         let again = save_pull_requests(&clone, None, |_, _| {}).unwrap();
         assert_eq!(
             again,

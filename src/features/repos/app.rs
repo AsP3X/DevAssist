@@ -295,6 +295,8 @@ enum Msg {
     /// A clone landed here, or a checkout that was already here was found.
     Cloned(PathBuf),
     JobFinished(Result<String, String>),
+    /// The pull requests of the checkout at this path were just saved.
+    PullsSaved(PathBuf),
     /// GitHub said how many pull requests these repositories have.
     Pulls {
         generation: u64,
@@ -378,6 +380,9 @@ pub struct App {
     /// Pull requests on GitHub by state, by "owner/name" in lowercase.
     pub pulls: HashMap<String, github::PullCounts>,
     pulls_generation: u64,
+    /// Pull requests the remote has that a checkout has not saved, as the
+    /// last fetch found them, by the path of the checkout.
+    pub pulls_pending: HashMap<PathBuf, gitops::PendingPulls>,
     /// When the next automatic pull is due.
     watch_due: Instant,
     /// What the status line said before an automatic pull took it over.
@@ -486,6 +491,7 @@ impl App {
             watch_status: None,
             pulls: HashMap::new(),
             pulls_generation: 0,
+            pulls_pending: HashMap::new(),
             shell: settings.shell,
             generation: 0,
             remote_generation: 0,
@@ -2143,6 +2149,7 @@ impl App {
                 });
                 match saved {
                     Ok(saved) => {
+                        let _ = tx.send(Msg::PullsSaved(path.clone()));
                         total += saved.total;
                         changed += saved.changed;
                         let note = match (saved.total, saved.changed) {
@@ -2933,6 +2940,15 @@ impl App {
         self.pulls.get(&pulls_key(&repo.owner, &repo.repo)).copied()
     }
 
+    /// New and changed pull requests on the remote that `repo` has not
+    /// saved, as the last fetch found them.
+    pub fn pending_pulls(&self, repo: &LocalRepo) -> gitops::PendingPulls {
+        self.pulls_pending
+            .get(&repo.path)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// Asks GitHub in the background how many pull requests every
     /// repository has, by state. Needs a sign-in; without one the column
     /// stays empty.
@@ -3047,6 +3063,9 @@ impl App {
                     return;
                 }
                 if let Some(repo) = self.installed.iter_mut().find(|repo| repo.folder == folder) {
+                    if let Some(pending) = check.pulls {
+                        self.pulls_pending.insert(repo.path.clone(), pending);
+                    }
                     repo.warning = check.warning;
                     repo.fetched = check.fetched;
                     match check.info {
@@ -3134,6 +3153,9 @@ impl App {
                 }
             }
             Msg::Watched { updated, failed } => self.on_watched(updated, failed),
+            Msg::PullsSaved(path) => {
+                self.pulls_pending.remove(&path);
+            }
             Msg::Pulls { generation, counts } => {
                 if generation == self.pulls_generation {
                     self.pulls = counts.into_iter().collect();
@@ -4297,6 +4319,38 @@ mod tests {
         shouted.owner = "ACME".into();
         assert_eq!(app.pull_counts(&shouted), Some(counts));
         assert_eq!(app.pull_counts(&app.installed[1].clone()), None);
+        let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    #[test]
+    fn pull_requests_waiting_on_the_remote_are_kept_until_they_are_saved() {
+        let mut app = grouped_app();
+        let api = app.installed[0].clone();
+        assert!(!app.pending_pulls(&api).any());
+        let waiting = gitops::PendingPulls { new: 2, changed: 1 };
+        let check = |pulls| gitops::RepoCheck {
+            info: Err("not read".into()),
+            warning: None,
+            fetched: true,
+            pulls,
+        };
+        app.status_pending = 2;
+        app.on_msg(Msg::Status {
+            generation: app.generation,
+            folder: "api".into(),
+            check: check(Some(waiting)),
+        });
+        assert_eq!(app.pending_pulls(&api), waiting);
+        // A check that did not ask the remote leaves what is known.
+        app.on_msg(Msg::Status {
+            generation: app.generation,
+            folder: "api".into(),
+            check: check(None),
+        });
+        assert_eq!(app.pending_pulls(&api), waiting);
+        // Saving them clears it.
+        app.on_msg(Msg::PullsSaved(api.path.clone()));
+        assert!(!app.pending_pulls(&api).any());
         let _ = std::fs::remove_file(&app.config_path);
     }
 

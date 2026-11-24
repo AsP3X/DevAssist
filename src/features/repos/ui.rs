@@ -314,7 +314,7 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
             repo.branch.clone(),
             repo.state_label().to_string(),
             repo.sync_label(),
-            pulls_cell(app.pull_counts(repo)),
+            pulls_cell(app.pull_counts(repo), app.pending_pulls(repo)),
             about,
         ];
         let line = padded_row(
@@ -337,11 +337,10 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
         // stays one colour so it reads on its background.
         let before: usize = widths[..5].iter().sum();
         let room = widths[5].saturating_sub(1);
-        if let Some(counts) = app.pull_counts(repo).filter(|_| !chosen && room > 0)
-            && before + room <= area.width as usize
-        {
+        let parts = pulls_parts(app.pull_counts(repo), app.pending_pulls(repo));
+        if !parts.is_empty() && !chosen && room > 0 && before + room <= area.width as usize {
             let mut spans = Vec::new();
-            for (text, color) in pulls_parts(counts) {
+            for (text, color) in parts {
                 if !spans.is_empty() {
                     spans.push(Span::raw(" "));
                 }
@@ -425,6 +424,17 @@ fn draw_activity(frame: &mut Frame, app: &App, area: Rect) {
                     0 => {}
                     1 => id.push_str("  ·  1 pull request saved"),
                     count => id.push_str(&format!("  ·  {count} pull requests saved")),
+                }
+                let pending = app.pending_pulls(repo);
+                if pending.any() {
+                    let mut waiting = Vec::new();
+                    if pending.new > 0 {
+                        waiting.push(format!("{} new", pending.new));
+                    }
+                    if pending.changed > 0 {
+                        waiting.push(format!("{} changed", pending.changed));
+                    }
+                    id.push_str(&format!("  ·  {} to fetch: enter, p", waiting.join(", ")));
                 }
                 if let Some(warning) = &repo.warning {
                     format!("{id}  {warning}")
@@ -1911,7 +1921,7 @@ fn short_count(count: u32) -> String {
 
 /// The pull requests of a repository as coloured pieces: open, merged,
 /// closed. A state with none is left out; with none at all a dash stays.
-fn pulls_parts(counts: super::github::PullCounts) -> Vec<(String, Color)> {
+fn state_parts(counts: super::github::PullCounts) -> Vec<(String, Color)> {
     let mut parts = Vec::new();
     for (mark, count, color) in [
         ('○', counts.open, Color::Green),
@@ -1928,18 +1938,33 @@ fn pulls_parts(counts: super::github::PullCounts) -> Vec<(String, Color)> {
     parts
 }
 
-/// The same as plain text, such as "○2 ✓14 ✕3". Empty until GitHub has
-/// answered.
-fn pulls_cell(counts: Option<super::github::PullCounts>) -> String {
-    counts
-        .map(|counts| {
-            pulls_parts(counts)
-                .into_iter()
-                .map(|(text, _)| text)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default()
+/// Everything the pulls column says about a repository: the states, once
+/// GitHub has answered, and in yellow what waits to be fetched, such as
+/// "+2" for two new pull requests and "~1" for one that changed.
+fn pulls_parts(
+    counts: Option<super::github::PullCounts>,
+    pending: super::gitops::PendingPulls,
+) -> Vec<(String, Color)> {
+    let mut parts = counts.map(state_parts).unwrap_or_default();
+    for (mark, count) in [('+', pending.new), ('~', pending.changed)] {
+        if count > 0 {
+            parts.push((format!("{mark}{}", short_count(count)), Color::Yellow));
+        }
+    }
+    parts
+}
+
+/// The same as plain text, such as "○2 ✓14 ✕3 +2". Empty until there is
+/// something to say.
+fn pulls_cell(
+    counts: Option<super::github::PullCounts>,
+    pending: super::gitops::PendingPulls,
+) -> String {
+    pulls_parts(counts, pending)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn column_widths(total: u16, wide_name: bool) -> [usize; 7] {
@@ -1961,7 +1986,7 @@ fn column_widths(total: u16, wide_name: bool) -> [usize; 7] {
     };
     let state = 8;
     // "○999 ✓1.2k ✕999" and a gap. Left out where it would crowd the rest.
-    let pulls = if total >= 100 { 16 } else { 0 };
+    let pulls = if total >= 100 { 22 } else { 0 };
     let about = total.saturating_sub(marker + name + branch + state + sync + pulls);
     [marker, name, branch, state, sync, pulls, about]
 }
@@ -2045,9 +2070,11 @@ mod tests {
         let mut docs = api.clone();
         docs.folder = "docs".into();
         docs.repo = "docs".into();
+        docs.path = PathBuf::from("development").join("docs");
         let mut web = api.clone();
         web.folder = "web".into();
         web.repo = "web".into();
+        web.path = PathBuf::from("development").join("web");
         app.installed = vec![api, docs, web];
         app.selected = Some("web".into());
         let counts = |open, merged, closed| super::super::github::PullCounts {
@@ -2058,6 +2085,11 @@ mod tests {
         app.pulls.insert("asp3x/api".into(), counts(2, 1234, 3));
         app.pulls.insert("asp3x/docs".into(), counts(0, 0, 0));
         app.pulls.insert("asp3x/web".into(), counts(1, 0, 0));
+        // The last fetch saw pull requests that are not saved yet.
+        let waiting = |new, changed| super::super::gitops::PendingPulls { new, changed };
+        let path = |name: &str| PathBuf::from("development").join(name);
+        app.pulls_pending.insert(path("api"), waiting(2, 1));
+        app.pulls_pending.insert(path("web"), waiting(0, 4));
 
         let screen = render(&mut app, 130, 24);
         let line = |name: &str| {
@@ -2069,8 +2101,12 @@ mod tests {
         };
         assert!(line("name").contains("pulls"), "{screen}");
         // Open, merged, closed; a state with none is left out.
-        assert!(line("api").contains("○2 ✓1.2k ✕3"), "{screen}");
+        // Then what waits to be fetched: new ones and changed ones.
+        assert!(line("api").contains("○2 ✓1.2k ✕3 +2 ~1"), "{screen}");
+        assert!(line("web").contains("○1 ~4"), "{screen}");
+        assert!(screen.contains("4 changed to fetch: enter, p"), "{screen}");
         assert!(line("docs").contains("–"), "{screen}");
+        assert!(!line("docs").contains('+'), "{screen}");
         assert!(line("web").contains("○1"), "{screen}");
         assert!(!line("web").contains('✓'), "{screen}");
         // The highlighted one is spelled out under the status.

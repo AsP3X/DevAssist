@@ -85,6 +85,8 @@ How many pull requests the repository has on GitHub, in three short pieces:
 | `✓14` | 14 were merged (purple). |
 | `✕3` | 3 were closed without being merged (red). |
 | `–` | The repository has no pull requests. |
+| `+2` | 2 pull requests are new: the clone has not saved them (yellow). |
+| `~1` | 1 saved pull request got other commits since (yellow). |
 
 A state with none is left out, and large numbers are shortened, so `✓1.2k` is
 about 1,200. The line under the list spells the highlighted row out:
@@ -94,8 +96,18 @@ The numbers come from GitHub when DevAssist starts and when you press `r`, in
 one request for all repositories. That needs a sign-in (`GH_TOKEN`, or
 `gh auth login`); without one, and for a repository that is not on GitHub, the
 column stays empty. It is left out in a window narrower than 100 columns. The
-column counts what is on GitHub, not what is saved in the clone: see
+states count what is on GitHub, not what is saved in the clone: see
 [Saving pull requests](#saving-pull-requests) for that.
+
+The yellow pieces `+` and `~` compare GitHub with the clone. Every fetch, at
+start and on `r`, looks at the pull requests of the remote without
+downloading them and counts the ones the clone has not saved and the ones
+whose commits changed. The line under the list says it in words, such as
+`2 new, 1 changed to fetch: enter, p`. **Fetch the pull requests** in the
+actions menu brings them and clears the mark. A repository whose pull
+requests were never saved shows all of them as new, and with **Pull requests**
+on in the settings the mark does not appear, because every fetch saves them
+already. Only commits are compared: a new comment or review is not a change.
 
 ### The sync column
 
