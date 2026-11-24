@@ -826,7 +826,14 @@ pub fn migrate_to(
 /// that is a rename; onto another drive everything is copied first and
 /// the original deleted after. A warning comes back when the copy is
 /// complete but the original could not be deleted.
-pub fn move_checkout(from: &Path, to: &Path) -> Result<Option<String>, String> {
+///
+/// `on_line` hears what is going on, the way Git reports a transfer: while
+/// copying, a line with a percentage and the files done out of all.
+pub fn move_checkout(
+    from: &Path,
+    to: &Path,
+    mut on_line: impl FnMut(&str, bool),
+) -> Result<Option<String>, String> {
     if !from.is_dir() {
         return Err(format!("{} is not there any more", from.display()));
     }
@@ -845,11 +852,44 @@ pub fn move_checkout(from: &Path, to: &Path) -> Result<Option<String>, String> {
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(err) => return Err(format!("could not move {}: {err}", from.display())),
     }
-    if let Err(err) = copy_tree(from, to) {
+    copy_then_delete(from, to, &mut on_line)
+}
+
+/// The slow way to move a folder: copies everything to `to`, a path that
+/// is free, and deletes `from` once the copy is complete.
+fn copy_then_delete(
+    from: &Path,
+    to: &Path,
+    on_line: &mut dyn FnMut(&str, bool),
+) -> Result<Option<String>, String> {
+    on_line(
+        "Another drive: copying, then deleting the old folder.",
+        false,
+    );
+    on_line("Counting files…", true);
+    let total = count_files(from);
+    let mut done = 0u64;
+    let mut shown = u64::MAX;
+    let mut copied = |on_line: &mut dyn FnMut(&str, bool)| {
+        done += 1;
+        // One line for each percent, not one for each file.
+        let percent = (done * 100).checked_div(total).unwrap_or(100).min(100);
+        if percent != shown {
+            shown = percent;
+            on_line(
+                &format!("Copying files: {percent:>3}% ({done}/{total})"),
+                true,
+            );
+        }
+    };
+    if let Err(err) = copy_tree(from, to, &mut |_| copied(on_line)) {
         // Leave nothing half-copied behind; the original is untouched.
+        on_line("Removing what was copied so far…", true);
         let _ = remove_tree(to);
         return Err(format!("could not copy to {}: {err}", to.display()));
     }
+    on_line(&format!("Copied {total} files."), false);
+    on_line("Deleting the old folder…", true);
     Ok(remove_tree(from).err().map(|err| {
         format!(
             "copied, but the old folder {} could not be deleted: {err}",
@@ -858,8 +898,24 @@ pub fn move_checkout(from: &Path, to: &Path) -> Result<Option<String>, String> {
     }))
 }
 
-/// Copies a folder with everything in it.
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+/// How many files a folder holds, with everything below it. What cannot
+/// be read is not counted.
+fn count_files(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => count_files(&entry.path()),
+            _ => 1,
+        })
+        .sum()
+}
+
+/// Copies a folder with everything in it. `on_file` hears each file that
+/// has been copied.
+fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|err| format!("{}: {err}", to.display()))?;
     let entries = fs::read_dir(from).map_err(|err| format!("{}: {err}", from.display()))?;
     for entry in entries {
@@ -873,9 +929,10 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
             .file_type()
             .map_err(|err| format!("{}: {err}", source.display()))?;
         if kind.is_dir() {
-            copy_tree(&source, &target)?;
+            copy_tree(&source, &target, on_file)?;
         } else {
             fs::copy(&source, &target).map_err(|err| format!("{}: {err}", source.display()))?;
+            on_file(&source);
         }
     }
     Ok(())
@@ -2438,23 +2495,43 @@ refs/remotes/fork/dev\tiii\t\t
         fs::create_dir_all(root.join("taken").join("api")).unwrap();
 
         // A path that is in use, or inside the checkout, is refused.
-        let taken = move_checkout(&old, &root.join("taken").join("api")).unwrap_err();
+        let taken = move_checkout(&old, &root.join("taken").join("api"), |_, _| {}).unwrap_err();
         assert!(taken.contains("there already"), "{taken}");
-        let inside = move_checkout(&old, &old.join("deeper").join("api")).unwrap_err();
+        let inside = move_checkout(&old, &old.join("deeper").join("api"), |_, _| {}).unwrap_err();
         assert!(inside.contains("into itself"), "{inside}");
         assert!(old.join(".git").exists());
 
         // The folder it goes into is made when it is not there yet.
         let new = root.join("there").join("deeper").join("api");
-        assert_eq!(move_checkout(&old, &new), Ok(None));
+        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
         assert!(!old.exists());
         assert_eq!(status(&new).unwrap().branch, "main");
 
         // Copying, as onto another drive, brings everything along.
         let copy = root.join("copy");
-        copy_tree(&new, &copy).unwrap();
+        let mut files = 0;
+        copy_tree(&new, &copy, &mut |_| files += 1).unwrap();
+        assert!(files > 0);
+        assert_eq!(files, count_files(&new));
+        assert_eq!(count_files(&copy), files);
         assert_eq!(status(&copy).unwrap().branch, "main");
-        assert!(move_checkout(&old, &copy).is_err());
+        assert!(move_checkout(&old, &copy, |_, _| {}).is_err());
+
+        // The slow way reports how far it is, and leaves no original.
+        let far = root.join("far").join("api");
+        fs::create_dir_all(root.join("far")).unwrap();
+        let mut lines: Vec<(String, bool)> = Vec::new();
+        let warning = copy_then_delete(&new, &far, &mut |line, progress| {
+            lines.push((line.to_string(), progress))
+        });
+        assert_eq!(warning, Ok(None));
+        assert!(!new.exists());
+        assert_eq!(status(&far).unwrap().branch, "main");
+        let last = format!("Copying files: 100% ({files}/{files})");
+        assert!(lines.contains(&(last, true)), "{lines:?}");
+        assert!(lines.contains(&(format!("Copied {files} files."), false)));
+        // Never more lines than percents, however many files there are.
+        assert!(lines.len() <= 110, "{}", lines.len());
         let _ = remove_tree(&root);
     }
 

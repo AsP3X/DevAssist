@@ -1286,7 +1286,10 @@ impl App {
                     continue;
                 }
                 send_line(tx, &format!("{} → {}", from.display(), to.display()), false);
-                match gitops::move_checkout(from, &to) {
+                let moving = gitops::move_checkout(from, &to, |line, progress| {
+                    send_line(tx, line, progress)
+                });
+                match moving {
                     Ok(warning) => {
                         moved += 1;
                         let _ = tx.send(Msg::Moved {
