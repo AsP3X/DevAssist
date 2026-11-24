@@ -6,6 +6,11 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-24
+
+Watched repositories pull themselves on a timer, and pull requests can be
+saved in the clone.
+
 ### Added
 
 - **A repository can be pulled automatically.** `w` in the overview watches
@@ -241,7 +246,8 @@ a list of clones that can be anywhere on disk.
 The first version, as artcraft-repos: a terminal app that adds, updates and
 removes GitHub clones in one folder.
 
-[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AsP3X/DevAssist/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/AsP3X/DevAssist/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/AsP3X/DevAssist/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AsP3X/DevAssist/compare/v0.4.0...v0.5.0

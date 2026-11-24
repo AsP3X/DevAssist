@@ -1,6 +1,6 @@
 [package]
 name = "devassist"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 description = "Terminal app that keeps your local GitHub clones in one overview and manages Docker containers, with keyboard or mouse"
 license-file = "LICENSE"
