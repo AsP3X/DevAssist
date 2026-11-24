@@ -17,15 +17,18 @@ pub enum Field {
     Protocol,
     /// Minutes between automatic pulls of the watched repositories.
     Watch,
+    /// Whether a fetch also saves the commits of all pull requests.
+    PullRequests,
     Title,
 }
 
 impl Field {
-    pub const ALL: [Field; 5] = [
+    pub const ALL: [Field; 6] = [
         Field::Accounts,
         Field::Pinned,
         Field::Protocol,
         Field::Watch,
+        Field::PullRequests,
         Field::Title,
     ];
 
@@ -35,6 +38,7 @@ impl Field {
             Field::Pinned => "Pinned repos",
             Field::Protocol => "Clone with",
             Field::Watch => "Auto-pull every",
+            Field::PullRequests => "Pull requests",
             Field::Title => "Title",
         }
     }
@@ -45,6 +49,7 @@ impl Field {
             Field::Pinned => "Single repositories to list as well, as owner/name.",
             Field::Protocol => "auto follows the clones already in this folder.",
             Field::Watch => "Minutes between pulls of the repositories watched with w.",
+            Field::PullRequests => "on saves the commits of every pull request with each fetch.",
             Field::Title => "Shown in the top left. Empty uses the folder name.",
         }
     }
@@ -56,6 +61,7 @@ impl Field {
             Field::Pinned => "pinned",
             Field::Protocol => "protocol",
             Field::Watch => "watch",
+            Field::PullRequests => "pulls",
             Field::Title => "title",
         }
     }
@@ -79,6 +85,8 @@ pub struct Form {
     pub protocol: Protocol,
     /// Minutes between automatic pulls, as typed.
     pub interval: String,
+    /// Save the commits of all pull requests with each fetch.
+    pub pull_requests: bool,
     pub title: String,
     pub error: Option<String>,
     pub path: PathBuf,
@@ -103,6 +111,8 @@ impl Form {
             pinned: pinned.join(", "),
             protocol,
             interval: watch_interval.to_string(),
+            // Off until the caller says what the setting is.
+            pull_requests: false,
             title: title.unwrap_or_default().to_string(),
             error: None,
             path,
@@ -121,6 +131,17 @@ impl Form {
             KeyCode::BackTab | KeyCode::Up => self.step(-1),
             KeyCode::Left if self.focus == Field::Protocol => self.cycle_protocol(-1),
             KeyCode::Right if self.focus == Field::Protocol => self.cycle_protocol(1),
+            KeyCode::Left | KeyCode::Right if self.focus == Field::PullRequests => {
+                self.pull_requests = !self.pull_requests;
+            }
+            KeyCode::Char(ch) if !ctrl && !alt && self.focus == Field::PullRequests => {
+                match ch.to_ascii_lowercase() {
+                    ' ' => self.pull_requests = !self.pull_requests,
+                    'y' => self.pull_requests = true,
+                    'n' => self.pull_requests = false,
+                    _ => {}
+                }
+            }
             KeyCode::Char(ch) if !ctrl && !alt && self.focus == Field::Protocol => {
                 match ch.to_ascii_lowercase() {
                     ' ' => self.cycle_protocol(1),
@@ -142,7 +163,7 @@ impl Form {
             Field::Pinned => &mut self.pinned,
             Field::Watch => &mut self.interval,
             Field::Title => &mut self.title,
-            Field::Protocol => return,
+            Field::Protocol | Field::PullRequests => return,
         };
         if input::edit(text, key, Alt::Ignored) {
             if self.focus == Field::Accounts {
@@ -162,6 +183,9 @@ impl Form {
             if let Some(field) = Field::ALL.into_iter().find(|field| field.key() == key) {
                 self.focus = field;
             }
+        } else if let Some(value) = name.strip_prefix("pulls:") {
+            self.focus = Field::PullRequests;
+            self.pull_requests = value == "on";
         } else if let Some(value) = name.strip_prefix("protocol:")
             && let Ok(protocol) = Protocol::parse(value)
         {
@@ -208,6 +232,7 @@ impl Form {
             update_check: true,
             watched: Vec::new(),
             watch_interval,
+            pull_requests: self.pull_requests,
             shell: Default::default(),
         })
     }
@@ -245,7 +270,7 @@ impl Form {
             Field::Pinned => &mut self.pinned,
             Field::Watch => &mut self.interval,
             Field::Title => &mut self.title,
-            Field::Protocol => return,
+            Field::Protocol | Field::PullRequests => return,
         };
         change(text);
         self.error = None;
@@ -318,6 +343,26 @@ mod tests {
         assert_eq!(saved.owners, vec!["AsP3X".to_string()]);
         assert_eq!(saved.pinned[0].id(), "someone/tool");
         assert_eq!(saved.title.as_deref(), Some("Desk"));
+    }
+
+    #[test]
+    fn saving_pull_requests_is_switched_like_the_protocol() {
+        let mut form = form();
+        assert!(!form.validate().unwrap().pull_requests);
+        form.focus = Field::PullRequests;
+        press(&mut form, KeyCode::Right);
+        assert!(form.pull_requests);
+        press(&mut form, KeyCode::Char(' '));
+        assert!(!form.pull_requests);
+        // Typing does not land in a text field.
+        press(&mut form, KeyCode::Char('y'));
+        assert!(form.pull_requests);
+        assert_eq!(form.accounts, "AsP3X");
+        form.click("pulls:off");
+        assert!(!form.pull_requests);
+        form.click("pulls:on");
+        assert_eq!(form.focus, Field::PullRequests);
+        assert!(form.validate().unwrap().pull_requests);
     }
 
     #[test]

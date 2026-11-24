@@ -48,6 +48,8 @@ pub struct Settings {
     pub watched: Vec<PathBuf>,
     /// Minutes between those pulls.
     pub watch_interval: u32,
+    /// Every fetch also saves the commits of all pull requests.
+    pub pull_requests: bool,
     /// What the shell itself is set to.
     pub shell: ShellPrefs,
     /// False when this start was told not to look, with --no-update-check.
@@ -96,6 +98,8 @@ pub struct Saved {
     pub watched: Vec<PathBuf>,
     /// Minutes between those pulls.
     pub watch_interval: u32,
+    /// Every fetch also saves the commits of all pull requests.
+    pub pull_requests: bool,
     /// What the shell itself is set to.
     pub shell: ShellPrefs,
 }
@@ -134,6 +138,7 @@ struct ParsedConfig {
     update_check: Option<bool>,
     watched: Vec<PathBuf>,
     watch_interval: Option<u32>,
+    pull_requests: Option<bool>,
     palette_key: Option<KeyCombo>,
     start: Option<String>,
 }
@@ -227,6 +232,11 @@ pub fn startup() -> Result<Startup, String> {
         .as_ref()
         .and_then(|file| file.watch_interval)
         .unwrap_or(DEFAULT_WATCH_INTERVAL);
+    let pull_requests = loaded
+        .file
+        .as_ref()
+        .and_then(|file| file.pull_requests)
+        .unwrap_or(false);
     let defaults = ShellPrefs::default();
     let shell = ShellPrefs {
         palette_key: loaded
@@ -257,6 +267,7 @@ pub fn startup() -> Result<Startup, String> {
         update_check,
         watched,
         watch_interval,
+        pull_requests,
         shell,
         update_check_now: update_check && !flags.no_update_check,
         config_path: loaded.path,
@@ -664,6 +675,9 @@ fn render(saved: &Saved) -> String {
     if saved.watch_interval != DEFAULT_WATCH_INTERVAL {
         out.push_str(&format!("watch_interval = {}\n", saved.watch_interval));
     }
+    if saved.pull_requests {
+        out.push_str("pull_requests = on\n");
+    }
     let defaults = ShellPrefs::default();
     if saved.shell.palette_key != defaults.palette_key {
         out.push_str(&format!(
@@ -822,6 +836,13 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                     parse_watch_interval(value)
                         .map_err(|err| format!("line {line_no}: watch_interval: {err}"))?,
                 );
+            }
+            "pull_requests" => {
+                parsed.pull_requests = Some(match value.to_ascii_lowercase().as_str() {
+                    "on" | "yes" | "true" => true,
+                    "off" | "no" | "false" => false,
+                    _ => return Err(format!("line {line_no}: pull_requests is on or off")),
+                });
             }
             "palette_key" => {
                 parsed.palette_key = Some(
@@ -1009,6 +1030,7 @@ mod tests {
             update_check: true,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
@@ -1036,6 +1058,7 @@ mod tests {
             update_check: true,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
@@ -1087,6 +1110,7 @@ mod tests {
             update_check: true,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             shell: ShellPrefs::default(),
         };
         let text = render(&saved);
@@ -1132,6 +1156,7 @@ mod tests {
             update_check: true,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             shell: ShellPrefs::default(),
         };
         let text = render(&saved);
@@ -1177,6 +1202,7 @@ mod tests {
             update_check: true,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             shell: ShellPrefs {
                 palette_key: KeyCombo::parse("alt-f2").unwrap(),
                 start: "docker".to_string(),
@@ -1221,11 +1247,22 @@ mod tests {
             update_check: true,
             watched: parsed.watched.clone(),
             watch_interval: 30,
+            pull_requests: false,
             shell: Default::default(),
         };
         let again = parse_config(&render(&saved)).unwrap();
         assert_eq!(again.watched, parsed.watched);
         assert_eq!(again.watch_interval, Some(30));
+        assert!(!render(&saved).contains("pull_requests"));
+        assert_eq!(again.pull_requests, None);
+        let backing_up = Saved {
+            pull_requests: true,
+            ..saved.clone()
+        };
+        let text = render(&backing_up);
+        assert!(text.contains("pull_requests = on\n"));
+        assert_eq!(parse_config(&text).unwrap().pull_requests, Some(true));
+        assert!(parse_config("pull_requests = some\n").is_err());
         // The default interval is not written down.
         let quiet = Saved {
             watch_interval: DEFAULT_WATCH_INTERVAL,
@@ -1261,6 +1298,7 @@ mod tests {
             update_check: true,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             shell: ShellPrefs::default(),
         };
         // On is the default and is not written down.
@@ -1284,6 +1322,7 @@ mod tests {
             update_check: true,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();

@@ -14,6 +14,12 @@ What changed in each version of DevAssist. The format follows
   It runs without a dialog and reports on the status line. The interval is
   5 minutes and can be changed in the settings, or with `watch_interval` in
   the settings file.
+- **Pull requests can be saved in the clone.** With **Pull requests** switched
+  on in the settings, every fetch also brings the commits of all pull
+  requests, open, merged and closed, as `refs/pull/<number>/head`. They stay
+  apart from the branches and are never removed again, so they are still
+  there when a branch, a fork or the pull request itself is gone. Off by
+  default; `pull_requests = on` in the settings file.
 
 ## [0.5.2] - 2026-11-16
 

@@ -388,6 +388,11 @@ fn draw_activity(frame: &mut Frame, app: &App, area: Rect) {
                 if app.is_watched(&repo.path) {
                     id.push_str(&format!("  ↻ auto-pull every {} min", app.watch_interval));
                 }
+                match repo.pull_requests {
+                    0 => {}
+                    1 => id.push_str("  ·  1 pull request saved"),
+                    count => id.push_str(&format!("  ·  {count} pull requests saved")),
+                }
                 if let Some(warning) = &repo.warning {
                     format!("{id}  {warning}")
                 } else if let Some(err) = &repo.error {
@@ -1114,7 +1119,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     let popup = centered(
         screen,
         84.min(screen.width.saturating_sub(2)),
-        21.min(screen.height.saturating_sub(2)),
+        24.min(screen.height.saturating_sub(2)),
     );
     let heading = if form.welcome {
         " Welcome · first-time setup "
@@ -1127,14 +1132,15 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
     let width = inner.width as usize;
     // Roomy: intro, then label + hint + gap per field. Tight: one line each.
-    let roomy = inner.height >= 19;
+    let roomy = inner.height >= 22;
     let label_width = 15;
     let value_width = width.saturating_sub(label_width + 1);
     let folder_title = crate::shell::config::default_title();
 
     let mut lines: Vec<Line> = Vec::new();
     let mut field_rows: Vec<(u16, Field)> = Vec::new();
-    let mut protocol_hits: Vec<(u16, u16, u16, String)> = Vec::new();
+    // Clickable values of the fields that are switched, not typed.
+    let mut option_hits: Vec<(u16, u16, u16, String)> = Vec::new();
     let intro = if form.welcome {
         "Which GitHub accounts should Add list by default?"
     } else {
@@ -1166,6 +1172,34 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
         )];
         let row = inner.y + lines.len() as u16;
         match field {
+            Field::PullRequests => {
+                let mut x = inner.x + 1 + label_width as u16;
+                for (name, on) in [("off", false), ("on", true)] {
+                    let text = format!(" {name} ");
+                    let style = if on != form.pull_requests {
+                        Style::default().fg(Color::DarkGray)
+                    } else if focused {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    };
+                    option_hits.push((x, row, text.len() as u16, format!("pulls:{name}")));
+                    x += text.len() as u16 + 1;
+                    spans.push(Span::styled(text, style));
+                    spans.push(Span::raw(" "));
+                }
+                if focused {
+                    spans.push(Span::styled(
+                        "  ← → changes",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
             Field::Protocol => {
                 let mut x = inner.x + 1 + label_width as u16;
                 for protocol in PROTOCOLS {
@@ -1182,7 +1216,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
                             .fg(Color::White)
                             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
                     };
-                    protocol_hits.push((x, row, text.len() as u16, protocol.to_string()));
+                    option_hits.push((x, row, text.len() as u16, format!("protocol:{protocol}")));
                     x += text.len() as u16 + 1;
                     spans.push(Span::styled(text, style));
                     spans.push(Span::raw(" "));
@@ -1261,7 +1295,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     };
     frame.render_widget(Paragraph::new(lines), text_area);
     let last_row = text_area.y + text_area.height;
-    for (x, y, w, name) in protocol_hits {
+    for (x, y, w, name) in option_hits {
         if y < last_row {
             app.hits.rows.push((
                 Rect {
@@ -1270,7 +1304,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
                     width: w,
                     height: 1,
                 },
-                format!("protocol:{name}"),
+                name,
             ));
         }
     }
@@ -1883,6 +1917,7 @@ mod tests {
             update_check: false,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             update_check_now: false,
             shell: Default::default(),
             clone_dir: PathBuf::from("development"),

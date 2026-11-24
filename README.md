@@ -41,6 +41,8 @@ and volumes, with live logs. It works with the keyboard and with the mouse.
   It never merges or rebases, so your own commits are never touched.
 - **Keeps chosen repositories current by itself.** Watch a repository and it
   is updated on a timer while DevAssist runs, without a dialog.
+- **Backs up pull requests.** Switched on, every fetch also saves the commits
+  of all pull requests in the clone, where they outlive the branch or fork.
 - **Adds repositories.** Search your accounts, any other account, or paste a
   GitHub link, pick one or several, and choose the folder to clone into.
 - **Imports what you already have.** Point it at a folder and its GitHub

@@ -37,6 +37,7 @@ checkout = D:\work\client\web
 collapsed = Client work
 watch = C:\dev\tool
 watch_interval = 15
+pull_requests = on
 ```
 
 | Key | Meaning |
@@ -55,6 +56,7 @@ watch_interval = 15
 | `collapsed` | A group that is folded shut. |
 | `watch` | The path of a clone that is pulled automatically while DevAssist runs. One line per clone; it has to be on the list as a `checkout` too. `w` in the overview sets it. |
 | `watch_interval` | Minutes between those pulls, from 1 to 1440. Default: 5. |
+| `pull_requests` | `on` or `off`. Whether every fetch also saves the commits of all pull requests in the clone, as `refs/pull/<number>/head`. Default: off. |
 
 If no `owner` is set, DevAssist uses the account your clones belong to. When
 they belong to several, it uses the account you are signed in with.

@@ -359,6 +359,8 @@ pub struct App {
     pub watched: Vec<PathBuf>,
     /// Minutes between those pulls.
     pub watch_interval: u32,
+    /// Every fetch also saves the commits of all pull requests.
+    pub pull_requests: bool,
     /// When the next automatic pull is due.
     watch_due: Instant,
     /// What the status line said before an automatic pull took it over.
@@ -461,6 +463,7 @@ impl App {
             update_check: settings.update_check,
             watched: settings.watched,
             watch_interval: settings.watch_interval,
+            pull_requests: settings.pull_requests,
             // The first pull runs as soon as the startup check is done.
             watch_due: Instant::now(),
             watch_status: None,
@@ -1447,6 +1450,7 @@ impl App {
             update_check: self.update_check,
             watched: self.watched.clone(),
             watch_interval: self.watch_interval,
+            pull_requests: self.pull_requests,
             shell: self.shell.clone(),
         };
         if let Err(err) = config::save(&self.config_path, &saved) {
@@ -1930,7 +1934,7 @@ impl App {
     }
 
     fn open_settings(&mut self, welcome: bool) {
-        self.form = Some(Form::new(
+        let mut form = Form::new(
             welcome,
             &self.owners,
             &self.pinned,
@@ -1938,7 +1942,9 @@ impl App {
             self.watch_interval,
             self.custom_title.as_deref(),
             self.config_path.clone(),
-        ));
+        );
+        form.pull_requests = self.pull_requests;
+        self.form = Some(form);
         self.mode = Mode::Settings;
     }
 
@@ -1964,6 +1970,7 @@ impl App {
         saved.update_check = self.update_check;
         saved.watched = self.watched.clone();
         saved.shell = self.shell.clone();
+        let pulls_turned_on = saved.pull_requests && !self.pull_requests;
         if let Err(err) = config::save(&form.path, &saved) {
             form.error = Some(err);
             return;
@@ -1975,6 +1982,7 @@ impl App {
         self.owners_explicit = true;
         self.pinned = saved.pinned;
         self.protocol = saved.protocol;
+        self.pull_requests = saved.pull_requests;
         if self.watch_interval != saved.watch_interval {
             // A new interval counts from now.
             self.watch_interval = saved.watch_interval;
@@ -1982,7 +1990,14 @@ impl App {
         }
         self.title = saved.title.clone().unwrap_or_else(config::default_title);
         self.custom_title = saved.title;
-        self.notice(format!("Settings saved to {path}."), false);
+        if pulls_turned_on {
+            self.notice(
+                "Settings saved. Pull requests are saved with the next fetch: press r.",
+                false,
+            );
+        } else {
+            self.notice(format!("Settings saved to {path}."), false);
+        }
         self.reload_github_only();
     }
 
@@ -2139,15 +2154,20 @@ impl App {
             many => count_label(many.len()),
         };
         self.notice(format!("{WATCH_LABEL} {named}…"), false);
+        let pull_requests = self.pull_requests;
         self.worker.spawn(move |tx| {
             let token = github::token();
+            let how = gitops::Fetch {
+                token: token.as_deref(),
+                pull_requests,
+            };
             let mut updated = Vec::new();
             let mut failed = Vec::new();
             for (folder, path) in work {
                 if process::was_cancelled() {
                     break;
                 }
-                match gitops::update(&path, token.as_deref(), |_, _| {}, |_, _| {}) {
+                match gitops::update(&path, how, |_, _| {}, |_, _| {}) {
                     Ok(result) if result.changed() => updated.push(folder),
                     Ok(_) => {}
                     Err(err) => failed.push((folder, err)),
@@ -2233,10 +2253,15 @@ impl App {
             return;
         };
         let job = gitprogress::job(format!("Updating {folder}"), vec![folder.clone()], 0);
+        let pull_requests = self.pull_requests;
         self.start_job(format!("Updating {folder}…"), Some(job), move |tx| {
             let token = github::token();
+            let how = gitops::Fetch {
+                token: token.as_deref(),
+                pull_requests,
+            };
             send(tx, JobEvent::Start(0));
-            if pull_one(tx, &path, token.as_deref(), expected)? {
+            if pull_one(tx, &path, how, expected)? {
                 Ok(format!("{folder} is already up to date."))
             } else {
                 Ok(format!("Updated {folder}."))
@@ -2287,8 +2312,13 @@ impl App {
         let names = work.iter().map(|item| item.folder.clone()).collect();
         let job = gitprogress::job(format!("Updating {}", count_label(count)), names, skipped);
         let label = format!("Updating {}…", count_label(count));
+        let pull_requests = self.pull_requests;
         self.start_job(label, Some(job), move |tx| {
             let token = github::token();
+            let how = gitops::Fetch {
+                token: token.as_deref(),
+                pull_requests,
+            };
             let mut updated = 0;
             let mut current = skipped;
             let mut failed = Vec::new();
@@ -2302,7 +2332,7 @@ impl App {
                     continue;
                 }
                 send(tx, JobEvent::Start(index));
-                match pull_one(tx, &item.path, token.as_deref(), item.expected) {
+                match pull_one(tx, &item.path, how, item.expected) {
                     Ok(true) => {
                         current += 1;
                         send(tx, JobEvent::Done(index, "up to date".into()));
@@ -2824,6 +2854,7 @@ impl App {
             return;
         }
         let token = if fetch { github::token() } else { None };
+        let pull_requests = self.pull_requests;
         let queue = std::sync::Arc::new(std::sync::Mutex::new(repos));
         let workers = (if fetch { 4 } else { 8 }).min(self.status_pending.max(1));
         for _ in 0..workers {
@@ -2836,7 +2867,11 @@ impl App {
                         break;
                     };
                     let fetch_this = fetch && !process::was_cancelled();
-                    let check = gitops::check(&path, fetch_this, token.as_deref());
+                    let how = gitops::Fetch {
+                        token: token.as_deref(),
+                        pull_requests,
+                    };
+                    let check = gitops::check(&path, fetch_this, how);
                     if tx
                         .send(Msg::Status {
                             generation,
@@ -2995,7 +3030,7 @@ fn send_line(tx: &Sender<Msg>, line: &str, progress: bool) {
 fn pull_one(
     tx: &Sender<Msg>,
     path: &Path,
-    token: Option<&str>,
+    how: gitops::Fetch,
     expected: u32,
 ) -> Result<bool, String> {
     if expected > 0 {
@@ -3003,7 +3038,7 @@ fn pull_one(
     }
     let updated = gitops::update(
         path,
-        token,
+        how,
         |line, progress| send_line(tx, line, progress),
         |done, total| send(tx, JobEvent::Steps(done, total)),
     )?;
@@ -3090,6 +3125,7 @@ mod tests {
             update_check: false,
             watched: Vec::new(),
             watch_interval: 5,
+            pull_requests: false,
             update_check_now: false,
             shell: Default::default(),
             clone_dir: std::env::temp_dir().join("devassist-clones"),
@@ -3273,6 +3309,7 @@ mod tests {
             behind_branches: 0,
             remote_new: 0,
             remote_branches: Vec::new(),
+            pull_requests: 0,
             ready: true,
             fetched: false,
             error: None,
@@ -4109,6 +4146,29 @@ mod tests {
             .retain(|path| path != Path::new("/srv/code/docs"));
         app.save_config();
         assert!(app.watched.is_empty());
+        let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    #[test]
+    fn the_settings_dialog_switches_saving_pull_requests() {
+        let mut app = App::empty(test_settings());
+        assert!(!app.pull_requests);
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(!app.form.as_ref().unwrap().pull_requests);
+        app.form.as_mut().unwrap().click("pulls:on");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert!(app.pull_requests);
+        assert!(app.status.contains("press r"), "{}", app.status);
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(text.contains("pull_requests = on"));
+
+        // The dialog opens on what is set, and saving again keeps it.
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(app.form.as_ref().unwrap().pull_requests);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.pull_requests);
+        assert!(app.status.starts_with("Settings saved to"));
         let _ = std::fs::remove_file(&app.config_path);
     }
 

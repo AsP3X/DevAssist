@@ -170,6 +170,29 @@ The first pull runs right after you start DevAssist or turn watching on, then
 every 5 minutes. The settings (`c`) change the interval, from 1 minute to a
 day. Which repositories are watched is remembered between starts.
 
+## Saving pull requests
+
+Switch **Pull requests** to `on` in the settings (`c`) and every fetch also
+saves the commits of all pull requests of a repository in its clone: open,
+merged and closed ones, also those that come from a fork. That covers the
+fetch at start, `r`, an update and an automatic pull. It is off by default,
+because a repository with thousands of pull requests takes a while the first
+time.
+
+They are kept as `refs/pull/<number>/head`, the name GitHub gives them, apart
+from your branches: no local branch is made for them and they never count as
+something new. With a repository highlighted, the line under the status says
+how many are saved. To look at one:
+
+```
+git log refs/pull/12/head
+git switch -c pr-12 refs/pull/12/head
+```
+
+It is a backup, so nothing is removed again: a pull request that disappears
+from GitHub stays in the clone. Only the commits are saved. Titles,
+descriptions, comments and reviews are not.
+
 ## Selecting several
 
 `Space` ticks the highlighted row and moves down. `Ctrl-A` ticks everything the

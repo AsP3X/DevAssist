@@ -62,6 +62,8 @@ pub struct StatusInfo {
     pub remote_new: u32,
     /// Those remote branches, the most recently committed first.
     pub remote_branches: Vec<String>,
+    /// Pull requests whose commits are saved in this clone.
+    pub pull_requests: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -84,6 +86,8 @@ pub struct LocalRepo {
     pub behind_branches: u32,
     pub remote_new: u32,
     pub remote_branches: Vec<String>,
+    /// Pull requests whose commits are saved in this clone.
+    pub pull_requests: u32,
     pub ready: bool,
     pub fetched: bool,
     pub error: Option<String>,
@@ -139,6 +143,7 @@ impl LocalRepo {
         self.behind_branches = info.behind_branches;
         self.remote_new = info.remote_new;
         self.remote_branches = info.remote_branches;
+        self.pull_requests = info.pull_requests;
         self.error = None;
         self.ready = true;
     }
@@ -451,15 +456,29 @@ pub fn status(path: &Path) -> Result<StatusInfo, String> {
         info.behind_branches = branches.behind_branches;
         info.remote_new = branches.remote_new;
         info.remote_branches = branches.remote_branches;
+        info.pull_requests = branches.pull_requests;
     }
     Ok(info)
 }
 
-pub fn check(path: &Path, fetch_remote: bool, token: Option<&str>) -> RepoCheck {
+/// How a fetch reaches the remote and what it brings along.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Fetch<'a> {
+    /// The GitHub token, sent over https for this one command.
+    pub token: Option<&'a str>,
+    /// Also save the commits of every pull request, under `refs/pull`.
+    pub pull_requests: bool,
+}
+
+/// Where GitHub publishes the head of each pull request, and where a clone
+/// keeps it. That is outside the branches, so nothing else sees them.
+const PULL_REFSPEC: &str = "+refs/pull/*/head:refs/pull/*/head";
+
+pub fn check(path: &Path, fetch_remote: bool, how: Fetch) -> RepoCheck {
     let mut warning = None;
     let mut fetched = false;
     if fetch_remote {
-        match fetch(path, token) {
+        match fetch(path, how) {
             Ok(()) => fetched = true,
             Err(_) if process::was_cancelled() => {}
             Err(err) => warning = Some(err),
@@ -472,8 +491,8 @@ pub fn check(path: &Path, fetch_remote: bool, token: Option<&str>) -> RepoCheck 
     }
 }
 
-pub fn fetch(path: &Path, token: Option<&str>) -> Result<(), String> {
-    let mut args = auth_args(token);
+pub fn fetch(path: &Path, how: Fetch) -> Result<(), String> {
+    let mut args = auth_args(how.token);
     args.extend([
         OsString::from("-C"),
         path.as_os_str().to_os_string(),
@@ -481,7 +500,36 @@ pub fn fetch(path: &Path, token: Option<&str>) -> Result<(), String> {
         OsString::from("--prune"),
         OsString::from("--recurse-submodules=no"),
     ]);
-    run_git(args, |_, _| {})
+    run_git(args, |_, _| {})?;
+    if how.pull_requests && !process::was_cancelled() {
+        fetch_pull_requests(path, how.token, false, |_, _| {})?;
+    }
+    Ok(())
+}
+
+/// Saves the commits of every pull request of origin under `refs/pull`:
+/// open, merged and closed ones alike. It is a backup, so nothing is
+/// pruned: a pull request that is gone from the remote stays here.
+fn fetch_pull_requests(
+    path: &Path,
+    token: Option<&str>,
+    progress: bool,
+    on_line: impl FnMut(&str, bool),
+) -> Result<(), String> {
+    let mut args = auth_args(token);
+    args.extend([
+        OsString::from("-C"),
+        path.as_os_str().to_os_string(),
+        OsString::from("fetch"),
+        OsString::from("--no-prune"),
+        OsString::from("--no-tags"),
+        OsString::from("--recurse-submodules=no"),
+    ]);
+    if progress {
+        args.push(OsString::from("--progress"));
+    }
+    args.extend([OsString::from("origin"), OsString::from(PULL_REFSPEC)]);
+    run_git(args, on_line).map_err(|err| format!("pull requests: {err}"))
 }
 
 /// What an update changed in one checkout.
@@ -515,13 +563,16 @@ impl Updated {
 ///
 /// `on_steps` hears how many branches are done out of how many have
 /// something to bring in: once after the fetch, then after each branch.
+///
+/// With `how.pull_requests`, the commits of every pull request are saved
+/// as well, after the branches are fetched.
 pub fn update(
     path: &Path,
-    token: Option<&str>,
+    how: Fetch,
     mut on_line: impl FnMut(&str, bool),
     on_steps: impl FnMut(u32, u32),
 ) -> Result<Updated, String> {
-    let mut args = auth_args(token);
+    let mut args = auth_args(how.token);
     args.extend([
         OsString::from("-C"),
         path.as_os_str().to_os_string(),
@@ -533,6 +584,12 @@ pub fn update(
     run_git(args, &mut on_line)?;
     if process::was_cancelled() {
         return Err("cancelled".into());
+    }
+    if how.pull_requests {
+        fetch_pull_requests(path, how.token, true, &mut on_line)?;
+        if process::was_cancelled() {
+            return Err("cancelled".into());
+        }
     }
     bring_in(path, true, on_line, on_steps)
 }
@@ -915,6 +972,7 @@ pub fn parse_status(text: &str) -> StatusInfo {
         behind_branches: u32::from(total_behind > 0),
         remote_new: 0,
         remote_branches: Vec::new(),
+        pull_requests: 0,
     }
 }
 
@@ -927,6 +985,8 @@ struct Branches {
     behind_branches: u32,
     remote_new: u32,
     remote_branches: Vec<String>,
+    /// Saved pull requests.
+    pull_requests: u32,
 }
 
 struct ParsedRefs {
@@ -962,6 +1022,8 @@ struct RefList {
     /// Remote branches as (ref, tip), the most recently committed first.
     remotes: Vec<(String, String)>,
     has_remotes: bool,
+    /// Saved pull requests: the refs under refs/pull.
+    pull_requests: u32,
 }
 
 impl RefList {
@@ -994,6 +1056,7 @@ fn list_refs(path: &Path) -> Result<RefList, String> {
         .arg("--format=%(refname)%09%(objectname)%09%(upstream)%09%(upstream:track)%09%(HEAD)")
         .arg("refs/heads")
         .arg("refs/remotes")
+        .arg("refs/pull")
         .output()
         .map_err(|err| format!("git for-each-ref: {err}"))?;
     if !output.status.success() {
@@ -1008,8 +1071,10 @@ fn list_refs(path: &Path) -> Result<RefList, String> {
 }
 
 fn branch_divergence(path: &Path) -> Result<Branches, String> {
-    let parsed = summarize(&list_refs(path)?);
+    let list = list_refs(path)?;
+    let parsed = summarize(&list);
     let mut branches = Branches {
+        pull_requests: list.pull_requests,
         ahead: parsed.ahead,
         behind: parsed.behind,
         all_current: parsed.all_current,
@@ -1040,6 +1105,7 @@ fn parse_ref_list(text: &str) -> RefList {
     let mut locals = Vec::new();
     let mut remotes = Vec::new();
     let mut has_remotes = false;
+    let mut pull_requests = 0;
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
         if line.trim().is_empty() {
@@ -1051,7 +1117,9 @@ fn parse_ref_list(text: &str) -> RefList {
         let upstream = parts.next().unwrap_or("").trim();
         let track = parts.next().unwrap_or("").trim();
         let head = parts.next().unwrap_or("").trim() == "*";
-        if name.starts_with("refs/remotes/") {
+        if name.starts_with("refs/pull/") {
+            pull_requests += 1;
+        } else if name.starts_with("refs/remotes/") {
             has_remotes = true;
             // origin/HEAD only points at another branch.
             if !name.ends_with("/HEAD") {
@@ -1073,6 +1141,7 @@ fn parse_ref_list(text: &str) -> RefList {
         locals,
         remotes,
         has_remotes,
+        pull_requests,
     }
 }
 
@@ -1566,6 +1635,7 @@ mod tests {
             behind_branches: 0,
             remote_new: 0,
             remote_branches: Vec::new(),
+            pull_requests: 0,
             ready: true,
             fetched: false,
             error: None,
@@ -1847,6 +1917,82 @@ refs/remotes/fork/dev\tiii\t\t
     }
 
     #[test]
+    fn pull_requests_are_saved_apart_from_the_branches_and_never_pruned() {
+        let root = std::env::temp_dir().join(format!("devassist-pulls-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+
+        // Two pull requests the way GitHub publishes them: a ref under
+        // refs/pull whose commits are on no branch.
+        for number in ["1", "2"] {
+            git(&upstream, &["checkout", "-q", "-b", "work", "main"]);
+            commit(&upstream, &format!("pull-{number}"));
+            let head = format!("refs/pull/{number}/head");
+            git(&upstream, &["update-ref", &head, "HEAD"]);
+            git(&upstream, &["checkout", "-q", "main"]);
+            git(&upstream, &["branch", "-q", "-D", "work"]);
+        }
+        let tip = |dir: &Path, name: &str| {
+            let output = git_command()
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--verify", "-q", name])
+                .output()
+                .unwrap();
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        let saving = Fetch {
+            token: None,
+            pull_requests: true,
+        };
+
+        // Without the setting an update leaves them on the remote.
+        update(&clone, Fetch::default(), |_, _| {}, |_, _| {}).unwrap();
+        assert_eq!(tip(&clone, "refs/pull/1/head"), None);
+        assert_eq!(status(&clone).unwrap().pull_requests, 0);
+
+        // With it, their commits are in the clone, and nothing else moves:
+        // no branch is made for them and nothing counts as new.
+        let done = update(&clone, saving, |_, _| {}, |_, _| {}).unwrap();
+        assert!(!done.changed(), "{done:?}");
+        for number in ["1", "2"] {
+            let head = format!("refs/pull/{number}/head");
+            assert!(tip(&clone, &head).is_some());
+            assert_eq!(tip(&clone, &head), tip(&upstream, &head));
+        }
+        let info = status(&clone).unwrap();
+        assert_eq!(info.pull_requests, 2);
+        assert_eq!(info.remote_new, 0);
+        assert!(info.all_branches_current);
+        assert_eq!(tip(&clone, "refs/heads/work"), None);
+
+        // A pull request that gets another commit follows; one the remote
+        // drops stays here. A plain fetch does the same as an update.
+        git(&upstream, &["checkout", "-q", "refs/pull/1/head"]);
+        commit(&upstream, "more");
+        git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
+        git(&upstream, &["checkout", "-q", "main"]);
+        let kept = tip(&clone, "refs/pull/2/head");
+        git(&upstream, &["update-ref", "-d", "refs/pull/2/head"]);
+        fetch(&clone, saving).unwrap();
+        assert_eq!(
+            tip(&clone, "refs/pull/1/head"),
+            tip(&upstream, "refs/pull/1/head")
+        );
+        assert_eq!(tip(&clone, "refs/pull/2/head"), kept);
+        assert_eq!(status(&clone).unwrap().pull_requests, 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn update_moves_every_branch_that_can_move_and_adds_new_ones() {
         let root = std::env::temp_dir().join(format!("devassist-update-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -1888,7 +2034,7 @@ refs/remotes/fork/dev\tiii\t\t
         let mut steps = Vec::new();
         let done = update(
             &clone,
-            None,
+            Fetch::default(),
             |line, _| lines.push(line.to_string()),
             |done, total| steps.push((done, total)),
         )
@@ -1933,7 +2079,7 @@ refs/remotes/fork/dev\tiii\t\t
         let mut steps = Vec::new();
         let again = update(
             &clone,
-            None,
+            Fetch::default(),
             |_, _| {},
             |done, total| steps.push((done, total)),
         )
@@ -1981,7 +2127,7 @@ refs/remotes/fork/dev\tiii\t\t
         let mut steps = Vec::new();
         let done = update(
             &clone,
-            None,
+            Fetch::default(),
             |line, _| lines.push(line.to_string()),
             |done, total| steps.push((done, total)),
         )
@@ -2077,7 +2223,7 @@ refs/remotes/fork/dev\tiii\t\t
             // The remote deletes both branches, and the update prunes what
             // the checkout knew of them, history included.
             git(&upstream, &["branch", "-q", "-D", "bot", "mine"]);
-            update(&clone, None, |_, _| {}, |_, _| {}).unwrap();
+            update(&clone, Fetch::default(), |_, _| {}, |_, _| {}).unwrap();
 
             // Then it makes them again on top of a main that moved on.
             commit(&upstream, &format!("main-{round}"));
@@ -2090,7 +2236,7 @@ refs/remotes/fork/dev\tiii\t\t
             let mut lines = Vec::new();
             let done = update(
                 &clone,
-                None,
+                Fetch::default(),
                 |line, _| lines.push(line.to_string()),
                 |_, _| {},
             )

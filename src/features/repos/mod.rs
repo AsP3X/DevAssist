@@ -30,7 +30,7 @@ d, Delete      delete the selection, or only take it off the list
 r, F5          fetch and refresh
 s              sort by name or by attention
 o              open the selection in the file manager
-c              settings: default accounts, protocol, pull interval, title
+c              settings: accounts, protocol, pull interval, pull requests, title
 l              show the last update or clone
 /              filter the installed list
 wheel          scroll
