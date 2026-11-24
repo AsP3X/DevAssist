@@ -985,6 +985,252 @@ fn pull_tips(path: &Path) -> Result<std::collections::HashSet<String>, String> {
         .collect())
 }
 
+/// What collecting the forks of one repository did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ForksSaved {
+    /// The folder was made by this run.
+    pub created: bool,
+    /// Forks that were fetched.
+    pub fetched: u32,
+    /// Forks that could not be fetched, as `owner/name`.
+    pub failed: Vec<String>,
+    /// Branches the folder holds now, of the original and of every fork.
+    pub branches: u32,
+    /// Pull requests it holds now.
+    pub pulls: u32,
+}
+
+/// Marks a repository as the collection of the forks of `owner/name`.
+const FORKS_KEY: &str = "devassist.forksof";
+
+/// The folder the forks of a checkout go into: beside it, under its name
+/// with `-fork` added.
+pub fn forks_folder(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(format!("{name}-fork")))
+}
+
+/// The address a repository on GitHub is fetched from, over SSH when the
+/// checkout's own origin uses SSH.
+pub fn fork_url(origin: &str, owner: &str, name: &str) -> String {
+    if is_ssh(origin) {
+        format!("git@github.com:{owner}/{name}.git")
+    } else {
+        format!("https://github.com/{owner}/{name}.git")
+    }
+}
+
+/// An account name that can be the name of a remote as it is.
+fn valid_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+/// Collects the forks of the checkout `source` in the repository `dest`,
+/// which is made when it is not there: one repository that has the
+/// original and every fork as a remote named after its owner. The
+/// branches of `bob`'s fork are `bob/<branch>`, its pull requests
+/// `refs/pull/bob/<number>/head`. Forks share nearly all their commits,
+/// so one repository holds them in the room of one.
+///
+/// What `source` has already is taken from disk first. A fork that cannot
+/// be fetched is named in the result and the rest goes on. Nothing is
+/// pruned: a branch or fork that disappears on GitHub stays here. Running
+/// it again brings new forks and new commits.
+pub fn save_forks(
+    source: &Path,
+    dest: &Path,
+    original: &(String, String),
+    forks: &[(String, String)],
+    url_of: &dyn Fn(&str, &str) -> String,
+    token: Option<&str>,
+    mut on_line: impl FnMut(&str, bool),
+) -> Result<ForksSaved, String> {
+    let (owner, name) = original;
+    let id = format!("{owner}/{name}");
+    if !valid_remote_name(owner) {
+        return Err(format!("{owner} cannot be the name of a remote"));
+    }
+    let created = !dest.exists();
+    if created {
+        let args = [
+            OsStr::new("-c"),
+            OsStr::new("init.defaultBranch=main"),
+            OsStr::new("init"),
+            OsStr::new("-q"),
+            OsStr::new("--"),
+            dest.as_os_str(),
+        ];
+        run_git(args, &mut on_line)?;
+        if let Err(err) = git_lines(dest, &["config", FORKS_KEY, &id]) {
+            let _ = remove_tree(dest);
+            return Err(err);
+        }
+    } else {
+        let known = dest
+            .join(".git")
+            .exists()
+            .then(|| git_lines(dest, &["config", "--get", FORKS_KEY]).ok())
+            .flatten()
+            .and_then(|lines| lines.into_iter().next());
+        if !known.is_some_and(|known| known.eq_ignore_ascii_case(&id)) {
+            return Err(format!(
+                "{} is there already and does not hold the forks of {id}",
+                dest.display()
+            ));
+        }
+    }
+    let mut saved = ForksSaved {
+        created,
+        ..ForksSaved::default()
+    };
+
+    // The remotes it has, with their addresses.
+    let known: std::collections::HashMap<String, String> =
+        git_lines(dest, &["config", "--get-regexp", r"^remote\..*\.url$"])
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|line| {
+                let (key, url) = line.split_once(' ')?;
+                let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
+                Some((name.to_string(), url.trim().to_string()))
+            })
+            .collect();
+
+    // The original comes first, so that every fork only adds what it has
+    // of its own.
+    set_fork_remote(dest, &known, owner, &url_of(owner, name), true)?;
+    if created {
+        on_line(
+            &format!("Taking what {} has already.", source.display()),
+            false,
+        );
+        let mut args: Vec<OsString> = ["-C".into(), dest.as_os_str().to_os_string()].into();
+        args.extend(
+            ["fetch", "--quiet", "--no-tags", "--recurse-submodules=no"].map(OsString::from),
+        );
+        args.push(source.as_os_str().to_os_string());
+        args.extend([
+            OsString::from(format!("+refs/remotes/origin/*:refs/remotes/{owner}/*")),
+            OsString::from("^refs/remotes/origin/HEAD"),
+            OsString::from(format!("+refs/pull/*/head:refs/pull/{owner}/*/head")),
+        ]);
+        // Only a shortcut: what it misses comes from GitHub next.
+        if let Err(err) = run_git(args, &mut on_line) {
+            on_line(&format!("Not taken from the local clone: {err}"), false);
+        }
+    }
+    on_line(&format!("Fetching {id}, the original."), false);
+    fetch_fork(dest, owner, token, &mut on_line)?;
+    if created {
+        // Files to look at: the branch the checkout is on, as the
+        // original has it.
+        let branch = git_lines(source, &["symbolic-ref", "--short", "-q", "HEAD"])
+            .ok()
+            .and_then(|lines| lines.into_iter().next());
+        if let Some(branch) = branch {
+            let start = format!("{owner}/{branch}");
+            let out = git_lines(dest, &["checkout", "-q", "-b", &branch, "--track", &start]);
+            if let Err(err) = out {
+                on_line(&format!("No files were checked out: {err}"), false);
+            }
+        }
+    }
+
+    let total = forks.len();
+    for (index, (fork_owner, fork_name)) in forks.iter().enumerate() {
+        if process::was_cancelled() {
+            return Err("cancelled".into());
+        }
+        let fork = format!("{fork_owner}/{fork_name}");
+        let fetched = if !valid_remote_name(fork_owner) || fork_owner.eq_ignore_ascii_case(owner) {
+            on_line(
+                &format!("{fork_owner} cannot be the name of a remote."),
+                false,
+            );
+            Err(String::new())
+        } else {
+            on_line(&format!("Fetching {fork}."), false);
+            let url = url_of(fork_owner, fork_name);
+            set_fork_remote(dest, &known, fork_owner, &url, false)
+                .and_then(|()| fetch_fork(dest, fork_owner, token, &mut on_line))
+        };
+        match fetched {
+            Ok(()) => saved.fetched += 1,
+            Err(err) => {
+                if process::was_cancelled() {
+                    return Err(err);
+                }
+                on_line(&format!("{fork} was not fetched."), false);
+                saved.failed.push(fork);
+            }
+        }
+        let done = index + 1;
+        on_line(
+            &format!(
+                "Fetching forks: {:>3}% ({done}/{total})",
+                done * 100 / total
+            ),
+            true,
+        );
+    }
+
+    let count = |prefix: &str| {
+        git_lines(dest, &["for-each-ref", "--format=%(refname)", prefix]).map_or(0, |lines| {
+            let refs = lines.iter().filter(|name| !name.ends_with("/HEAD")).count();
+            u32::try_from(refs).unwrap_or(u32::MAX)
+        })
+    };
+    saved.branches = count("refs/remotes");
+    saved.pulls = count("refs/pull");
+    Ok(saved)
+}
+
+/// Makes `name` a remote of the fork collection, or gives it the address
+/// it has now. A new remote also fetches its pull requests, kept under
+/// its own name, and only the original brings tags: every fork has the
+/// same ones.
+fn set_fork_remote(
+    dest: &Path,
+    known: &std::collections::HashMap<String, String>,
+    name: &str,
+    url: &str,
+    tags: bool,
+) -> Result<(), String> {
+    match known.get(name) {
+        Some(old) if old == url => Ok(()),
+        Some(_) => git_lines(dest, &["remote", "set-url", "--", name, url]).map(drop),
+        None => {
+            let mut add = vec!["remote", "add"];
+            if !tags {
+                add.push("--no-tags");
+            }
+            add.extend(["--", name, url]);
+            git_lines(dest, &add)?;
+            let key = format!("remote.{name}.fetch");
+            let pulls = format!("+refs/pull/*/head:refs/pull/{name}/*/head");
+            git_lines(dest, &["config", "--add", &key, &pulls]).map(drop)
+        }
+    }
+}
+
+/// Fetches the branches and pull requests of one remote of the fork
+/// collection.
+fn fetch_fork(
+    dest: &Path,
+    name: &str,
+    token: Option<&str>,
+    on_line: impl FnMut(&str, bool),
+) -> Result<(), String> {
+    let mut args = auth_args(token);
+    args.extend([OsString::from("-C"), dest.as_os_str().to_os_string()]);
+    args.extend(["fetch", "--no-prune", "--recurse-submodules=no", "--", name].map(OsString::from));
+    run_git(args, on_line)
+}
+
 /// What an update changed in one checkout.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Updated {
@@ -2532,6 +2778,89 @@ refs/remotes/fork/dev\tiii\t\t
         assert!(lines.contains(&(format!("Copied {files} files."), false)));
         // Never more lines than percents, however many files there are.
         assert!(lines.len() <= 110, "{}", lines.len());
+        let _ = remove_tree(&root);
+    }
+
+    #[test]
+    fn the_forks_of_a_checkout_are_collected_in_one_repository_beside_it() {
+        let root = std::env::temp_dir().join(format!("devassist-forks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let tip = |dir: &Path, name: &str| {
+            git_lines(dir, &["rev-parse", "-q", "--verify", name])
+                .ok()
+                .and_then(|lines| lines.into_iter().next())
+        };
+        // The original on "GitHub", with a tag and a pull request.
+        let ada = root.join("ada");
+        git(&root, &["init", "-q", "-b", "main", "ada"]);
+        commit(&ada, "one");
+        git(&ada, &["tag", "v1"]);
+        git(&ada, &["update-ref", "refs/pull/7/head", "HEAD"]);
+        // Two forks: one with a branch and a pull request of its own.
+        git(&root, &["clone", "-q", "ada", "bob"]);
+        let bob = root.join("bob");
+        git(&bob, &["checkout", "-q", "-b", "feature"]);
+        commit(&bob, "bobs");
+        git(&bob, &["update-ref", "refs/pull/1/head", "HEAD"]);
+        git(&root, &["clone", "-q", "ada", "eve"]);
+        // The checkout the forks are collected for.
+        git(&root, &["clone", "-q", "ada", "api"]);
+        let api = root.join("api");
+        let dest = forks_folder(&api).unwrap();
+        assert_eq!(dest, root.join("api-fork"));
+
+        let original = ("ada".to_string(), "api".to_string());
+        let fork = |owner: &str| (owner.to_string(), "api".to_string());
+        let forks = [fork("bob"), fork("eve"), fork("gone"), fork("bad name")];
+        let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
+        let mut lines = Vec::new();
+        let saved = save_forks(&api, &dest, &original, &forks, &url_of, None, |line, _| {
+            lines.push(line.to_string())
+        })
+        .unwrap();
+        assert!(saved.created);
+        assert_eq!(saved.fetched, 2, "{lines:?}");
+        assert_eq!(saved.failed, ["gone/api", "bad name/api"]);
+        // main of all three and bob's branch; both pull requests.
+        assert_eq!(saved.branches, 4, "{lines:?}");
+        assert_eq!(saved.pulls, 2);
+        assert_eq!(tip(&dest, "refs/remotes/ada/main"), tip(&ada, "main"));
+        assert_eq!(tip(&dest, "refs/remotes/bob/feature"), tip(&bob, "feature"));
+        assert_eq!(tip(&dest, "refs/remotes/eve/main"), tip(&ada, "main"));
+        assert_eq!(tip(&dest, "refs/pull/ada/7/head"), tip(&ada, "main"));
+        assert_eq!(tip(&dest, "refs/pull/bob/1/head"), tip(&bob, "feature"));
+        assert_eq!(tip(&dest, "refs/tags/v1"), tip(&ada, "v1"));
+        // The files of the original are there to look at.
+        assert_eq!(status(&dest).unwrap().branch, "main");
+        assert!(dest.join("one").exists());
+        assert!(lines.contains(&"Fetching forks: 100% (4/4)".to_string()));
+
+        // Again: what is new comes in, nothing is made twice.
+        commit(&bob, "more");
+        let again = save_forks(
+            &api,
+            &dest,
+            &original,
+            &forks[..2],
+            &url_of,
+            None,
+            |_, _| {},
+        );
+        let again = again.unwrap();
+        assert!(!again.created);
+        assert_eq!((again.fetched, again.branches), (2, 4));
+        assert_eq!(tip(&dest, "refs/remotes/bob/feature"), tip(&bob, "feature"));
+        let config = fs::read_to_string(dest.join(".git").join("config")).unwrap();
+        assert_eq!(config.matches("[remote \"bob\"]").count(), 1, "{config}");
+
+        // A folder that is something else is left alone.
+        let other = ("ada".to_string(), "other".to_string());
+        let refused = save_forks(&api, &dest, &other, &forks[..1], &url_of, None, |_, _| {});
+        assert!(refused.unwrap_err().contains("there already"));
+        assert!(save_forks(&api, &bob, &original, &forks[..1], &url_of, None, |_, _| {}).is_err());
+        assert!(fork_url("git@github.com:ada/api.git", "bob", "api").starts_with("git@"));
+        assert!(fork_url("https://github.com/ada/api", "bob", "api").starts_with("https://"));
         let _ = remove_tree(&root);
     }
 

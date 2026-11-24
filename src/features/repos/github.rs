@@ -588,6 +588,122 @@ pub fn parse_pull_counts(body: &str, count: usize) -> Result<Vec<Option<PullCoun
         .collect())
 }
 
+/// A fork of a repository on GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fork {
+    pub owner: String,
+    pub name: String,
+}
+
+/// The forks GitHub lists for a repository, and what kept the list from
+/// being complete, if anything did.
+#[derive(Debug, Default)]
+pub struct Forks {
+    pub forks: Vec<Fork>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiFork {
+    name: String,
+    owner: Option<ApiOwner>,
+    #[serde(default)]
+    forks_count: u32,
+}
+
+/// The most pages of forks read for one repository: 10,000 forks.
+const FORK_PAGES: u32 = 100;
+
+pub fn forks_url(owner: &str, name: &str) -> String {
+    format!("https://api.github.com/repos/{owner}/{name}/forks?per_page=100&sort=oldest")
+}
+
+/// One page of forks, each with how many forks it has itself.
+pub fn parse_fork_list(body: &str) -> Result<Vec<(Fork, u32)>, String> {
+    if body.trim_start().starts_with('{') {
+        return Err(github_message(body));
+    }
+    let forks: Vec<ApiFork> = serde_json::from_str(body)
+        .map_err(|err| format!("GitHub response was not a list of forks ({err})"))?;
+    Ok(forks
+        .into_iter()
+        .filter_map(|fork| {
+            let owner = fork.owner.map(|owner| owner.login)?;
+            (!owner.is_empty() && !fork.name.is_empty()).then_some((
+                Fork {
+                    owner,
+                    name: fork.name,
+                },
+                fork.forks_count,
+            ))
+        })
+        .collect())
+}
+
+/// Every fork of a repository, and the forks of those forks. `on_found`
+/// hears how many are known so far. A fork whose own forks cannot be
+/// listed is kept, and the list says that it is not complete.
+pub fn fetch_forks(
+    owner: &str,
+    name: &str,
+    token: Option<&str>,
+    mut on_found: impl FnMut(usize),
+) -> Result<Forks, String> {
+    let mut found = Forks::default();
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(format!("{owner}/{name}").to_lowercase());
+    let mut waiting = std::collections::VecDeque::new();
+    waiting.push_back((owner.to_string(), name.to_string(), true));
+    while let Some((owner, name, root)) = waiting.pop_front() {
+        let mut url = Some(forks_url(&owner, &name));
+        let mut pages = 0;
+        while let Some(next) = url.take() {
+            if crate::atoms::sys::process::was_cancelled() {
+                return Err("cancelled".into());
+            }
+            pages += 1;
+            if pages > FORK_PAGES {
+                found.warning = Some(format!(
+                    "{owner}/{name} has more forks than the first {} that were read",
+                    FORK_PAGES * 100
+                ));
+                break;
+            }
+            let page = gh_get(&next, token)
+                .map_err(|err| {
+                    if err.not_found() {
+                        format!("repository {owner}/{name} was not found")
+                    } else {
+                        err.to_string()
+                    }
+                })
+                .and_then(|response| Ok((parse_fork_list(&response.body)?, response.link)));
+            let (forks, link) = match page {
+                Ok(page) => page,
+                // The repository itself has to answer. A fork that does
+                // not only costs the forks below it.
+                Err(err) if root => return Err(err),
+                Err(err) => {
+                    found.warning = Some(format!("forks of {owner}/{name}: {err}"));
+                    break;
+                }
+            };
+            for (fork, below) in forks {
+                if !seen.insert(format!("{}/{}", fork.owner, fork.name).to_lowercase()) {
+                    continue;
+                }
+                if below > 0 {
+                    waiting.push_back((fork.owner.clone(), fork.name.clone(), false));
+                }
+                found.forks.push(fork);
+            }
+            on_found(found.forks.len());
+            url = link.as_deref().and_then(next_link);
+        }
+    }
+    Ok(found)
+}
+
 pub fn current_login() -> Option<String> {
     token().and_then(|token| authed_login(&token))
 }
@@ -863,6 +979,29 @@ mod tests {
         assert_eq!(
             repo_url("storytold", "photocraft"),
             "https://api.github.com/repos/storytold/photocraft"
+        );
+    }
+
+    #[test]
+    fn a_page_of_forks_names_each_fork_and_how_many_forks_it_has() {
+        assert!(forks_url("ada", "tool").contains("/repos/ada/tool/forks?per_page=100"));
+        let body = r#"[
+            {"name": "tool", "owner": {"login": "bob"}, "forks_count": 2},
+            {"name": "tool-renamed", "owner": {"login": "eve"}},
+            {"name": "orphan", "owner": null}
+        ]"#;
+        let fork = |owner: &str, name: &str| Fork {
+            owner: owner.into(),
+            name: name.into(),
+        };
+        assert_eq!(
+            parse_fork_list(body).unwrap(),
+            [(fork("bob", "tool"), 2), (fork("eve", "tool-renamed"), 0)]
+        );
+        assert_eq!(parse_fork_list("[]").unwrap(), []);
+        assert_eq!(
+            parse_fork_list(r#"{"message": "Not Found"}"#).unwrap_err(),
+            "Not Found"
         );
     }
 

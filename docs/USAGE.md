@@ -238,6 +238,48 @@ It is a backup, so nothing is removed again: a pull request that disappears
 from GitHub stays in the clone. Only the commits are saved. Titles,
 descriptions, comments and reviews are not.
 
+## Cloning the forks
+
+**Clone the forks** in the actions menu (`Enter`, then `f`) asks GitHub for
+every fork of the highlighted repository, and for the forks of those forks,
+and fetches them all into a folder beside the checkout: its name with `-fork`
+added. The forks of `D:\code\api` go into `D:\code\api-fork`. With several
+repositories ticked, each gets a folder of its own.
+
+That folder is one Git repository, not one clone per fork. Forks share nearly
+all their commits with the original, so they are stored once, and a
+repository with hundreds of forks stays about as large as one clone. The
+original and every fork are remotes, each named after the account it belongs
+to:
+
+| What | Where it is |
+| --- | --- |
+| The branches of `bob`'s fork | `bob/main`, `bob/feature`, … |
+| The pull requests of `bob`'s fork | `refs/pull/bob/<number>/head` |
+| The branches and pull requests of the original, owned by `ada` | `ada/main`, `refs/pull/ada/<number>/head` |
+
+The files in the folder are the original's, on the branch your checkout is
+on. To look at what a fork did:
+
+```
+git branch -r --list "bob/*"
+git log ada/main..bob/feature
+git switch --detach bob/feature
+```
+
+What the checkout has already is taken from disk, so only what the forks
+added is downloaded. The progress dialog counts the forks. A fork that cannot
+be fetched, because it is private or was deleted, is named there and the rest
+goes on.
+
+Choose the line again later to bring in new forks and new commits. Nothing is
+removed: a branch or a fork that disappears from GitHub stays in the folder.
+The folder is not put on the overview, and a folder of that name that is
+something else is left alone. Only commits are saved: titles and comments of
+pull requests are not. GitHub lists at most 10,000 forks of one repository
+here, and without a sign-in it answers only 60 requests an hour, which is
+enough for about 6,000 forks.
+
 ## Selecting several
 
 `Space` ticks the highlighted row and moves down. `Ctrl-A` ticks everything the
@@ -255,6 +297,7 @@ ticked, update, remove, open and move-to-group act on all of them.
 - Copy the path
 - Auto-pull on or off
 - Fetch the pull requests
+- Clone the forks
 - Migrate, which opens a submenu
 - Remove
 

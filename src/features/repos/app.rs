@@ -99,6 +99,8 @@ pub enum Queued {
     Refresh,
     /// Save the pull requests of these folders now.
     PullRequests(Vec<String>),
+    /// Collect the forks of these folders, each in a folder beside it.
+    Forks(Vec<String>),
     /// Move these checkouts, each by row name and path, into that folder.
     Move(Vec<(String, PathBuf)>, PathBuf),
     /// Push the checkout with this row name and path to that address.
@@ -122,6 +124,7 @@ impl Queued {
             Queued::Import(dir) => format!("import {}", dir.display()),
             Queued::Refresh => "refresh".to_string(),
             Queued::PullRequests(folders) => named("fetch the pull requests of", folders.clone()),
+            Queued::Forks(folders) => named("clone the forks of", folders.clone()),
             Queued::Service(name, _, _) => format!("push {name} to another service"),
             Queued::Move(repos, _) => {
                 named("move", repos.iter().map(|(name, _)| name.clone()).collect())
@@ -215,6 +218,8 @@ pub enum MenuItem {
     Watch,
     /// Fetch the pull requests of the repositories now.
     PullRequests,
+    /// Clone every fork of the repositories into a folder beside each.
+    Forks,
     /// Opens the lines that take a repository somewhere else.
     Migrate,
 }
@@ -256,7 +261,7 @@ pub struct ServicePrompt {
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 9] = [
+    pub const ALL: [MenuItem; 10] = [
         MenuItem::Update,
         MenuItem::Open,
         MenuItem::Github,
@@ -264,6 +269,7 @@ impl MenuItem {
         MenuItem::CopyPath,
         MenuItem::Watch,
         MenuItem::PullRequests,
+        MenuItem::Forks,
         MenuItem::Migrate,
         MenuItem::Remove,
     ];
@@ -274,6 +280,7 @@ impl MenuItem {
             (MenuItem::Update, _) => "Update",
             (MenuItem::Watch, _) => "Auto-pull on or off",
             (MenuItem::PullRequests, _) => "Fetch the pull requests",
+            (MenuItem::Forks, _) => "Clone the forks",
             (MenuItem::Migrate, _) => "Migrate ▸",
             (MenuItem::Open, false) => "Open the folder",
             (MenuItem::Open, true) => "Open the folders",
@@ -292,6 +299,7 @@ impl MenuItem {
             MenuItem::Update => 'u',
             MenuItem::Watch => 'w',
             MenuItem::PullRequests => 'p',
+            MenuItem::Forks => 'f',
             MenuItem::Migrate => 't',
             MenuItem::Open => 'o',
             MenuItem::Github => 'g',
@@ -1364,6 +1372,7 @@ impl App {
             MenuItem::Update => self.update_chosen(),
             MenuItem::Watch => self.toggle_watch(),
             MenuItem::PullRequests => self.fetch_pull_requests_chosen(),
+            MenuItem::Forks => self.clone_forks_chosen(),
             MenuItem::Migrate => {}
             MenuItem::Open => self.open_selected(),
             MenuItem::Github => self.open_on_github(),
@@ -2509,6 +2518,114 @@ impl App {
         });
     }
 
+    /// Collects the forks of the ticked repositories, or the highlighted
+    /// one, each in a folder beside the checkout.
+    fn clone_forks_chosen(&mut self) {
+        let folders = self.chosen();
+        self.mode = Mode::List;
+        if folders.is_empty() {
+            self.notice("Select a repository first.", true);
+            return;
+        }
+        self.marked.clear();
+        self.submit(Queued::Forks(folders));
+    }
+
+    /// Asks GitHub for the forks of the named folders and fetches them
+    /// one repository after another in the progress dialog. The forks of
+    /// `api` go into `api-fork` beside it: one repository with every fork
+    /// as a remote, with all its branches and pull requests.
+    fn clone_forks(&mut self, folders: &[String]) {
+        struct Work {
+            folder: String,
+            path: PathBuf,
+            original: (String, String),
+            origin: String,
+        }
+        let work: Vec<Work> = self
+            .installed
+            .iter()
+            .filter(|repo| folders.contains(&repo.folder))
+            .map(|repo| Work {
+                folder: repo.folder.clone(),
+                path: repo.path.clone(),
+                original: (repo.owner.clone(), repo.repo.clone()),
+                origin: repo.origin.clone(),
+            })
+            .collect();
+        if work.is_empty() {
+            self.notice(
+                format!("{} is no longer in this folder.", folders.join(", ")),
+                true,
+            );
+            return;
+        }
+        let named = match work.as_slice() {
+            [only] => only.folder.clone(),
+            many => count_label(many.len()),
+        };
+        let names = work.iter().map(|work| work.folder.clone()).collect();
+        let job = gitprogress::job(format!("Cloning the forks of {named}"), names, 0);
+        let label = format!("Cloning the forks of {named}…");
+        self.start_job(label, Some(job), move |tx| {
+            let token = github::token();
+            let mut fetched = 0;
+            let mut missed = 0;
+            let mut failed = Vec::new();
+            let mut last = None;
+            for (index, work) in work.iter().enumerate() {
+                if process::was_cancelled() {
+                    return Err("cancelled".into());
+                }
+                send(tx, JobEvent::Start(index));
+                match forks_of(tx, &work.path, &work.original, &work.origin, &token) {
+                    Ok(None) => send(tx, JobEvent::Done(index, "no forks".into())),
+                    Ok(Some((dest, saved))) => {
+                        fetched += saved.fetched;
+                        missed += saved.failed.len();
+                        let note = match saved.failed.len() {
+                            0 => format!("{} forks", saved.fetched),
+                            count => format!("{} forks, {count} not fetched", saved.fetched),
+                        };
+                        last = Some((dest, saved));
+                        send(tx, JobEvent::Done(index, note));
+                    }
+                    Err(err) => {
+                        if process::was_cancelled() {
+                            return Err(err);
+                        }
+                        failed.push(work.folder.clone());
+                        send(tx, JobEvent::Failed(index, err));
+                    }
+                }
+            }
+            if !failed.is_empty() {
+                return Err(format!(
+                    "Forks: {fetched} fetched, {} failed: {}",
+                    failed.len(),
+                    failed.join(", ")
+                ));
+            }
+            let missed = match missed {
+                0 => String::new(),
+                count => format!(" {count} could not be fetched."),
+            };
+            Ok(match (&last, work.len()) {
+                (None, _) => format!("{named} has no forks."),
+                (Some((dest, saved)), 1) => format!(
+                    "Forks of {named}: {} in {}, with {} branches and {} pull requests.{missed}",
+                    saved.fetched,
+                    dest.display(),
+                    saved.branches,
+                    saved.pulls
+                ),
+                _ => format!(
+                    "Forks of {named}: {fetched} fetched, each into a -fork folder beside its repository.{missed}"
+                ),
+            })
+        });
+    }
+
     pub fn is_watched(&self, path: &Path) -> bool {
         self.watched
             .iter()
@@ -3095,6 +3212,7 @@ impl App {
             Queued::Import(dir) => self.import_folder(&dir),
             Queued::Refresh => self.reload_lists(false, true),
             Queued::PullRequests(folders) => self.save_pull_requests(&folders),
+            Queued::Forks(folders) => self.clone_forks(&folders),
             Queued::Move(repos, dir) => self.move_checkouts(repos, dir),
             Queued::Service(name, path, url) => self.push_to_service(name, path, url),
         }
@@ -3527,6 +3645,59 @@ fn send(tx: &Sender<Msg>, event: JobEvent) {
 
 fn send_line(tx: &Sender<Msg>, line: &str, progress: bool) {
     send(tx, JobEvent::Line(line.to_string(), progress));
+}
+
+/// Lists the forks of one checkout on GitHub and collects them in the
+/// folder beside it, which is handed back with what it holds. None when
+/// the repository has no forks: no folder is made then.
+fn forks_of(
+    tx: &Sender<Msg>,
+    path: &Path,
+    original: &(String, String),
+    origin: &str,
+    token: &Option<String>,
+) -> Result<Option<(PathBuf, gitops::ForksSaved)>, String> {
+    let (owner, name) = original;
+    if owner.is_empty() || name.is_empty() {
+        return Err("is not a repository on GitHub".into());
+    }
+    let dest = gitops::forks_folder(path).ok_or("has no folder name")?;
+    send_line(
+        tx,
+        &format!("Asking GitHub for the forks of {owner}/{name}."),
+        false,
+    );
+    let listed = github::fetch_forks(owner, name, token.as_deref(), |count| {
+        send_line(tx, &format!("Listing forks: {count}"), true)
+    })?;
+    if let Some(warning) = &listed.warning {
+        send_line(tx, &format!("The list is not complete: {warning}."), false);
+    }
+    if listed.forks.is_empty() {
+        send_line(tx, "It has no forks.", false);
+        return Ok(None);
+    }
+    send_line(
+        tx,
+        &format!("{} forks, into {}", listed.forks.len(), dest.display()),
+        false,
+    );
+    let forks: Vec<(String, String)> = listed
+        .forks
+        .into_iter()
+        .map(|fork| (fork.owner, fork.name))
+        .collect();
+    let url_of = |owner: &str, name: &str| gitops::fork_url(origin, owner, name);
+    let saved = gitops::save_forks(
+        path,
+        &dest,
+        original,
+        &forks,
+        &url_of,
+        token.as_deref(),
+        |line, progress| send_line(tx, line, progress),
+    )?;
+    Ok(Some((dest, saved)))
 }
 
 /// Updates one checkout on every branch. True means nothing moved.
@@ -4585,7 +4756,7 @@ mod tests {
         // A click on a line runs it too.
         app.selected = Some("web".into());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.click_row("menu:8".into());
+        app.click_row("menu:9".into());
         assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
     }
 
@@ -4813,6 +4984,53 @@ mod tests {
         let text = std::fs::read_to_string(&app.config_path).unwrap();
         assert!(text.contains("elsewhere"), "{text}");
         let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    /// `cargo test -- --ignored live_forks`
+    #[test]
+    #[ignore = "asks GitHub and clones a small public repository"]
+    fn live_forks_of_a_public_repository_are_collected_beside_it() {
+        let root = std::env::temp_dir().join(format!("devassist-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let original = ("octocat".to_string(), "boysenberry-repo-1".to_string());
+        let origin = gitops::fork_url("", &original.0, &original.1);
+        let path = root.join("berry");
+        let token = github::token();
+        gitops::clone_repo(&origin, &path, token.as_deref(), |_, _| {}).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (dest, saved) = forks_of(&tx, &path, &original, &origin, &token)
+            .unwrap()
+            .expect("it has forks");
+        drop(tx);
+        for msg in rx {
+            if let Msg::Job(JobEvent::Line(line, false)) = msg {
+                println!("{line}");
+            }
+        }
+        println!("{saved:?}");
+        assert_eq!(dest, root.join("berry-fork"));
+        assert!(saved.created);
+        assert!(saved.fetched > 1, "{saved:?}");
+        assert!(saved.branches > saved.fetched, "{saved:?}");
+        assert!(saved.pulls > 0, "{saved:?}");
+        assert!(gitops::status(&dest).is_ok());
+        let _ = gitops::remove_checkout(&dest);
+        let _ = gitops::remove_checkout(&path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_menu_clones_the_forks_of_the_selection() {
+        let mut app = grouped_app();
+        // Something else is running, so it waits in the queue.
+        app.busy = true;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Menu);
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert_eq!(labels(&app), ["clone the forks of api"]);
+        app.drop_queue();
     }
 
     #[test]
