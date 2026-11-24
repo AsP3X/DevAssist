@@ -57,6 +57,28 @@ pub fn get(
     request.call().map_err(|err| err.to_string())
 }
 
+/// Sends `body` as JSON to `url`. Like `get`, an answer with any status
+/// comes back, and `bearer` is sent as the sign-in.
+pub fn post_json(
+    url: &str,
+    profile: Profile,
+    headers: &[(&str, &str)],
+    bearer: Option<&str>,
+    body: &str,
+) -> Result<Response, String> {
+    let mut request = agent(profile)
+        .post(url)
+        .header("User-Agent", "devassist")
+        .header("Content-Type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    if let Some(token) = bearer {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    request.send(body).map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +96,21 @@ mod tests {
             let mut seen = Vec::new();
             let mut chunk = [0u8; 1024];
             while !seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                let size = stream.read(&mut chunk).unwrap();
+                if size == 0 {
+                    break;
+                }
+                seen.extend_from_slice(&chunk[..size]);
+            }
+            // A request with a body is read to its end before the answer.
+            let text = String::from_utf8_lossy(&seen).to_lowercase();
+            let head = text.find("\r\n\r\n").map_or(seen.len(), |at| at + 4);
+            let body: usize = text
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|length| length.trim().parse().ok())
+                .unwrap_or(0);
+            while seen.len() < head + body {
                 let size = stream.read(&mut chunk).unwrap();
                 if size == 0 {
                     break;
@@ -103,6 +140,21 @@ mod tests {
         assert!(asked.contains("user-agent: devassist"));
         assert!(asked.contains("accept: text/plain"));
         assert!(asked.contains("authorization: bearer secret"));
+    }
+
+    #[test]
+    fn post_sends_the_body_as_json() {
+        let (url, server) =
+            serve_once("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let mut response =
+            post_json(&url, Profile::Quick, &[], Some("secret"), "{\"a\":1}").unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.body_mut().read_to_string().unwrap(), "ok");
+        let asked = server.join().unwrap();
+        assert!(asked.starts_with("post /thing"), "{asked}");
+        assert!(asked.contains("content-type: application/json"), "{asked}");
+        assert!(asked.contains("authorization: bearer secret"), "{asked}");
+        assert!(asked.ends_with("{\"a\":1}"), "{asked}");
     }
 
     #[test]

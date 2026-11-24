@@ -295,6 +295,12 @@ enum Msg {
     /// A clone landed here, or a checkout that was already here was found.
     Cloned(PathBuf),
     JobFinished(Result<String, String>),
+    /// GitHub said how many pull requests these repositories have.
+    Pulls {
+        generation: u64,
+        /// "owner/name" in lowercase, with the counts of each.
+        counts: Vec<(String, github::PullCounts)>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -369,6 +375,9 @@ pub struct App {
     pub watch_interval: u32,
     /// Every fetch also saves the commits of all pull requests.
     pub pull_requests: bool,
+    /// Pull requests on GitHub by state, by "owner/name" in lowercase.
+    pub pulls: HashMap<String, github::PullCounts>,
+    pulls_generation: u64,
     /// When the next automatic pull is due.
     watch_due: Instant,
     /// What the status line said before an automatic pull took it over.
@@ -475,6 +484,8 @@ impl App {
             // The first pull runs as soon as the startup check is done.
             watch_due: Instant::now(),
             watch_status: None,
+            pulls: HashMap::new(),
+            pulls_generation: 0,
             shell: settings.shell,
             generation: 0,
             remote_generation: 0,
@@ -2893,6 +2904,7 @@ impl App {
         }
         self.spawn_status(self.generation, fetch);
         self.reload_github_only();
+        self.reload_pull_counts();
     }
 
     /// True once: when the first local read after startup is done and
@@ -2914,6 +2926,49 @@ impl App {
             false,
         );
         self.spawn_status(self.generation, true);
+    }
+
+    /// The pull requests `repo` has on GitHub, once GitHub has answered.
+    pub fn pull_counts(&self, repo: &LocalRepo) -> Option<github::PullCounts> {
+        self.pulls.get(&pulls_key(&repo.owner, &repo.repo)).copied()
+    }
+
+    /// Asks GitHub in the background how many pull requests every
+    /// repository has, by state. Needs a sign-in; without one the column
+    /// stays empty.
+    fn reload_pull_counts(&mut self) {
+        let mut repos: Vec<(String, String)> = Vec::new();
+        for repo in &self.installed {
+            if repo.owner.is_empty() || repo.repo.is_empty() {
+                continue;
+            }
+            let key = pulls_key(&repo.owner, &repo.repo);
+            if !repos
+                .iter()
+                .any(|(owner, name)| pulls_key(owner, name) == key)
+            {
+                repos.push((repo.owner.clone(), repo.repo.clone()));
+            }
+        }
+        if repos.is_empty() {
+            return;
+        }
+        self.pulls_generation += 1;
+        let generation = self.pulls_generation;
+        self.worker.spawn(move |tx| {
+            let Some(token) = github::token() else {
+                return;
+            };
+            let Ok(answers) = github::fetch_pull_counts(&repos, &token) else {
+                return;
+            };
+            let counts = repos
+                .iter()
+                .zip(answers)
+                .filter_map(|((owner, name), counts)| Some((pulls_key(owner, name), counts?)))
+                .collect();
+            let _ = tx.send(Msg::Pulls { generation, counts });
+        });
     }
 
     fn reload_github_only(&mut self) {
@@ -3079,6 +3134,11 @@ impl App {
                 }
             }
             Msg::Watched { updated, failed } => self.on_watched(updated, failed),
+            Msg::Pulls { generation, counts } => {
+                if generation == self.pulls_generation {
+                    self.pulls = counts.into_iter().collect();
+                }
+            }
             Msg::Cloned(path) => {
                 if paths::push_path(&mut self.checkouts, path) {
                     self.save_config();
@@ -3197,6 +3257,11 @@ fn account_matches(repo: &RemoteRepo, query: &AccountQuery) -> bool {
             .name
             .to_lowercase()
             .contains(&query.rest.to_lowercase())
+}
+
+/// The name the pull request counts of a repository are kept under.
+fn pulls_key(owner: &str, repo: &str) -> String {
+    format!("{owner}/{repo}").to_lowercase()
 }
 
 fn count_label(count: usize) -> String {
@@ -4203,6 +4268,36 @@ mod tests {
         let visible = app.visible_installed();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].repo, "tool");
+    }
+
+    #[test]
+    fn pull_request_counts_from_github_land_on_their_repository() {
+        let mut app = grouped_app();
+        let api = app.installed[0].clone();
+        assert_eq!(app.pull_counts(&api), None);
+        let counts = github::PullCounts {
+            open: 2,
+            merged: 14,
+            closed: 3,
+        };
+        app.pulls_generation = 4;
+        // An answer to an older question is dropped.
+        app.on_msg(Msg::Pulls {
+            generation: 3,
+            counts: vec![("acme/api".into(), counts)],
+        });
+        assert_eq!(app.pull_counts(&api), None);
+        app.on_msg(Msg::Pulls {
+            generation: 4,
+            counts: vec![("acme/api".into(), counts)],
+        });
+        assert_eq!(app.pull_counts(&api), Some(counts));
+        // Upper and lower case name the same repository.
+        let mut shouted = api.clone();
+        shouted.owner = "ACME".into();
+        assert_eq!(app.pull_counts(&shouted), Some(counts));
+        assert_eq!(app.pull_counts(&app.installed[1].clone()), None);
+        let _ = std::fs::remove_file(&app.config_path);
     }
 
     #[test]

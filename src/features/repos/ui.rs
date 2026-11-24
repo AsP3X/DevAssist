@@ -178,7 +178,7 @@ fn header_parts(app: &App, width: usize) -> (String, String) {
 fn draw_columns(frame: &mut Frame, area: Rect) {
     let widths = column_widths(area.width, false);
     let header = padded_row(
-        &["", "name", "branch", "state", "sync", "about"],
+        &["", "name", "branch", "state", "sync", "pulls", "about"],
         &widths,
         area.width as usize,
     );
@@ -314,6 +314,7 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
             repo.branch.clone(),
             repo.state_label().to_string(),
             repo.sync_label(),
+            pulls_cell(app.pull_counts(repo)),
             about,
         ];
         let line = padded_row(
@@ -324,12 +325,38 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
                 cells[3].as_str(),
                 cells[4].as_str(),
                 cells[5].as_str(),
+                cells[6].as_str(),
             ],
             &widths,
             area.width as usize,
         );
         let style = row_style(repo, chosen);
         frame.render_widget(Paragraph::new(Span::styled(line, style)), rect);
+        // The pull requests keep their own colours, whatever the row has:
+        // open green, merged purple, closed red. The highlighted row
+        // stays one colour so it reads on its background.
+        let before: usize = widths[..5].iter().sum();
+        let room = widths[5].saturating_sub(1);
+        if let Some(counts) = app.pull_counts(repo).filter(|_| !chosen && room > 0)
+            && before + room <= area.width as usize
+        {
+            let mut spans = Vec::new();
+            for (text, color) in pulls_parts(counts) {
+                if !spans.is_empty() {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(text, Style::default().fg(color)));
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect {
+                    x: area.x + before as u16,
+                    y,
+                    width: room as u16,
+                    height: 1,
+                },
+            );
+        }
         if clickable {
             app.hits.rows.push((rect, repo.folder.clone()));
         }
@@ -387,6 +414,12 @@ fn draw_activity(frame: &mut Frame, app: &App, area: Rect) {
                 let mut id = format!("{}/{}", repo.owner, repo.repo);
                 if app.is_watched(&repo.path) {
                     id.push_str(&format!("  ↻ auto-pull every {} min", app.watch_interval));
+                }
+                if let Some(counts) = app.pull_counts(repo).filter(|counts| counts.total() > 0) {
+                    id.push_str(&format!(
+                        "  ·  pull requests: {} open, {} merged, {} closed",
+                        counts.open, counts.merged, counts.closed
+                    ));
                 }
                 match repo.pull_requests {
                     0 => {}
@@ -1867,13 +1900,55 @@ fn row_style(repo: &LocalRepo, chosen: bool) -> Style {
     }
 }
 
-fn column_widths(total: u16, wide_name: bool) -> [usize; 6] {
+/// A count in at most four characters: 7, 340, 1.2k, 15k.
+fn short_count(count: u32) -> String {
+    match count {
+        0..=999 => count.to_string(),
+        1000..=9949 => format!("{:.1}k", f64::from(count) / 1000.0),
+        _ => format!("{}k", (u64::from(count) + 500) / 1000),
+    }
+}
+
+/// The pull requests of a repository as coloured pieces: open, merged,
+/// closed. A state with none is left out; with none at all a dash stays.
+fn pulls_parts(counts: super::github::PullCounts) -> Vec<(String, Color)> {
+    let mut parts = Vec::new();
+    for (mark, count, color) in [
+        ('○', counts.open, Color::Green),
+        ('✓', counts.merged, Color::Magenta),
+        ('✕', counts.closed, Color::Red),
+    ] {
+        if count > 0 {
+            parts.push((format!("{mark}{}", short_count(count)), color));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(("–".to_string(), Color::DarkGray));
+    }
+    parts
+}
+
+/// The same as plain text, such as "○2 ✓14 ✕3". Empty until GitHub has
+/// answered.
+fn pulls_cell(counts: Option<super::github::PullCounts>) -> String {
+    counts
+        .map(|counts| {
+            pulls_parts(counts)
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
+fn column_widths(total: u16, wide_name: bool) -> [usize; 7] {
     let total = total as usize;
     let marker = 2;
     if total < 70 {
         let name = (if wide_name { 28 } else { 20 }).min(total.saturating_sub(marker + 10));
         let rest = total.saturating_sub(marker + name);
-        return [marker, name, rest / 2, 0, rest - rest / 2, 0];
+        return [marker, name, rest / 2, 0, rest - rest / 2, 0, 0];
     }
     let (name, branch, sync) = if wide_name && total >= 120 {
         (36, 16, 18)
@@ -1885,8 +1960,10 @@ fn column_widths(total: u16, wide_name: bool) -> [usize; 6] {
         (24, 18, 32)
     };
     let state = 8;
-    let about = total.saturating_sub(marker + name + branch + state + sync);
-    [marker, name, branch, state, sync, about]
+    // "○999 ✓1.2k ✕999" and a gap. Left out where it would crowd the rest.
+    let pulls = if total >= 100 { 16 } else { 0 };
+    let about = total.saturating_sub(marker + name + branch + state + sync + pulls);
+    [marker, name, branch, state, sync, pulls, about]
 }
 
 fn add_source(app: &App) -> String {
@@ -1948,6 +2025,70 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn the_overview_has_a_column_for_the_pull_requests_by_state() {
+        let mut app = app(false);
+        let api = crate::features::repos::gitops::LocalRepo {
+            folder: "api".into(),
+            owner: "AsP3X".into(),
+            repo: "api".into(),
+            path: PathBuf::from("development").join("api"),
+            branch: "main".into(),
+            ahead: Some(0),
+            behind: Some(0),
+            all_branches_current: true,
+            ready: true,
+            ..Default::default()
+        };
+        let mut docs = api.clone();
+        docs.folder = "docs".into();
+        docs.repo = "docs".into();
+        let mut web = api.clone();
+        web.folder = "web".into();
+        web.repo = "web".into();
+        app.installed = vec![api, docs, web];
+        app.selected = Some("web".into());
+        let counts = |open, merged, closed| super::super::github::PullCounts {
+            open,
+            merged,
+            closed,
+        };
+        app.pulls.insert("asp3x/api".into(), counts(2, 1234, 3));
+        app.pulls.insert("asp3x/docs".into(), counts(0, 0, 0));
+        app.pulls.insert("asp3x/web".into(), counts(1, 0, 0));
+
+        let screen = render(&mut app, 130, 24);
+        let line = |name: &str| {
+            screen
+                .lines()
+                .find(|line| line.trim_start_matches(['▌', ' ']).starts_with(name))
+                .unwrap_or_else(|| panic!("{name} is not on\n{screen}"))
+                .to_string()
+        };
+        assert!(line("name").contains("pulls"), "{screen}");
+        // Open, merged, closed; a state with none is left out.
+        assert!(line("api").contains("○2 ✓1.2k ✕3"), "{screen}");
+        assert!(line("docs").contains("–"), "{screen}");
+        assert!(line("web").contains("○1"), "{screen}");
+        assert!(!line("web").contains('✓'), "{screen}");
+        // The highlighted one is spelled out under the status.
+        assert!(
+            screen.contains("pull requests: 1 open, 0 merged, 0 closed"),
+            "{screen}"
+        );
+
+        // A narrow window leaves the column out.
+        let narrow = render(&mut app, 90, 24);
+        assert!(!narrow.contains("pulls"), "{narrow}");
+        assert!(!narrow.contains("○2"), "{narrow}");
+
+        assert_eq!(short_count(999), "999");
+        assert_eq!(short_count(1000), "1.0k");
+        assert_eq!(short_count(9949), "9.9k");
+        assert_eq!(short_count(9950), "10k");
+        assert_eq!(short_count(15499), "15k");
     }
 
     #[test]

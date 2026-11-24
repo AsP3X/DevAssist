@@ -8,6 +8,11 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
+- **The overview has a column for pull requests.** `pulls` shows how many
+  pull requests a repository has on GitHub by state, such as `○2 ✓14 ✕3`:
+  open in green, merged in purple, closed without a merge in red. The line
+  under the list spells the highlighted row out. The numbers come with one
+  request for all repositories at start and on `r`, and need a sign-in.
 - **The pull requests of a repository can be fetched from the actions menu.**
   The menu on a repository has a line **Fetch the pull requests**, with the
   key `p`. It saves the pull requests of the highlighted or ticked

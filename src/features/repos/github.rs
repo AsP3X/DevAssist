@@ -488,6 +488,106 @@ fn parse_one(body: &str) -> Result<RemoteRepo, String> {
     Ok(repo.into())
 }
 
+/// How many pull requests a repository has on GitHub, by state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PullCounts {
+    pub open: u32,
+    pub merged: u32,
+    /// Closed without being merged.
+    pub closed: u32,
+}
+
+impl PullCounts {
+    pub fn total(self) -> u32 {
+        self.open
+            .saturating_add(self.merged)
+            .saturating_add(self.closed)
+    }
+}
+
+/// How many repositories one question to GitHub asks about.
+const PULL_COUNT_BATCH: usize = 40;
+
+/// Asks GitHub how many pull requests each of `repos` (owner, name) has,
+/// by state. The answers come in the order asked; None is a repository
+/// GitHub does not show to this sign-in. One request covers 40 of them.
+pub fn fetch_pull_counts(
+    repos: &[(String, String)],
+    token: &str,
+) -> Result<Vec<Option<PullCounts>>, String> {
+    let mut all = Vec::with_capacity(repos.len());
+    for batch in repos.chunks(PULL_COUNT_BATCH) {
+        let mut response = http::post_json(
+            "https://api.github.com/graphql",
+            Profile::Quick,
+            &[("Accept", "application/vnd.github+json")],
+            Some(token),
+            &pull_counts_query(batch),
+        )
+        .map_err(|err| format!("GitHub: {err}"))?;
+        let status = response.status();
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "GitHub HTTP {}: {}",
+                status.as_u16(),
+                github_message(&body)
+            ));
+        }
+        all.extend(parse_pull_counts(&body, batch.len())?);
+    }
+    Ok(all)
+}
+
+/// The request body that asks for the pull request counts of `repos`.
+pub fn pull_counts_query(repos: &[(String, String)]) -> String {
+    let quoted = |text: &str| serde_json::Value::String(text.to_string()).to_string();
+    let mut query = String::from("query {");
+    for (index, (owner, name)) in repos.iter().enumerate() {
+        query.push_str(&format!(
+            " r{index}: repository(owner: {}, name: {}) {{ \
+             open: pullRequests(states: OPEN) {{ totalCount }} \
+             merged: pullRequests(states: MERGED) {{ totalCount }} \
+             closed: pullRequests(states: CLOSED) {{ totalCount }} }}",
+            quoted(owner),
+            quoted(name)
+        ));
+    }
+    query.push_str(" }");
+    serde_json::json!({ "query": query }).to_string()
+}
+
+/// Reads the answer to `pull_counts_query` for `count` repositories.
+pub fn parse_pull_counts(body: &str, count: usize) -> Result<Vec<Option<PullCounts>>, String> {
+    let answer: serde_json::Value = serde_json::from_str(body)
+        .map_err(|err| format!("GitHub answer was not readable ({err})"))?;
+    let Some(data) = answer.get("data").filter(|data| data.is_object()) else {
+        let message = answer
+            .get("errors")
+            .and_then(|errors| errors.get(0))
+            .and_then(|error| error.get("message"))
+            .and_then(|message| message.as_str())
+            .unwrap_or("no pull request counts in the answer");
+        return Err(format!("GitHub: {message}"));
+    };
+    let number = |repo: &serde_json::Value, state: &str| {
+        repo.get(state)
+            .and_then(|pulls| pulls.get("totalCount"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
+    };
+    Ok((0..count)
+        .map(|index| {
+            let repo = data.get(format!("r{index}"))?;
+            Some(PullCounts {
+                open: number(repo, "open")?,
+                merged: number(repo, "merged")?,
+                closed: number(repo, "closed")?,
+            })
+        })
+        .collect())
+}
+
 pub fn current_login() -> Option<String> {
     token().and_then(|token| authed_login(&token))
 }
@@ -579,6 +679,64 @@ fn gh_cli_token() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_request_counts_are_asked_and_read_per_repository() {
+        let repos = vec![
+            ("acme".to_string(), "api".to_string()),
+            ("acme".to_string(), "we\"b".to_string()),
+        ];
+        let body = pull_counts_query(&repos);
+        let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let query = sent["query"].as_str().unwrap();
+        assert!(query.contains(r#"r0: repository(owner: "acme", name: "api")"#));
+        // A quote in a name cannot break out of the question.
+        assert!(query.contains(r#"name: "we\"b""#), "{query}");
+        assert!(query.contains("merged: pullRequests(states: MERGED)"));
+
+        // The second repository is one GitHub does not show.
+        let answer = r#"{"data": {
+            "r0": {"open": {"totalCount": 2}, "merged": {"totalCount": 14}, "closed": {"totalCount": 3}},
+            "r1": null
+        }, "errors": [{"message": "Could not resolve to a Repository"}]}"#;
+        let counts = parse_pull_counts(answer, 2).unwrap();
+        assert_eq!(
+            counts,
+            [
+                Some(PullCounts {
+                    open: 2,
+                    merged: 14,
+                    closed: 3
+                }),
+                None
+            ]
+        );
+        assert_eq!(counts[0].unwrap().total(), 19);
+
+        let refused = r#"{"errors": [{"message": "Bad credentials"}]}"#;
+        assert_eq!(
+            parse_pull_counts(refused, 1).unwrap_err(),
+            "GitHub: Bad credentials"
+        );
+    }
+
+    /// `cargo test -- --ignored live_pull_counts`
+    #[test]
+    #[ignore = "asks GitHub, and needs a sign-in"]
+    fn live_pull_counts_come_back_for_a_public_repository() {
+        let token = token().expect("GH_TOKEN or gh auth login");
+        let repos = vec![
+            ("rust-lang".to_string(), "rustlings".to_string()),
+            (
+                "rust-lang".to_string(),
+                "no-such-repository-here".to_string(),
+            ),
+        ];
+        let counts = fetch_pull_counts(&repos, &token).unwrap();
+        println!("{counts:?}");
+        assert!(counts[0].unwrap().merged > 0);
+        assert_eq!(counts[1], None);
+    }
 
     #[test]
     fn parses_a_repository_page() {

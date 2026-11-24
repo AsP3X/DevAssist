@@ -69,10 +69,33 @@ Each row is one local clone.
 | branch | The branch that is checked out, or `detached`. |
 | state | `clean`, or `dirty` when there are uncommitted changes. |
 | sync | How the clone compares with GitHub. See below. |
+| pulls | The repository's pull requests on GitHub, by state. See below. |
 | about | The repository's description from GitHub. |
 
 The line under the list shows details for the highlighted row, such as its
 full path.
+
+### The pulls column
+
+How many pull requests the repository has on GitHub, in three short pieces:
+
+| Piece | Meaning |
+| --- | --- |
+| `○2` | 2 are open (green). |
+| `✓14` | 14 were merged (purple). |
+| `✕3` | 3 were closed without being merged (red). |
+| `–` | The repository has no pull requests. |
+
+A state with none is left out, and large numbers are shortened, so `✓1.2k` is
+about 1,200. The line under the list spells the highlighted row out:
+`pull requests: 2 open, 14 merged, 3 closed`.
+
+The numbers come from GitHub when DevAssist starts and when you press `r`, in
+one request for all repositories. That needs a sign-in (`GH_TOKEN`, or
+`gh auth login`); without one, and for a repository that is not on GitHub, the
+column stays empty. It is left out in a window narrower than 100 columns. The
+column counts what is on GitHub, not what is saved in the clone: see
+[Saving pull requests](#saving-pull-requests) for that.
 
 ### The sync column
 
