@@ -43,7 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     draw_header(frame, app, pieces[0]);
-    draw_columns(frame, pieces[1]);
+    draw_columns(frame, app, pieces[1]);
     draw_installed(frame, app, pieces[2]);
     draw_activity(frame, app, pieces[3]);
     draw_footer(frame, app, pieces[4]);
@@ -176,10 +176,12 @@ fn header_parts(app: &App, width: usize) -> (String, String) {
     (badge, path)
 }
 
-fn draw_columns(frame: &mut Frame, area: Rect) {
-    let widths = column_widths(area.width, false);
+fn draw_columns(frame: &mut Frame, app: &App, area: Rect) {
+    let widths = column_widths(area.width, &column_need(app));
     let header = padded_row(
-        &["", "name", "branch", "state", "sync", "pulls", "about"],
+        &[
+            "", "name", "branch", "state", "sync", "pulls", "path", "about",
+        ],
         &widths,
         area.width as usize,
     );
@@ -264,7 +266,7 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
     let height = area.height as usize;
     align_scroll(&mut app.list_scroll, selected, rows.len(), height);
     let start = app.list_scroll;
-    let widths = column_widths(area.width, false);
+    let widths = column_widths(area.width, &column_need(app));
     let clickable = matches!(app.mode, Mode::List | Mode::Filter);
     for (offset, row) in rows.iter().enumerate().skip(start).take(height) {
         let y = area.y + (offset - start) as u16;
@@ -316,6 +318,10 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
             repo.state_label().to_string(),
             repo.sync_label(),
             pulls_cell(app.pull_counts(repo), app.pending_pulls(repo)),
+            short_path(
+                &repo.path.display().to_string(),
+                widths[6].saturating_sub(2),
+            ),
             about,
         ];
         let line = padded_row(
@@ -327,6 +333,7 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
                 cells[4].as_str(),
                 cells[5].as_str(),
                 cells[6].as_str(),
+                cells[7].as_str(),
             ],
             &widths,
             area.width as usize,
@@ -2126,28 +2133,109 @@ fn pulls_cell(
         .join(" ")
 }
 
-fn column_widths(total: u16, wide_name: bool) -> [usize; 7] {
+/// A path cut to `width` characters by leaving out its middle: the drive
+/// or root stays, and as many of the last folders as fit, such as
+/// `C:\…\work\api`. The end says the most, so that is what is kept.
+fn short_path(path: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(path) <= width {
+        return path.to_string();
+    }
+    let separator = |ch: char| ch == '\\' || ch == '/';
+    // The root: "C:\", "/" or nothing for a relative path.
+    let root: String = match path.find(separator) {
+        Some(at) if at <= 2 => path[..=at].to_string(),
+        _ => String::new(),
+    };
+    let room = width.saturating_sub(UnicodeWidthStr::width(root.as_str()) + 1);
+    // The longest end that fits.
+    let mut tail = String::new();
+    let mut used = 0;
+    for ch in path.chars().rev() {
+        let wide = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + wide > room {
+            break;
+        }
+        used += wide;
+        tail.insert(0, ch);
+    }
+    // Start it at a folder, unless that would throw most of it away.
+    if !tail.starts_with(separator)
+        && let Some(at) = tail.find(separator)
+        && at * 2 <= tail.len()
+    {
+        tail = tail[at..].to_string();
+    }
+    if tail.is_empty() {
+        return fit(path, width).trim_end().to_string();
+    }
+    format!("{root}…{tail}")
+}
+
+/// How wide the longest entry of each column is. A column takes no more
+/// room than its rows need, and what that frees goes to the path.
+#[derive(Default)]
+struct Need {
+    name: usize,
+    branch: usize,
+    sync: usize,
+    pulls: usize,
+    path: usize,
+}
+
+fn column_need(app: &App) -> Need {
+    let width = UnicodeWidthStr::width;
+    let mut need = Need::default();
+    for repo in &app.installed {
+        // A watched repository carries a mark after its name.
+        let mark = if app.is_watched(&repo.path) { 2 } else { 0 };
+        need.name = need.name.max(width(repo.folder.as_str()) + mark);
+        need.branch = need.branch.max(width(repo.branch.as_str()));
+        need.sync = need.sync.max(width(repo.sync_label().as_str()));
+        let pulls = pulls_cell(app.pull_counts(repo), app.pending_pulls(repo));
+        need.pulls = need.pulls.max(width(pulls.as_str()));
+        need.path = need
+            .path
+            .max(width(repo.path.display().to_string().as_str()));
+    }
+    need
+}
+
+fn column_widths(total: u16, need: &Need) -> [usize; 8] {
     let total = total as usize;
     let marker = 2;
     if total < 70 {
-        let name = (if wide_name { 28 } else { 20 }).min(total.saturating_sub(marker + 10));
+        let name = 20.min(total.saturating_sub(marker + 10));
         let rest = total.saturating_sub(marker + name);
-        return [marker, name, rest / 2, 0, rest - rest / 2, 0, 0];
+        return [marker, name, rest / 2, 0, rest - rest / 2, 0, 0, 0];
     }
-    let (name, branch, sync) = if wide_name && total >= 120 {
-        (36, 16, 18)
-    } else if wide_name {
-        (28, 14, 14)
-    } else if total < 110 {
-        (22, 16, 18)
-    } else {
-        (24, 18, 32)
-    };
+    // As wide as the longest entry and a gap, within what a column may
+    // take at most and what its heading needs at least.
+    let fitted = |need: usize, least: usize, most: usize| (need + 2).clamp(least, most);
+    let wide = total >= 110;
+    let name = fitted(need.name, 8, if wide { 24 } else { 22 });
+    let branch = fitted(need.branch, 8, 16);
     let state = 8;
-    // "○999 ✓1.2k ✕999" and a gap. Left out where it would crowd the rest.
-    let pulls = if total >= 100 { 22 } else { 0 };
-    let about = total.saturating_sub(marker + name + branch + state + sync + pulls);
-    [marker, name, branch, state, sync, pulls, about]
+    let sync = fitted(need.sync, 12, if wide { 32 } else { 18 });
+    // "○999 ✓1.2k ✕999 +99 ~99". Left out where it would crowd the rest.
+    let pulls = if total >= 100 {
+        fitted(need.pulls, 7, 24)
+    } else {
+        0
+    };
+    let rest = total.saturating_sub(marker + name + branch + state + sync + pulls);
+    // Where the checkout is on disk comes before the description: the
+    // path gets the room it needs to be read in full, and the description
+    // what is left. With too little for a whole path it is shortened in
+    // the middle, and with very little the column is left out.
+    let want = fitted(need.path, 6, 90);
+    let path = if rest >= want {
+        want
+    } else if rest >= 16 {
+        rest
+    } else {
+        0
+    };
+    [marker, name, branch, state, sync, pulls, path, rest - path]
 }
 
 fn add_source(app: &App) -> String {
@@ -2274,10 +2362,54 @@ mod tests {
             "{screen}"
         );
 
+        // Where each one is on disk has a column of its own.
+        assert!(line("name").contains("path"), "{screen}");
+        let folder = PathBuf::from("development").join("api");
+        assert!(
+            line("api").contains(&folder.display().to_string()),
+            "{screen}"
+        );
+
         // A narrow window leaves the column out.
         let narrow = render(&mut app, 90, 24);
         assert!(!narrow.contains("pulls"), "{narrow}");
         assert!(!narrow.contains("○2"), "{narrow}");
+
+        // A path that is too long loses its middle, not its end.
+        let long = r"C:\Users\someone\Documents\projects\work\api";
+        assert_eq!(short_path(long, 60), long);
+        assert_eq!(short_path(long, 20), r"C:\…\work\api");
+        assert_eq!(short_path(long, 12), r"C:\…\api");
+        assert_eq!(short_path("/srv/code/projects/work/api", 16), "/…/work/api");
+        assert!(UnicodeWidthStr::width(short_path(long, 7).as_str()) <= 7);
+        assert_eq!(short_path("development/api", 30), "development/api");
+        // Columns are as wide as their rows need, so the path has room.
+        let need = Need {
+            name: 12,
+            branch: 4,
+            sync: 10,
+            pulls: 9,
+            path: 44,
+        };
+        for width in [70, 100, 110, 120, 150, 200] {
+            let widths = column_widths(width, &need);
+            assert_eq!(widths.iter().sum::<usize>(), width as usize);
+        }
+        // name 14, branch 8, state 8, sync 12, pulls 11: the whole path
+        // fits in 120 columns, and the description has the rest.
+        assert_eq!(column_widths(120, &need), [2, 14, 8, 8, 12, 11, 46, 19]);
+        // Long entries elsewhere leave less: the path is shortened, and
+        // the description gives way before it does.
+        let crowded = Need {
+            name: 40,
+            branch: 30,
+            sync: 40,
+            pulls: 22,
+            path: 44,
+        };
+        assert_eq!(column_widths(120, &crowded)[6..], [0, 14]);
+        assert_eq!(column_widths(130, &crowded)[6..], [24, 0]);
+        assert_eq!(column_widths(170, &crowded)[6..], [46, 18]);
 
         assert_eq!(short_count(999), "999");
         assert_eq!(short_count(1000), "1.0k");

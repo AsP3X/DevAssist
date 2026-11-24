@@ -70,10 +70,15 @@ Each row is one local clone.
 | state | `clean`, or `dirty` when there are uncommitted changes. |
 | sync | How the clone compares with GitHub. See below. |
 | pulls | The repository's pull requests on GitHub, by state. See below. |
+| path | Where the checkout is on disk. A path that does not fit loses its middle, as in `C:\…\work\api`. |
 | about | The repository's description from GitHub. |
 
 The line under the list shows details for the highlighted row, such as its
-full path.
+full path. Every column is only as wide as its longest entry, and the room
+that frees goes to the path first, so it is shown in full where the window
+allows, and then to the description. Where the window is too narrow for the
+whole path it is shortened in the middle, and with fewer than 16 columns left
+for it the path column is left out.
 
 ### The pulls column
 

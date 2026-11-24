@@ -8,6 +8,14 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
+- **The overview shows where each repository is on disk.** A `path` column
+  holds the folder of the checkout, in full where the window has the room:
+  the other columns are now only as wide as their longest entry. A path that
+  still does not fit is shortened in the middle, keeping the drive and the
+  last folders: `C:\…\work\api`.
+- **A move onto another drive shows its progress.** The dialog counts the
+  files and shows how many are copied, with a percentage, and says when it
+  deletes the old folder.
 - **A repository can be moved to another folder.** The actions menu has a
   submenu **Migrate** (`t`) with the line **Move to another folder…** (`f`).
   It moves the highlighted or ticked repositories into the folder you name,
