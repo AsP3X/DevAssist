@@ -302,9 +302,15 @@ fn draw_installed(frame: &mut Frame, app: &mut App, area: Rect) {
             Shown::Repo(repo) => repo,
         };
         let about = app.about(repo);
+        // A watched repository carries a mark after its name.
+        let name = if app.is_watched(&repo.path) {
+            format!("{} ↻", repo.folder)
+        } else {
+            repo.folder.clone()
+        };
         let cells = [
             marker(app.is_marked_local(&repo.folder)).to_string(),
-            repo.folder.clone(),
+            name,
             repo.branch.clone(),
             repo.state_label().to_string(),
             repo.sync_label(),
@@ -378,7 +384,10 @@ fn draw_activity(frame: &mut Frame, app: &App, area: Rect) {
             .iter()
             .find(|repo| &repo.folder == folder)
             .map(|repo| {
-                let id = format!("{}/{}", repo.owner, repo.repo);
+                let mut id = format!("{}/{}", repo.owner, repo.repo);
+                if app.is_watched(&repo.path) {
+                    id.push_str(&format!("  ↻ auto-pull every {} min", app.watch_interval));
+                }
                 if let Some(warning) = &repo.warning {
                     format!("{id}  {warning}")
                 } else if let Some(err) = &repo.error {
@@ -459,7 +468,7 @@ fn draw_footer(frame: &mut Frame, app: &mut App, area: Rect) {
         height: 1,
     };
     let text = fit(
-        "  drag copies text · double-click updates · r fetches · l last run · esc cancels",
+        "  drag copies text · double-click updates · r fetches · w auto-pull · l last run · esc cancels",
         hint.width as usize,
     );
     frame.render_widget(
@@ -1105,7 +1114,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     let popup = centered(
         screen,
         84.min(screen.width.saturating_sub(2)),
-        18.min(screen.height.saturating_sub(2)),
+        21.min(screen.height.saturating_sub(2)),
     );
     let heading = if form.welcome {
         " Welcome · first-time setup "
@@ -1118,7 +1127,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
     let width = inner.width as usize;
     // Roomy: intro, then label + hint + gap per field. Tight: one line each.
-    let roomy = inner.height >= 16;
+    let roomy = inner.height >= 19;
     let label_width = 15;
     let value_width = width.saturating_sub(label_width + 1);
     let folder_title = crate::shell::config::default_title();
@@ -1189,6 +1198,13 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
                 let (value, empty) = match field {
                     Field::Accounts => (form.accounts.as_str(), "none".to_string()),
                     Field::Pinned => (form.pinned.as_str(), "none".to_string()),
+                    Field::Watch => (
+                        form.interval.as_str(),
+                        format!(
+                            "{} minutes · default",
+                            crate::shell::config::DEFAULT_WATCH_INTERVAL
+                        ),
+                    ),
                     _ => (form.title.as_str(), format!("{folder_title} · default")),
                 };
                 let room = value_width.saturating_sub(1);
@@ -1865,6 +1881,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: false,
+            watched: Vec::new(),
+            watch_interval: 5,
             update_check_now: false,
             shell: Default::default(),
             clone_dir: PathBuf::from("development"),

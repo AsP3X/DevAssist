@@ -6,6 +6,15 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A repository can be pulled automatically.** `w` in the overview watches
+  the selection: a watched repository is updated on a timer while DevAssist
+  runs, the same way `u` updates it, so your own commits are never touched.
+  It runs without a dialog and reports on the status line. The interval is
+  5 minutes and can be changed in the settings, or with `watch_interval` in
+  the settings file.
+
 ## [0.5.2] - 2026-11-16
 
 An update no longer leaves behind a branch the remote deleted and made again.

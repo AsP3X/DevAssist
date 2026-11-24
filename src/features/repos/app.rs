@@ -30,6 +30,8 @@ const LOOKUP_DELAY: Duration = Duration::from_millis(350);
 /// Opening more folders than this at once is refused.
 const OPEN_LIMIT: usize = 8;
 const JOB_LINGER: Duration = Duration::from_millis(1200);
+/// How the status line starts while an automatic pull runs.
+const WATCH_LABEL: &str = "Auto-pull: checking";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -189,15 +191,18 @@ pub enum MenuItem {
     Group,
     CopyPath,
     Remove,
+    /// Start or stop pulling the repositories on a timer.
+    Watch,
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 6] = [
+    pub const ALL: [MenuItem; 7] = [
         MenuItem::Update,
         MenuItem::Open,
         MenuItem::Github,
         MenuItem::Group,
         MenuItem::CopyPath,
+        MenuItem::Watch,
         MenuItem::Remove,
     ];
 
@@ -205,6 +210,7 @@ impl MenuItem {
     pub fn label(self, many: bool) -> &'static str {
         match (self, many) {
             (MenuItem::Update, _) => "Update",
+            (MenuItem::Watch, _) => "Auto-pull on or off",
             (MenuItem::Open, false) => "Open the folder",
             (MenuItem::Open, true) => "Open the folders",
             (MenuItem::Github, _) => "Open on GitHub",
@@ -220,6 +226,7 @@ impl MenuItem {
     pub fn key(self) -> char {
         match self {
             MenuItem::Update => 'u',
+            MenuItem::Watch => 'w',
             MenuItem::Open => 'o',
             MenuItem::Github => 'g',
             MenuItem::Group => 'm',
@@ -270,6 +277,13 @@ enum Msg {
     },
     Login(Option<String>),
     Job(JobEvent),
+    /// An automatic pull of the watched repositories is done.
+    Watched {
+        /// The repositories that got something new.
+        updated: Vec<String>,
+        /// The ones that could not be pulled, each with the reason.
+        failed: Vec<(String, String)>,
+    },
     /// A clone landed here, or a checkout that was already here was found.
     Cloned(PathBuf),
     JobFinished(Result<String, String>),
@@ -341,6 +355,15 @@ pub struct App {
     pub should_quit: bool,
     /// Look for a newer version at startup: the setting, kept to be saved.
     update_check: bool,
+    /// Checkouts that are pulled on a timer while the program runs.
+    pub watched: Vec<PathBuf>,
+    /// Minutes between those pulls.
+    pub watch_interval: u32,
+    /// When the next automatic pull is due.
+    watch_due: Instant,
+    /// What the status line said before an automatic pull took it over.
+    /// A pull that brings nothing puts it back.
+    watch_status: Option<(String, bool)>,
     /// The shell's settings, kept to be saved with the rest.
     shell: config::ShellPrefs,
     generation: u64,
@@ -436,6 +459,11 @@ impl App {
             hits: Hits::default(),
             should_quit: false,
             update_check: settings.update_check,
+            watched: settings.watched,
+            watch_interval: settings.watch_interval,
+            // The first pull runs as soon as the startup check is done.
+            watch_due: Instant::now(),
+            watch_status: None,
             shell: settings.shell,
             generation: 0,
             remote_generation: 0,
@@ -457,7 +485,8 @@ impl App {
             self.on_msg(message);
         }
         let next = self.start_queued();
-        arrived || started || next
+        let watch = !next && self.start_due_watch();
+        arrived || started || next || watch
     }
 
     pub fn waiting(&self) -> bool {
@@ -864,6 +893,7 @@ impl App {
             KeyCode::Char('a') => self.open_add(),
             KeyCode::Char('u') => self.update_chosen(),
             KeyCode::Char('U') => self.update_all(),
+            KeyCode::Char('w') | KeyCode::Char('W') => self.toggle_watch(),
             KeyCode::Char('d') | KeyCode::Delete => self.begin_remove(),
             KeyCode::Char('r') | KeyCode::F(5) => self.refresh(),
             KeyCode::Char('s') | KeyCode::Char('S') => self.toggle_sort(),
@@ -998,6 +1028,7 @@ impl App {
         self.close_menu();
         match item {
             MenuItem::Update => self.update_chosen(),
+            MenuItem::Watch => self.toggle_watch(),
             MenuItem::Open => self.open_selected(),
             MenuItem::Github => self.open_on_github(),
             MenuItem::Group => self.open_group_prompt(),
@@ -1399,6 +1430,10 @@ impl App {
 
     /// Writes the settings and the list of checkouts.
     fn save_config(&mut self) {
+        // A checkout that left the list is no longer watched.
+        let checkouts = &self.checkouts;
+        self.watched
+            .retain(|path| checkouts.iter().any(|known| paths::same_path(known, path)));
         let saved = config::Saved {
             title: self.custom_title.clone(),
             owners: self.owners.clone(),
@@ -1410,6 +1445,8 @@ impl App {
             placement: self.placement.clone(),
             collapsed: self.collapsed.clone(),
             update_check: self.update_check,
+            watched: self.watched.clone(),
+            watch_interval: self.watch_interval,
             shell: self.shell.clone(),
         };
         if let Err(err) = config::save(&self.config_path, &saved) {
@@ -1898,6 +1935,7 @@ impl App {
             &self.owners,
             &self.pinned,
             self.protocol,
+            self.watch_interval,
             self.custom_title.as_deref(),
             self.config_path.clone(),
         ));
@@ -1924,6 +1962,7 @@ impl App {
         saved.placement = self.placement.clone();
         saved.collapsed = self.collapsed.clone();
         saved.update_check = self.update_check;
+        saved.watched = self.watched.clone();
         saved.shell = self.shell.clone();
         if let Err(err) = config::save(&form.path, &saved) {
             form.error = Some(err);
@@ -1936,6 +1975,11 @@ impl App {
         self.owners_explicit = true;
         self.pinned = saved.pinned;
         self.protocol = saved.protocol;
+        if self.watch_interval != saved.watch_interval {
+            // A new interval counts from now.
+            self.watch_interval = saved.watch_interval;
+            self.watch_due = Instant::now() + self.watch_every();
+        }
         self.title = saved.title.clone().unwrap_or_else(config::default_title);
         self.custom_title = saved.title;
         self.notice(format!("Settings saved to {path}."), false);
@@ -2011,6 +2055,140 @@ impl App {
         };
         self.mode = Mode::List;
         self.submit(Queued::Update(vec![folder]));
+    }
+
+    pub fn is_watched(&self, path: &Path) -> bool {
+        self.watched
+            .iter()
+            .any(|known| paths::same_path(known, path))
+    }
+
+    fn watch_every(&self) -> Duration {
+        Duration::from_secs(u64::from(self.watch_interval.max(1)) * 60)
+    }
+
+    /// Starts or stops the automatic pull for the chosen repositories.
+    /// When all of them are watched already it stops; otherwise the rest
+    /// join, and everything watched is pulled right away.
+    fn toggle_watch(&mut self) {
+        let repos: Vec<(String, PathBuf)> = self
+            .chosen_repos()
+            .iter()
+            .map(|repo| (repo.folder.clone(), repo.path.clone()))
+            .collect();
+        self.mode = Mode::List;
+        if repos.is_empty() {
+            self.notice("Select a repository first.", true);
+            return;
+        }
+        let named = match repos.as_slice() {
+            [(folder, _)] => folder.clone(),
+            many => count_label(many.len()),
+        };
+        if repos.iter().all(|(_, path)| self.is_watched(path)) {
+            self.watched
+                .retain(|known| !repos.iter().any(|(_, path)| paths::same_path(known, path)));
+            self.notice(format!("Auto-pull is off for {named}."), false);
+        } else {
+            for (_, path) in &repos {
+                paths::push_path(&mut self.watched, path.clone());
+            }
+            self.watch_due = Instant::now();
+            let every = match self.watch_interval {
+                1 => "every minute".to_string(),
+                minutes => format!("every {minutes} minutes"),
+            };
+            self.notice(
+                format!("Auto-pull is on for {named}: {every} while DevAssist runs."),
+                false,
+            );
+        }
+        self.marked.clear();
+        self.save_config();
+    }
+
+    /// Pulls the watched repositories once their interval is over and
+    /// nothing else runs. It stays out of the progress dialog: the status
+    /// line says what came in.
+    fn start_due_watch(&mut self) -> bool {
+        if self.watched.is_empty()
+            || self.busy
+            || self.fetching
+            || self.status_pending > 0
+            || self.fetch_after_read
+            || !self.queue.is_empty()
+            || Instant::now() < self.watch_due
+        {
+            return false;
+        }
+        self.watch_due = Instant::now() + self.watch_every();
+        let work: Vec<(String, PathBuf)> = self
+            .installed
+            .iter()
+            .filter(|repo| self.is_watched(&repo.path) && !repo.upstream_gone)
+            .map(|repo| (repo.folder.clone(), repo.path.clone()))
+            .collect();
+        if work.is_empty() {
+            return false;
+        }
+        process::clear_cancel();
+        self.busy = true;
+        self.watch_status = Some((self.status.clone(), self.status_error));
+        let named = match work.as_slice() {
+            [(folder, _)] => folder.clone(),
+            many => count_label(many.len()),
+        };
+        self.notice(format!("{WATCH_LABEL} {named}…"), false);
+        self.worker.spawn(move |tx| {
+            let token = github::token();
+            let mut updated = Vec::new();
+            let mut failed = Vec::new();
+            for (folder, path) in work {
+                if process::was_cancelled() {
+                    break;
+                }
+                match gitops::update(&path, token.as_deref(), |_, _| {}, |_, _| {}) {
+                    Ok(result) if result.changed() => updated.push(folder),
+                    Ok(_) => {}
+                    Err(err) => failed.push((folder, err)),
+                }
+            }
+            let _ = tx.send(Msg::Watched { updated, failed });
+        });
+        true
+    }
+
+    /// An automatic pull is done: say what came in, and read the rows
+    /// again where they stand.
+    fn on_watched(&mut self, updated: Vec<String>, failed: Vec<(String, String)>) {
+        self.busy = false;
+        let cancelled = process::was_cancelled();
+        process::clear_cancel();
+        let before = self.watch_status.take();
+        if cancelled {
+            self.notice("Cancelled.", false);
+        } else if let [(folder, err)] = failed.as_slice() {
+            self.notice(format!("Auto-pull of {folder} failed: {err}"), true);
+        } else if !failed.is_empty() {
+            let names: Vec<&str> = failed.iter().map(|(folder, _)| folder.as_str()).collect();
+            self.notice(
+                format!(
+                    "Auto-pull failed for {}: {}",
+                    count_label(failed.len()),
+                    names.join(", ")
+                ),
+                true,
+            );
+        } else if !updated.is_empty() {
+            self.notice(format!("Auto-pull updated {}.", updated.join(", ")), false);
+        } else if let Some((text, error)) = before
+            && self.status.starts_with(WATCH_LABEL)
+        {
+            // Nothing new: the status line goes back to what it said.
+            self.notice(text, error);
+        }
+        self.generation += 1;
+        self.spawn_status(self.generation, false);
     }
 
     fn update_all(&mut self) {
@@ -2771,6 +2949,7 @@ impl App {
                     job.on(event);
                 }
             }
+            Msg::Watched { updated, failed } => self.on_watched(updated, failed),
             Msg::Cloned(path) => {
                 if paths::push_path(&mut self.checkouts, path) {
                     self.save_config();
@@ -2909,6 +3088,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: false,
+            watched: Vec::new(),
+            watch_interval: 5,
             update_check_now: false,
             shell: Default::default(),
             clone_dir: std::env::temp_dir().join("devassist-clones"),
@@ -3857,7 +4038,7 @@ mod tests {
         // A click on a line runs it too.
         app.selected = Some("web".into());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.click_row("menu:5".into());
+        app.click_row("menu:6".into());
         assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
     }
 
@@ -3891,5 +4072,174 @@ mod tests {
         let visible = app.visible_installed();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].repo, "tool");
+    }
+
+    #[test]
+    fn w_turns_the_automatic_pull_on_and_off_and_saves_it() {
+        let mut app = grouped_app();
+        // Far in the future, so that only turning it on makes a pull due.
+        app.watch_due = Instant::now() + Duration::from_secs(3600);
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(app.watched, [PathBuf::from("/srv/code/api")]);
+        assert!(app.is_watched(Path::new("/srv/code/api")));
+        assert!(app.status.contains("every 5 minutes"), "{}", app.status);
+        assert!(app.watch_due <= Instant::now());
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(text.lines().any(|line| line.starts_with("watch = ")));
+
+        // Ticking a watched and an unwatched one watches both.
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(app.marked, ["api", "docs"]);
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(app.watched.len(), 2);
+        assert!(app.marked.is_empty());
+
+        // On one that is watched, w stops it. The menu has the same line.
+        app.selected = Some("api".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Menu);
+        press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert_eq!(app.watched, [PathBuf::from("/srv/code/docs")]);
+        assert!(app.status.contains("off for api"), "{}", app.status);
+
+        // A checkout that leaves the list is no longer watched.
+        app.checkouts
+            .retain(|path| path != Path::new("/srv/code/docs"));
+        app.save_config();
+        assert!(app.watched.is_empty());
+        let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    #[test]
+    fn the_automatic_pull_waits_for_its_turn() {
+        let mut app = grouped_app();
+        // Nothing is watched: nothing starts.
+        assert!(!app.start_due_watch());
+        app.watched = vec![PathBuf::from("/srv/code/api")];
+
+        app.watch_due = Instant::now() + Duration::from_secs(60);
+        assert!(!app.start_due_watch(), "not due yet");
+        app.watch_due = Instant::now();
+        app.busy = true;
+        assert!(!app.start_due_watch(), "another task runs");
+        app.busy = false;
+        app.queue.push_back(Queued::Refresh);
+        assert!(!app.start_due_watch(), "a task waits");
+        app.queue.clear();
+        app.status_pending = 1;
+        assert!(!app.start_due_watch(), "the rows are being read");
+        app.status_pending = 0;
+
+        // A repository whose upstream is gone has nothing to pull.
+        app.installed[0].upstream_gone = true;
+        assert!(!app.start_due_watch());
+        assert!(!app.busy);
+        // The interval started over all the same.
+        assert!(app.watch_due > Instant::now() + Duration::from_secs(200));
+    }
+
+    #[test]
+    fn a_finished_automatic_pull_reports_on_the_status_line() {
+        let mut app = App::empty(test_settings());
+        let finish = |app: &mut App, updated: &[&str], failed: &[(&str, &str)]| {
+            app.notice("7 installed.", false);
+            app.watch_status = Some((app.status.clone(), false));
+            app.notice(format!("{WATCH_LABEL} api…"), false);
+            app.busy = true;
+            app.on_watched(
+                updated.iter().map(|name| name.to_string()).collect(),
+                failed
+                    .iter()
+                    .map(|(name, err)| (name.to_string(), err.to_string()))
+                    .collect(),
+            );
+            assert!(!app.busy);
+        };
+        // Nothing new: the line says what it said before.
+        finish(&mut app, &[], &[]);
+        assert_eq!(app.status, "7 installed.");
+        finish(&mut app, &["api", "web"], &[]);
+        assert_eq!(app.status, "Auto-pull updated api, web.");
+        assert!(!app.status_error);
+        finish(&mut app, &["web"], &[("api", "no network")]);
+        assert_eq!(app.status, "Auto-pull of api failed: no network");
+        assert!(app.status_error);
+    }
+
+    /// Runs git for a test, quietly and with a fixed author.
+    fn git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_watched_repository_is_pulled_when_its_time_has_come() {
+        let root = scratch("watch");
+        let origin = root.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("one"), "one").unwrap();
+        git(&origin, &["add", "one"]);
+        git(&origin, &["commit", "-q", "-m", "one"]);
+        git(&root, &["clone", "-q", origin.to_str().unwrap(), "tool"]);
+        let clone = root.join("tool");
+        // The origin moves on after the clone.
+        std::fs::write(origin.join("two"), "two").unwrap();
+        git(&origin, &["add", "two"]);
+        git(&origin, &["commit", "-q", "-m", "two"]);
+        assert!(!clone.join("two").exists());
+
+        let mut app = App::empty(test_settings());
+        let mut repo = installed("acme", "tool");
+        repo.path = clone.clone();
+        app.checkouts.push(clone.clone());
+        app.installed.push(repo);
+        app.watched = vec![clone.clone()];
+        app.notice("1 installed.", false);
+
+        let wait = |app: &mut App| {
+            let until = Instant::now() + Duration::from_secs(60);
+            while app.busy || app.status_pending > 0 {
+                assert!(Instant::now() < until, "the pull did not finish");
+                app.drain();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert!(app.drain(), "the pull starts on the first idle moment");
+        assert!(app.busy);
+        // It stays out of the way: no dialog opens.
+        assert!(app.mode == Mode::List);
+        assert!(app.job.is_none());
+        wait(&mut app);
+        assert_eq!(app.status, "Auto-pull updated tool.");
+        assert!(clone.join("two").exists());
+
+        // The next one is an interval away. Brought forward, it finds
+        // nothing and leaves the status line as it was.
+        assert!(!app.start_due_watch());
+        app.notice("1 installed.", false);
+        app.watch_due = Instant::now();
+        assert!(app.start_due_watch());
+        wait(&mut app);
+        assert_eq!(app.status, "1 installed.");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -35,6 +35,8 @@ group = Client work
 checkout = D:\work\client\api
 checkout = D:\work\client\web
 collapsed = Client work
+watch = C:\dev\tool
+watch_interval = 15
 ```
 
 | Key | Meaning |
@@ -51,6 +53,8 @@ collapsed = Client work
 | `checkout` | The path of a clone on the list. One line per clone. |
 | `group` | Starts a group. The `checkout` lines after it are in that group, up to the next `group` line. Checkouts before the first `group` line are in no group. |
 | `collapsed` | A group that is folded shut. |
+| `watch` | The path of a clone that is pulled automatically while DevAssist runs. One line per clone; it has to be on the list as a `checkout` too. `w` in the overview sets it. |
+| `watch_interval` | Minutes between those pulls, from 1 to 1440. Default: 5. |
 
 If no `owner` is set, DevAssist uses the account your clones belong to. When
 they belong to several, it uses the account you are signed in with.

@@ -23,13 +23,14 @@ m              put the selection into a group · on a group: rename it
 enter          actions for the selection · on a group: fold it
 u              update the selection
 U              update every repository
+w              pull the selection automatically on a timer, or stop that
 a              add any GitHub repository, into a folder you choose
 i              import clones you already have, from any folder
 d, Delete      delete the selection, or only take it off the list
 r, F5          fetch and refresh
 s              sort by name or by attention
 o              open the selection in the file manager
-c              settings: default accounts, protocol, title
+c              settings: default accounts, protocol, pull interval, title
 l              show the last update or clone
 /              filter the installed list
 wheel          scroll

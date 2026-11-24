@@ -16,6 +16,11 @@ const FILE_NAME: &str = "devassist.toml";
 const OLD_FILE_NAME: &str = "artcraft-repos.toml";
 const OLD_DIR_NAME: &str = "artcraft-repos";
 
+/// Minutes between automatic pulls of the watched checkouts.
+pub const DEFAULT_WATCH_INTERVAL: u32 = 5;
+/// The longest interval: one day.
+pub const MAX_WATCH_INTERVAL: u32 = 1440;
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub title: String,
@@ -39,6 +44,10 @@ pub struct Settings {
     pub collapsed: Vec<String>,
     /// Look for a newer version at startup. Saved in the settings file.
     pub update_check: bool,
+    /// Checkouts that are pulled on a timer while the program runs.
+    pub watched: Vec<PathBuf>,
+    /// Minutes between those pulls.
+    pub watch_interval: u32,
     /// What the shell itself is set to.
     pub shell: ShellPrefs,
     /// False when this start was told not to look, with --no-update-check.
@@ -83,6 +92,10 @@ pub struct Saved {
     pub placement: Vec<(PathBuf, String)>,
     pub collapsed: Vec<String>,
     pub update_check: bool,
+    /// Checkouts that are pulled on a timer while the program runs.
+    pub watched: Vec<PathBuf>,
+    /// Minutes between those pulls.
+    pub watch_interval: u32,
     /// What the shell itself is set to.
     pub shell: ShellPrefs,
 }
@@ -119,6 +132,8 @@ struct ParsedConfig {
     placement: Vec<(PathBuf, String)>,
     collapsed: Vec<String>,
     update_check: Option<bool>,
+    watched: Vec<PathBuf>,
+    watch_interval: Option<u32>,
     palette_key: Option<KeyCombo>,
     start: Option<String>,
 }
@@ -198,6 +213,20 @@ pub fn startup() -> Result<Startup, String> {
         .as_ref()
         .and_then(|file| file.update_check)
         .unwrap_or(true);
+    // A watched path that is no longer on the list is dropped.
+    let watched: Vec<PathBuf> = loaded
+        .file
+        .as_ref()
+        .map(|file| file.watched.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|path| checkouts.iter().any(|known| same_path(known, path)))
+        .collect();
+    let watch_interval = loaded
+        .file
+        .as_ref()
+        .and_then(|file| file.watch_interval)
+        .unwrap_or(DEFAULT_WATCH_INTERVAL);
     let defaults = ShellPrefs::default();
     let shell = ShellPrefs {
         palette_key: loaded
@@ -226,6 +255,8 @@ pub fn startup() -> Result<Startup, String> {
         placement,
         collapsed,
         update_check,
+        watched,
+        watch_interval,
         shell,
         update_check_now: update_check && !flags.no_update_check,
         config_path: loaded.path,
@@ -627,6 +658,12 @@ fn render(saved: &Saved) -> String {
     if !saved.update_check {
         out.push_str("update_check = off\n");
     }
+    for path in &saved.watched {
+        out.push_str(&format!("watch = {}\n", path.display()));
+    }
+    if saved.watch_interval != DEFAULT_WATCH_INTERVAL {
+        out.push_str(&format!("watch_interval = {}\n", saved.watch_interval));
+    }
     let defaults = ShellPrefs::default();
     if saved.shell.palette_key != defaults.palette_key {
         out.push_str(&format!(
@@ -638,6 +675,21 @@ fn render(saved: &Saved) -> String {
         out.push_str(&format!("start = {}\n", saved.shell.start));
     }
     out
+}
+
+/// Minutes between automatic pulls, as typed: a whole number from 1 up to
+/// a day. Empty means the default.
+pub fn parse_watch_interval(text: &str) -> Result<u32, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(DEFAULT_WATCH_INTERVAL);
+    }
+    match text.parse::<u32>() {
+        Ok(minutes) if (1..=MAX_WATCH_INTERVAL).contains(&minutes) => Ok(minutes),
+        _ => Err(format!(
+            "The interval is a number of minutes from 1 to {MAX_WATCH_INTERVAL}."
+        )),
+    }
 }
 
 /// Accounts typed into the settings dialog, separated by commas or spaces.
@@ -761,6 +813,15 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                     "off" | "no" | "false" => false,
                     _ => return Err(format!("line {line_no}: update_check is on or off")),
                 });
+            }
+            "watch" => {
+                push_path(&mut parsed.watched, PathBuf::from(value));
+            }
+            "watch_interval" => {
+                parsed.watch_interval = Some(
+                    parse_watch_interval(value)
+                        .map_err(|err| format!("line {line_no}: watch_interval: {err}"))?,
+                );
             }
             "palette_key" => {
                 parsed.palette_key = Some(
@@ -946,6 +1007,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
             shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
@@ -971,6 +1034,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
             shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
@@ -1020,6 +1085,8 @@ mod tests {
             ],
             collapsed: vec!["home".into()],
             update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
             shell: ShellPrefs::default(),
         };
         let text = render(&saved);
@@ -1063,6 +1130,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: vec!["Work".into(), String::new()],
             update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
             shell: ShellPrefs::default(),
         };
         let text = render(&saved);
@@ -1106,6 +1175,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
             shell: ShellPrefs {
                 palette_key: KeyCombo::parse("alt-f2").unwrap(),
                 start: "docker".to_string(),
@@ -1120,6 +1191,47 @@ mod tests {
         let text = render(&saved);
         assert!(!text.contains("palette_key"));
         assert!(!text.contains("start ="));
+    }
+
+    #[test]
+    fn watched_checkouts_and_their_interval_round_trip() {
+        let parsed = parse_config(
+            "checkout = /srv/code/api\nwatch = /srv/code/api\nwatch = /srv/code/api\nwatch_interval = 30\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.watched, vec![PathBuf::from("/srv/code/api")]);
+        assert_eq!(parsed.watch_interval, Some(30));
+        assert_eq!(parse_config("title = x\n").unwrap().watch_interval, None);
+        assert!(parse_config("watch_interval = 0\n").is_err());
+        assert!(parse_config("watch_interval = often\n").is_err());
+        assert!(parse_config("watch_interval = 1441\n").is_err());
+
+        let text = "checkout = /srv/code/api\nwatch = /srv/code/api\nwatch_interval = 30\n";
+        let parsed = parse_config(text).unwrap();
+        let saved = Saved {
+            title: None,
+            owners: Vec::new(),
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: parsed.checkouts.clone(),
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+            update_check: true,
+            watched: parsed.watched.clone(),
+            watch_interval: 30,
+            shell: Default::default(),
+        };
+        let again = parse_config(&render(&saved)).unwrap();
+        assert_eq!(again.watched, parsed.watched);
+        assert_eq!(again.watch_interval, Some(30));
+        // The default interval is not written down.
+        let quiet = Saved {
+            watch_interval: DEFAULT_WATCH_INTERVAL,
+            ..saved
+        };
+        assert!(!render(&quiet).contains("watch_interval"));
     }
 
     #[test]
@@ -1147,6 +1259,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
             shell: ShellPrefs::default(),
         };
         // On is the default and is not written down.
@@ -1168,6 +1282,8 @@ mod tests {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
             shell: ShellPrefs::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();

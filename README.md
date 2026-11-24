@@ -39,6 +39,8 @@ and volumes, with live logs. It works with the keyboard and with the mouse.
 - **Updates every branch.** An update fetches once, fast-forwards every local
   branch that is only behind, and creates local branches for new remote ones.
   It never merges or rebases, so your own commits are never touched.
+- **Keeps chosen repositories current by itself.** Watch a repository and it
+  is updated on a timer while DevAssist runs, without a dialog.
 - **Adds repositories.** Search your accounts, any other account, or paste a
   GitHub link, pick one or several, and choose the folder to clone into.
 - **Imports what you already have.** Point it at a folder and its GitHub

@@ -15,14 +15,17 @@ pub enum Field {
     Accounts,
     Pinned,
     Protocol,
+    /// Minutes between automatic pulls of the watched repositories.
+    Watch,
     Title,
 }
 
 impl Field {
-    pub const ALL: [Field; 4] = [
+    pub const ALL: [Field; 5] = [
         Field::Accounts,
         Field::Pinned,
         Field::Protocol,
+        Field::Watch,
         Field::Title,
     ];
 
@@ -31,6 +34,7 @@ impl Field {
             Field::Accounts => "Accounts",
             Field::Pinned => "Pinned repos",
             Field::Protocol => "Clone with",
+            Field::Watch => "Auto-pull every",
             Field::Title => "Title",
         }
     }
@@ -40,6 +44,7 @@ impl Field {
             Field::Accounts => "Users or organizations that Add lists. Separate with commas.",
             Field::Pinned => "Single repositories to list as well, as owner/name.",
             Field::Protocol => "auto follows the clones already in this folder.",
+            Field::Watch => "Minutes between pulls of the repositories watched with w.",
             Field::Title => "Shown in the top left. Empty uses the folder name.",
         }
     }
@@ -50,6 +55,7 @@ impl Field {
             Field::Accounts => "accounts",
             Field::Pinned => "pinned",
             Field::Protocol => "protocol",
+            Field::Watch => "watch",
             Field::Title => "title",
         }
     }
@@ -71,6 +77,8 @@ pub struct Form {
     pub accounts: String,
     pub pinned: String,
     pub protocol: Protocol,
+    /// Minutes between automatic pulls, as typed.
+    pub interval: String,
     pub title: String,
     pub error: Option<String>,
     pub path: PathBuf,
@@ -83,6 +91,7 @@ impl Form {
         owners: &[String],
         pinned: &[RepoSpec],
         protocol: Protocol,
+        watch_interval: u32,
         title: Option<&str>,
         path: PathBuf,
     ) -> Self {
@@ -93,6 +102,7 @@ impl Form {
             accounts: owners.join(", "),
             pinned: pinned.join(", "),
             protocol,
+            interval: watch_interval.to_string(),
             title: title.unwrap_or_default().to_string(),
             error: None,
             path,
@@ -130,6 +140,7 @@ impl Form {
         let text = match self.focus {
             Field::Accounts => &mut self.accounts,
             Field::Pinned => &mut self.pinned,
+            Field::Watch => &mut self.interval,
             Field::Title => &mut self.title,
             Field::Protocol => return,
         };
@@ -177,6 +188,10 @@ impl Form {
             Ok(pinned) => pinned,
             Err(err) => return self.reject(Field::Pinned, err),
         };
+        let watch_interval = match config::parse_watch_interval(&self.interval) {
+            Ok(minutes) => minutes,
+            Err(err) => return self.reject(Field::Watch, err),
+        };
         let title = self.title.trim();
         self.error = None;
         Some(Saved {
@@ -191,6 +206,8 @@ impl Form {
             placement: Vec::new(),
             collapsed: Vec::new(),
             update_check: true,
+            watched: Vec::new(),
+            watch_interval,
             shell: Default::default(),
         })
     }
@@ -226,6 +243,7 @@ impl Form {
                 &mut self.accounts
             }
             Field::Pinned => &mut self.pinned,
+            Field::Watch => &mut self.interval,
             Field::Title => &mut self.title,
             Field::Protocol => return,
         };
@@ -244,6 +262,7 @@ mod tests {
             &["AsP3X".to_string()],
             &[],
             Protocol::Auto,
+            5,
             None,
             PathBuf::from("devassist.toml"),
         )
@@ -302,12 +321,34 @@ mod tests {
     }
 
     #[test]
+    fn the_interval_is_a_number_of_minutes() {
+        let mut form = form();
+        assert_eq!(form.interval, "5");
+        form.focus = Field::Watch;
+        press(&mut form, KeyCode::Backspace);
+        for ch in "30".chars() {
+            press(&mut form, KeyCode::Char(ch));
+        }
+        assert_eq!(form.validate().unwrap().watch_interval, 30);
+        form.interval = "soon".into();
+        form.focus = Field::Title;
+        assert!(form.validate().is_none());
+        assert_eq!(form.focus, Field::Watch);
+        form.interval = "0".into();
+        assert!(form.validate().is_none());
+        // Empty goes back to the default.
+        form.interval.clear();
+        assert_eq!(form.validate().unwrap().watch_interval, 5);
+    }
+
+    #[test]
     fn the_signed_in_account_fills_only_an_untouched_welcome_form() {
         let mut form = Form::new(
             true,
             &[],
             &[],
             Protocol::Auto,
+            5,
             None,
             PathBuf::from("devassist.toml"),
         );

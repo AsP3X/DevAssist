@@ -149,6 +149,27 @@ follows the whole transfer, including resolving deltas. `↑` `↓` or a click p
 a repository to see its own output; `h` hides the dialog while the run goes on,
 and `l` shows it again.
 
+## Pulling a repository automatically
+
+`w` watches the highlighted repository, or everything that is ticked. A
+watched repository carries a `↻` after its name and is updated on a timer for
+as long as DevAssist runs, also while another tool is on screen. `w` on a
+repository that is watched already stops it.
+
+An automatic pull does what `u` does: it fetches, fast-forwards every branch
+that is only behind and adds new remote branches. Your own commits and
+uncommitted changes are left alone, so a branch that cannot be fast-forwarded
+simply stays behind.
+
+It opens no dialog. The status line says when something came in or when a pull
+failed, and says nothing new when there was nothing to bring in. A pull waits
+while another task runs, and a task you start during a pull waits for it. `Esc`
+cancels a running pull.
+
+The first pull runs right after you start DevAssist or turn watching on, then
+every 5 minutes. The settings (`c`) change the interval, from 1 minute to a
+day. Which repositories are watched is remembered between starts.
+
 ## Selecting several
 
 `Space` ticks the highlighted row and moves down. `Ctrl-A` ticks everything the
@@ -164,6 +185,7 @@ ticked, update, remove, open and move-to-group act on all of them.
 - Open on GitHub
 - Move to a group
 - Copy the path
+- Auto-pull on or off
 - Remove
 
 Choose with `↑` `↓` and `Enter`, press the letter shown on the right, or click.
