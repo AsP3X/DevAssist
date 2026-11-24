@@ -532,6 +532,53 @@ fn fetch_pull_requests(
     run_git(args, on_line).map_err(|err| format!("pull requests: {err}"))
 }
 
+/// What fetching the pull requests of one checkout found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SavedPulls {
+    /// How many pull requests the clone holds now.
+    pub total: u32,
+    /// How many of them are new or got other commits.
+    pub changed: u32,
+}
+
+/// Saves the pull requests of one checkout now, whatever the setting says:
+/// new ones, and ones whose commits changed. Nothing is removed.
+pub fn save_pull_requests(
+    path: &Path,
+    token: Option<&str>,
+    on_line: impl FnMut(&str, bool),
+) -> Result<SavedPulls, String> {
+    let before = pull_tips(path)?;
+    fetch_pull_requests(path, token, true, on_line)?;
+    let after = pull_tips(path)?;
+    let changed = after.iter().filter(|tip| !before.contains(*tip)).count();
+    Ok(SavedPulls {
+        total: u32::try_from(after.len()).unwrap_or(u32::MAX),
+        changed: u32::try_from(changed).unwrap_or(u32::MAX),
+    })
+}
+
+/// Every saved pull request with the commit it points at, one per entry.
+fn pull_tips(path: &Path) -> Result<std::collections::HashSet<String>, String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("for-each-ref")
+        .arg("--format=%(refname) %(objectname)")
+        .arg("refs/pull")
+        .output()
+        .map_err(|err| format!("git for-each-ref: {err}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(first_line(err.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
 /// What an update changed in one checkout.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Updated {
@@ -1989,6 +2036,31 @@ refs/remotes/fork/dev\tiii\t\t
         );
         assert_eq!(tip(&clone, "refs/pull/2/head"), kept);
         assert_eq!(status(&clone).unwrap().pull_requests, 2);
+
+        // Fetching them on request needs no setting, and says what came:
+        // here a new pull request and one with another commit.
+        git(&upstream, &["checkout", "-q", "refs/pull/1/head"]);
+        commit(&upstream, "even-more");
+        git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
+        git(&upstream, &["update-ref", "refs/pull/3/head", "HEAD"]);
+        git(&upstream, &["checkout", "-q", "main"]);
+        let saved = save_pull_requests(&clone, None, |_, _| {}).unwrap();
+        assert_eq!(
+            saved,
+            SavedPulls {
+                total: 3,
+                changed: 2
+            }
+        );
+        assert_eq!(tip(&clone, "refs/pull/2/head"), kept);
+        let again = save_pull_requests(&clone, None, |_, _| {}).unwrap();
+        assert_eq!(
+            again,
+            SavedPulls {
+                total: 3,
+                changed: 0
+            }
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

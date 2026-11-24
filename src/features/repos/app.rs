@@ -95,6 +95,8 @@ pub enum Queued {
     /// Add the clones that already sit in that folder.
     Import(PathBuf),
     Refresh,
+    /// Save the pull requests of these folders now.
+    PullRequests(Vec<String>),
 }
 
 impl Queued {
@@ -113,6 +115,7 @@ impl Queued {
             }
             Queued::Import(dir) => format!("import {}", dir.display()),
             Queued::Refresh => "refresh".to_string(),
+            Queued::PullRequests(folders) => named("fetch the pull requests of", folders.clone()),
         }
     }
 }
@@ -193,7 +196,7 @@ pub enum MenuItem {
     Remove,
     /// Start or stop pulling the repositories on a timer.
     Watch,
-    /// Switch saving pull requests, for every repository.
+    /// Fetch the pull requests of the repositories now.
     PullRequests,
 }
 
@@ -214,7 +217,7 @@ impl MenuItem {
         match (self, many) {
             (MenuItem::Update, _) => "Update",
             (MenuItem::Watch, _) => "Auto-pull on or off",
-            (MenuItem::PullRequests, _) => "Save pull requests on or off",
+            (MenuItem::PullRequests, _) => "Fetch the pull requests",
             (MenuItem::Open, false) => "Open the folder",
             (MenuItem::Open, true) => "Open the folders",
             (MenuItem::Github, _) => "Open on GitHub",
@@ -1037,7 +1040,7 @@ impl App {
         match item {
             MenuItem::Update => self.update_chosen(),
             MenuItem::Watch => self.toggle_watch(),
-            MenuItem::PullRequests => self.toggle_pull_requests(),
+            MenuItem::PullRequests => self.fetch_pull_requests_chosen(),
             MenuItem::Open => self.open_selected(),
             MenuItem::Github => self.open_on_github(),
             MenuItem::Group => self.open_group_prompt(),
@@ -2078,23 +2081,88 @@ impl App {
         self.submit(Queued::Update(vec![folder]));
     }
 
-    /// Switches saving pull requests on or off. It is one setting for every
-    /// repository, the same one the settings dialog has.
-    fn toggle_pull_requests(&mut self) {
+    /// Saves the pull requests of the ticked repositories, or the
+    /// highlighted one, now. It does not need the setting to be on.
+    fn fetch_pull_requests_chosen(&mut self) {
+        let folders = self.chosen();
         self.mode = Mode::List;
-        self.pull_requests = !self.pull_requests;
-        if self.pull_requests {
-            self.notice(
-                "Pull requests are saved with the next fetch, for every repository: press r.",
-                false,
-            );
-        } else {
-            self.notice(
-                "Pull requests are no longer saved. The ones already saved stay.",
-                false,
-            );
+        if folders.is_empty() {
+            self.notice("Select a repository first.", true);
+            return;
         }
-        self.save_config();
+        self.marked.clear();
+        self.submit(Queued::PullRequests(folders));
+    }
+
+    /// Fetches the pull requests of the named folders one after another
+    /// in the progress dialog: new ones, and ones that got more commits.
+    fn save_pull_requests(&mut self, folders: &[String]) {
+        let work: Vec<(String, PathBuf)> = self
+            .installed
+            .iter()
+            .filter(|repo| folders.contains(&repo.folder))
+            .map(|repo| (repo.folder.clone(), repo.path.clone()))
+            .collect();
+        if work.is_empty() {
+            self.notice(
+                format!("{} is no longer in this folder.", folders.join(", ")),
+                true,
+            );
+            return;
+        }
+        let named = match work.as_slice() {
+            [(folder, _)] => folder.clone(),
+            many => count_label(many.len()),
+        };
+        let names = work.iter().map(|(folder, _)| folder.clone()).collect();
+        let job = gitprogress::job(format!("Fetching the pull requests of {named}"), names, 0);
+        let label = format!("Fetching the pull requests of {named}…");
+        self.start_job(label, Some(job), move |tx| {
+            let token = github::token();
+            let mut total = 0;
+            let mut changed = 0;
+            let mut failed = Vec::new();
+            for (index, (folder, path)) in work.iter().enumerate() {
+                if process::was_cancelled() {
+                    return Err("cancelled".into());
+                }
+                send(tx, JobEvent::Start(index));
+                let saved = gitops::save_pull_requests(path, token.as_deref(), |line, progress| {
+                    send_line(tx, line, progress)
+                });
+                match saved {
+                    Ok(saved) => {
+                        total += saved.total;
+                        changed += saved.changed;
+                        let note = match (saved.total, saved.changed) {
+                            (0, _) => "no pull requests".to_string(),
+                            (_, 0) => "nothing new".to_string(),
+                            (_, count) => format!("{count} new or changed"),
+                        };
+                        send(tx, JobEvent::Done(index, note));
+                    }
+                    Err(err) => {
+                        if process::was_cancelled() {
+                            return Err(err);
+                        }
+                        failed.push(folder.clone());
+                        send(tx, JobEvent::Failed(index, err));
+                    }
+                }
+            }
+            if !failed.is_empty() {
+                return Err(format!(
+                    "Pull requests: {changed} new or changed, {} failed: {}",
+                    failed.len(),
+                    failed.join(", ")
+                ));
+            }
+            Ok(match (total, changed) {
+                (0, _) => format!("{named} has no pull requests."),
+                (_, 0) => format!("Pull requests of {named}: {total} saved, nothing new."),
+                _ => format!("Pull requests of {named}: {total} saved, {changed} new or changed."),
+            })
+        });
     }
 
     pub fn is_watched(&self, path: &Path) -> bool {
@@ -2682,6 +2750,7 @@ impl App {
             Queued::Clone(remotes, dir) => self.clone_remotes(remotes, dir),
             Queued::Import(dir) => self.import_folder(&dir),
             Queued::Refresh => self.reload_lists(false, true),
+            Queued::PullRequests(folders) => self.save_pull_requests(&folders),
         }
     }
 
@@ -4137,30 +4206,27 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_switches_saving_pull_requests_for_every_repository() {
+    fn the_menu_fetches_the_pull_requests_of_the_selection() {
         let mut app = grouped_app();
-        assert!(!app.pull_requests);
+        // Something else is running, so the fetch waits in the queue.
+        app.busy = true;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.mode == Mode::Menu);
         press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
         assert!(app.mode == Mode::List);
-        assert!(app.pull_requests);
-        assert!(app.status.contains("press r"), "{}", app.status);
-        let text = std::fs::read_to_string(&app.config_path).unwrap();
-        assert!(text.contains("pull_requests = on"));
+        assert_eq!(labels(&app), ["fetch the pull requests of api"]);
+        // It is an action, not the setting.
+        assert!(!app.pull_requests);
+        app.drop_queue();
 
-        // The settings dialog shows the same setting.
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
-        assert!(app.form.as_ref().unwrap().pull_requests);
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-
-        // The same line switches it off again.
+        // With several ticked it takes them all, and clears the ticks.
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
-        assert!(!app.pull_requests);
-        assert!(app.status.contains("no longer saved"), "{}", app.status);
-        let text = std::fs::read_to_string(&app.config_path).unwrap();
-        assert!(!text.contains("pull_requests"));
+        assert_eq!(labels(&app), ["fetch the pull requests of 2 repositories"]);
+        assert!(app.marked.is_empty());
+        app.drop_queue();
         let _ = std::fs::remove_file(&app.config_path);
     }
 

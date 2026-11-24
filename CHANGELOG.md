@@ -8,10 +8,12 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
-- **Saving pull requests can be switched in the actions menu.** The menu on a
-  repository has a line **Save pull requests on or off**, with the key `p`.
-  It is the same setting as **Pull requests** in the settings, and applies to
-  every repository.
+- **The pull requests of a repository can be fetched from the actions menu.**
+  The menu on a repository has a line **Fetch the pull requests**, with the
+  key `p`. It saves the pull requests of the highlighted or ticked
+  repositories right away, new ones and ones that got more commits, and
+  reports how many there were. It works whether **Pull requests** is on in
+  the settings or not, and like every fetch it removes nothing.
 
 ## [0.6.0] - 2026-11-24
 
