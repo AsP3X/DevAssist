@@ -271,6 +271,42 @@ original as it was. A move is refused when the target folder exists already.
 Close programs that have files of the repository open first: Windows does not
 move a folder that is in use.
 
+### Migrate: pushing a repository to another service
+
+**Push to another service…** (`s`) in the same submenu puts a complete copy
+of one repository on another Git service, such as GitLab, Codeberg, Bitbucket
+or a server of your own:
+
+1. Make an empty repository on the other service, without a README.
+2. Highlight the repository, press `Enter`, `t`, `s`, and type or paste the
+   address of the new repository: `https://gitlab.com/you/name.git` or
+   `git@codeberg.org:you/name.git`.
+3. `Enter` pushes. The progress dialog shows what Git sends.
+
+Every branch and every tag goes over. A branch is taken from what was last
+fetched from GitHub when the local one is missing or only behind, so press `r`
+first to have the newest state. The default branch is pushed first, which makes
+it the default one over there on most services.
+
+The repository itself does not change: it keeps GitHub as its origin and stays
+on the list as before. The address is kept as one more remote, named after the
+host (`gitlab`, `codeberg`), so doing it again later brings the copy up to
+date, and `git push gitlab` works in a terminal.
+
+What it does not do:
+
+- It never forces. If the other repository already holds different commits,
+  the push is refused and nothing there is overwritten.
+- It does not create the repository on the other service, and it does not
+  delete or archive the one on GitHub.
+- Pull requests, issues, releases and wikis are not part of a Git repository
+  and stay on GitHub. The saved pull request commits (`refs/pull`) are not
+  pushed either: most services refuse them.
+- It signs in with what Git already has for the other host, a saved login or
+  an SSH key. DevAssist does not ask for a password and does not send your
+  GitHub sign-in there. If the push is refused for the sign-in, run
+  `git push` to that address once in a terminal so Git can ask and remember.
+
 ## Groups
 
 Groups sort the overview. They are not folders on disk and moving a repository

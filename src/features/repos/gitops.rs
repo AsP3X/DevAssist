@@ -598,6 +598,230 @@ fn fetch_pull_requests(
     run_git(args, on_line).map_err(|err| format!("pull requests: {err}"))
 }
 
+/// What migrating a checkout to another service pushed.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Migrated {
+    /// The remote the address is kept under.
+    pub remote: String,
+    pub branches: u32,
+    pub tags: u32,
+}
+
+/// Checks an address a repository is to be pushed to, and tidies it.
+/// Web and SSH addresses pass, and a folder that exists, for a bare
+/// repository on a disk. Anything Git would read as an option or as a
+/// command to run does not.
+pub fn push_address(input: &str) -> Result<String, String> {
+    let url = input.trim();
+    if url.is_empty() {
+        return Err("Type the address of the empty repository on the other service.".into());
+    }
+    let lower = url.to_ascii_lowercase();
+    let scheme = ["https://", "http://", "ssh://", "file://"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len());
+    let plain =
+        !url.starts_with('-') && !url.chars().any(|ch| ch.is_control() || ch.is_whitespace());
+    if plain && (scheme || scp_host(url).is_some() || Path::new(url).is_dir()) {
+        Ok(url.to_string())
+    } else {
+        Err("That is not an address Git can push to. It looks like https://host/you/name.git or git@host:you/name.git.".into())
+    }
+}
+
+/// The host of an address written the short SSH way, `git@host:you/name`.
+fn scp_host(url: &str) -> Option<&str> {
+    let (left, right) = url.split_once(':')?;
+    let (_, host) = left.split_once('@')?;
+    (!host.is_empty() && !host.contains('/') && !right.is_empty() && !right.starts_with("//"))
+        .then_some(host)
+}
+
+/// The host an address points at, such as "gitlab.com". None for a folder.
+pub fn address_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let host = match url.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("file") => return None,
+        Some((_, rest)) => {
+            let rest = rest.split('/').next().unwrap_or("");
+            let rest = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
+            rest.split(':').next().unwrap_or("")
+        }
+        None => scp_host(url)?,
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// The name the remote of another service gets: "gitlab" for gitlab.com.
+/// An address without a usable host is called "mirror".
+pub fn remote_name_for(url: &str) -> String {
+    let host = address_host(url).unwrap_or_default();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let name: String = host
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .collect();
+    let name = name.trim_matches('-').to_string();
+    if name.is_empty() || name == "origin" {
+        "mirror".to_string()
+    } else {
+        name
+    }
+}
+
+/// Runs a Git command that only reads, and hands back its lines.
+fn git_lines(path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .map_err(|err| format!("could not start git ({err}). Is Git installed?"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(first_line(err.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+/// Pushes a complete copy of a checkout to `url`, a repository on another
+/// service: every branch and every tag. A branch is taken from origin
+/// where the local one is missing or only behind, so nothing that was
+/// fetched stays behind. Nothing is forced, and the checkout keeps its
+/// origin; the address is remembered as one more remote, named after the
+/// host. The sign-in for GitHub is not sent along: the other service
+/// uses what Git has for it, a saved login or an SSH key.
+pub fn migrate_to(
+    path: &Path,
+    url: &str,
+    mut on_line: impl FnMut(&str, bool),
+) -> Result<Migrated, String> {
+    let url = push_address(url)?;
+    let same = |a: &str, b: &str| {
+        let tidy = |text: &str| {
+            text.trim()
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .to_ascii_lowercase()
+        };
+        tidy(a) == tidy(b)
+    };
+    let origin = git_lines(path, &["config", "--get", "remote.origin.url"])
+        .ok()
+        .and_then(|lines| lines.into_iter().next());
+    if origin.as_deref().is_some_and(|origin| same(origin, &url)) {
+        return Err("That is the address the repository has already.".into());
+    }
+
+    let refs = git_lines(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%09%(objectname)",
+            "refs/heads",
+            "refs/remotes/origin",
+            "refs/tags",
+        ],
+    )?;
+    let mut locals: std::collections::HashMap<String, String> = Default::default();
+    let mut remotes: Vec<(String, String)> = Vec::new();
+    let mut tags = 0u32;
+    for line in &refs {
+        let Some((name, tip)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(branch) = name.strip_prefix("refs/heads/") {
+            locals.insert(branch.to_string(), tip.to_string());
+        } else if let Some(branch) = name.strip_prefix("refs/remotes/origin/") {
+            if branch != "HEAD" {
+                remotes.push((branch.to_string(), tip.to_string()));
+            }
+        } else if name.starts_with("refs/tags/") {
+            tags += 1;
+        }
+    }
+    // Each branch with the ref it is pushed from.
+    let mut sources: std::collections::BTreeMap<String, String> = locals
+        .keys()
+        .map(|branch| (branch.clone(), format!("refs/heads/{branch}")))
+        .collect();
+    for (branch, tip) in &remotes {
+        let from_origin = match locals.get(branch) {
+            None => true,
+            Some(local) if local == tip => false,
+            // Only behind: origin has the newer commits.
+            Some(local) => is_ancestor(path, local, tip),
+        };
+        if from_origin {
+            sources.insert(branch.clone(), format!("refs/remotes/origin/{branch}"));
+        }
+    }
+    if sources.is_empty() {
+        return Err("there is no branch to push".into());
+    }
+    // The default branch goes first and alone: a service makes the first
+    // branch it gets the default one.
+    let short = |args: &[&str]| {
+        git_lines(path, args)
+            .ok()
+            .and_then(|lines| lines.into_iter().next())
+    };
+    let default = short(&["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"])
+        .and_then(|name| name.strip_prefix("origin/").map(str::to_string))
+        .filter(|name| sources.contains_key(name))
+        .or_else(|| {
+            short(&["symbolic-ref", "-q", "--short", "HEAD"])
+                .filter(|name| sources.contains_key(name))
+        });
+    let spec = |branch: &str| format!("{}:refs/heads/{branch}", sources[branch]);
+    let mut batches: Vec<Vec<String>> = Vec::new();
+    if let Some(default) = &default {
+        batches.push(vec![spec(default)]);
+    }
+    let rest: Vec<String> = sources
+        .keys()
+        .filter(|branch| Some(*branch) != default.as_ref())
+        .map(|branch| spec(branch))
+        .collect();
+    batches.extend(rest.chunks(100).map(<[String]>::to_vec));
+    if tags > 0 {
+        batches.push(vec!["refs/tags/*:refs/tags/*".to_string()]);
+    }
+    for batch in &batches {
+        if process::was_cancelled() {
+            return Err("cancelled".into());
+        }
+        let mut args = vec![
+            OsString::from("-C"),
+            path.as_os_str().to_os_string(),
+            OsString::from("push"),
+            OsString::from("--progress"),
+            OsString::from(&url),
+        ];
+        args.extend(batch.iter().map(OsString::from));
+        run_git(args, &mut on_line)?;
+    }
+
+    // Remember the address, so the copy can be brought up to date later.
+    let remote = remote_name_for(&url);
+    let known = git_lines(path, &["config", "--get", &format!("remote.{remote}.url")])
+        .is_ok_and(|lines| !lines.is_empty());
+    let verb = if known { "set-url" } else { "add" };
+    git_lines(path, &["remote", verb, &remote, &url])?;
+    Ok(Migrated {
+        remote,
+        branches: u32::try_from(sources.len()).unwrap_or(u32::MAX),
+        tags,
+    })
+}
+
 /// Moves a checkout to `to`, a path that must be free. On the same drive
 /// that is a rename; onto another drive everything is copied first and
 /// the original deleted after. A warning comes back when the copy is
@@ -2086,6 +2310,120 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(refs.locals[0].behind, 2);
         assert!(!refs.locals[1].head);
         assert_eq!(refs.locals[1].upstream, "refs/remotes/origin/dev");
+    }
+
+    #[test]
+    fn addresses_to_push_to_are_checked_and_named() {
+        for good in [
+            "https://gitlab.com/you/api.git",
+            "  git@codeberg.org:you/api.git ",
+            "ssh://git@git.example.com:2222/you/api",
+        ] {
+            assert_eq!(push_address(good).unwrap(), good.trim());
+        }
+        // Nothing Git would take as an option or as a command to run.
+        for bad in [
+            "",
+            "--upload-pack=calc",
+            "ext::sh -c calc",
+            "ext::calc",
+            "https://",
+            "gitlab.com/you/api",
+            "https://gitlab.com/you/a pi.git",
+        ] {
+            assert!(push_address(bad).is_err(), "{bad}");
+        }
+        assert_eq!(remote_name_for("https://gitlab.com/you/api.git"), "gitlab");
+        assert_eq!(remote_name_for("git@codeberg.org:you/api.git"), "codeberg");
+        assert_eq!(
+            remote_name_for("https://me:secret@www.bitbucket.org/a/b"),
+            "bitbucket"
+        );
+        assert_eq!(remote_name_for("https://origin.example.com/a/b"), "mirror");
+        assert_eq!(remote_name_for("file:///srv/git/api.git"), "mirror");
+        assert_eq!(
+            address_host("ssh://git@git.example.com:2222/you/api").as_deref(),
+            Some("git.example.com")
+        );
+    }
+
+    #[test]
+    fn migrating_pushes_every_branch_and_tag_and_keeps_origin() {
+        let root = std::env::temp_dir().join(format!("devassist-migrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        let target = root.join("target.git");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        git(&upstream, &["tag", "v1"]);
+        git(&upstream, &["checkout", "-q", "-b", "dev"]);
+        commit(&upstream, "dev-work");
+        git(&upstream, &["checkout", "-q", "-b", "old"]);
+        git(&upstream, &["checkout", "-q", "main"]);
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+        git(&root, &["init", "-q", "--bare", "target.git"]);
+        // main has a commit of its own; old is behind what origin has;
+        // dev exists on origin only.
+        commit(&clone, "local");
+        git(&clone, &["branch", "-q", "old", "origin/old~1"]);
+        let tip = |dir: &Path, name: &str| {
+            let output = git_command()
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--verify", "-q", name])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let address = target.display().to_string();
+
+        let done = migrate_to(&clone, &address, |_, _| {}).unwrap();
+        assert_eq!(
+            done,
+            Migrated {
+                remote: "mirror".into(),
+                branches: 3,
+                tags: 1
+            }
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/main"),
+            tip(&clone, "refs/heads/main")
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/dev"),
+            tip(&clone, "refs/remotes/origin/dev")
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/old"),
+            tip(&clone, "refs/remotes/origin/old")
+        );
+        assert_eq!(tip(&target, "refs/tags/v1"), tip(&clone, "refs/tags/v1"));
+        assert_eq!(tip(&target, "refs/heads/HEAD"), "");
+        // The checkout still follows where it came from, and knows the copy.
+        let config = fs::read_to_string(clone.join(".git").join("config")).unwrap();
+        assert!(
+            origin_url(&config).unwrap().contains("upstream"),
+            "{config}"
+        );
+        assert!(config.contains("[remote \"mirror\"]"), "{config}");
+
+        // Again, after more work: the copy follows, the remote stays one.
+        commit(&clone, "later");
+        migrate_to(&clone, &address, |_, _| {}).unwrap();
+        assert_eq!(
+            tip(&target, "refs/heads/main"),
+            tip(&clone, "refs/heads/main")
+        );
+        let config = fs::read_to_string(clone.join(".git").join("config")).unwrap();
+        assert_eq!(config.matches("[remote \"mirror\"]").count(), 1);
+
+        // Its own origin is not somewhere else.
+        let origin = upstream.display().to_string();
+        assert!(migrate_to(&clone, &origin, |_, _| {}).is_err());
+        let _ = remove_tree(&root);
     }
 
     #[test]

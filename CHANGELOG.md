@@ -13,6 +13,12 @@ What changed in each version of DevAssist. The format follows
   It moves the highlighted or ticked repositories into the folder you name,
   also onto another drive, and keeps them on the list with their group,
   automatic pull and saved pull requests.
+- **A repository can be pushed to another service.** **Push to another
+  service…** (`s`) in the Migrate submenu asks for the address of an empty
+  repository on GitLab, Codeberg or any other Git host and pushes every
+  branch and tag there, without forcing anything. The repository keeps
+  GitHub as its origin, and the address is kept as a remote named after the
+  host, so the copy can be brought up to date again.
 - **The overview has a column for pull requests.** `pulls` shows how many
   pull requests a repository has on GitHub by state, such as `○2 ✓14 ✕3`:
   open in green, merged in purple, closed without a merge in red. The line

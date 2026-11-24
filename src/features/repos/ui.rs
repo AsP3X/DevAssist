@@ -53,6 +53,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         Mode::ConfirmRemove { .. } => draw_confirm(frame, app, area),
         Mode::Path => draw_path(frame, app, area),
         Mode::Group => draw_group(frame, app, area),
+        Mode::Service => draw_service(frame, app, area),
         Mode::Menu => draw_menu(frame, app, area),
         Mode::Settings => draw_settings(frame, app, area),
         Mode::Progress => draw_progress(frame, app, area),
@@ -951,6 +952,113 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
         )),
         hint,
     );
+}
+
+/// The dialog that asks for the address of a repository on another
+/// service, to push a complete copy there.
+fn draw_service(frame: &mut Frame, app: &mut App, screen: Rect) {
+    let Some(prompt) = app.service_prompt.as_ref() else {
+        return;
+    };
+    let what = prompt.repo.clone();
+    let input = prompt.input.clone();
+    let error = prompt.error.clone();
+    let popup = centered(
+        screen,
+        80.min(screen.width.saturating_sub(2)),
+        13.min(screen.height.saturating_sub(2)),
+    );
+    let inner = dialog::window(frame, popup, " Push to another service ", Color::Cyan);
+    let text = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height.saturating_sub(1),
+    };
+    let width = text.width as usize;
+    let dim = Style::default().fg(Color::DarkGray);
+    let label = "Address  ";
+    let room = width.saturating_sub(label.len() + 1);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            fit(&what, width),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Gray)),
+            Span::styled(fit_end(&input, room), Style::default().fg(Color::White)),
+            Span::styled("▌", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(Span::styled(
+            format!(
+                "{}{}",
+                " ".repeat(label.len()),
+                fit("of the empty repository you made there", room)
+            ),
+            dim,
+        )),
+        Line::from(""),
+    ];
+    match error {
+        Some(err) => {
+            for part in wrap(&err, width).into_iter().take(3) {
+                lines.push(Line::from(Span::styled(
+                    part,
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+        None => {
+            for note in [
+                "such as https://gitlab.com/you/name.git or git@codeberg.org:you/name.git",
+                "Every branch and tag is pushed. Nothing is forced, and nothing changes",
+                "here: the repository keeps GitHub as its origin.",
+            ] {
+                lines.push(Line::from(Span::styled(fit(note, width), dim)));
+            }
+        }
+    }
+    while lines.len() + 1 < text.height as usize {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        fit("enter pushes · esc cancels", width),
+        dim,
+    )));
+    frame.render_widget(Paragraph::new(lines), text);
+    let buttons = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    draw_dialog_buttons(
+        frame,
+        app,
+        buttons,
+        &[("Push", Action::Confirm), ("Cancel", Action::Cancel)],
+    );
+}
+
+/// Breaks a sentence into lines of at most `width` characters, at spaces.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line)
+                if UnicodeWidthStr::width(line.as_str()) + 1 + UnicodeWidthStr::width(word)
+                    <= width =>
+            {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
 }
 
 /// The dialog that moves repositories into a group, or renames a group.
@@ -2448,6 +2556,31 @@ mod tests {
         assert!(screen.contains("Move to another folder…"), "{screen}");
         assert!(screen.contains("esc goes back"), "{screen}");
         assert!(!screen.contains("Open the folder"), "{screen}");
+
+        assert!(screen.contains("Push to another service…"), "{screen}");
+
+        // Its dialog asks for the address and says what will happen.
+        app.service_prompt = Some(crate::features::repos::app::ServicePrompt {
+            repo: "docs".into(),
+            path: PathBuf::from("development").join("docs"),
+            input: "https://gitlab.com/AsP3X/docs.git".into(),
+            error: None,
+        });
+        app.mode = Mode::Service;
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ Push to another service "), "{screen}");
+        assert!(
+            screen.contains("Address  https://gitlab.com/AsP3X/docs.git▌"),
+            "{screen}"
+        );
+        assert!(screen.contains("keeps GitHub as its origin"), "{screen}");
+        assert!(screen.contains("enter pushes"), "{screen}");
+        app.service_prompt.as_mut().unwrap().error = Some("That is not an address.".into());
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("That is not an address."), "{screen}");
+        assert!(!screen.contains("keeps GitHub"), "{screen}");
+        app.service_prompt = None;
+        app.mode = Mode::Menu;
 
         // Several repositories: the menu says which, and words change.
         app.menu = Some(Menu {

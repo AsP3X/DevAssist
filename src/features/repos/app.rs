@@ -64,6 +64,8 @@ pub enum Mode {
     Path,
     /// The dialog that asks for a group: where to move, or the new name.
     Group,
+    /// The dialog that asks for the address on another service.
+    Service,
     /// The actions for the chosen repositories, opened with Enter.
     Menu,
     Settings,
@@ -99,6 +101,8 @@ pub enum Queued {
     PullRequests(Vec<String>),
     /// Move these checkouts, each by row name and path, into that folder.
     Move(Vec<(String, PathBuf)>, PathBuf),
+    /// Push the checkout with this row name and path to that address.
+    Service(String, PathBuf, String),
 }
 
 impl Queued {
@@ -118,6 +122,7 @@ impl Queued {
             Queued::Import(dir) => format!("import {}", dir.display()),
             Queued::Refresh => "refresh".to_string(),
             Queued::PullRequests(folders) => named("fetch the pull requests of", folders.clone()),
+            Queued::Service(name, _, _) => format!("push {name} to another service"),
             Queued::Move(repos, _) => {
                 named("move", repos.iter().map(|(name, _)| name.clone()).collect())
             }
@@ -219,22 +224,35 @@ pub enum MenuItem {
 pub enum MigrateItem {
     /// Move the checkout to another folder on disk.
     Folder,
+    /// Push a complete copy to a repository on another service.
+    Service,
 }
 
 impl MigrateItem {
-    pub const ALL: [MigrateItem; 1] = [MigrateItem::Folder];
+    pub const ALL: [MigrateItem; 2] = [MigrateItem::Folder, MigrateItem::Service];
 
     pub fn label(self) -> &'static str {
         match self {
             MigrateItem::Folder => "Move to another folder…",
+            MigrateItem::Service => "Push to another service…",
         }
     }
 
     pub fn key(self) -> char {
         match self {
             MigrateItem::Folder => 'f',
+            MigrateItem::Service => 's',
         }
     }
+}
+
+/// The dialog that asks where on another service a repository goes.
+pub struct ServicePrompt {
+    /// The repository, by row name.
+    pub repo: String,
+    pub path: PathBuf,
+    pub input: String,
+    pub error: Option<String>,
 }
 
 impl MenuItem {
@@ -375,6 +393,8 @@ pub struct App {
     pub collapsed: Vec<String>,
     /// The open group dialog.
     pub group_prompt: Option<GroupPrompt>,
+    /// The open dialog for the address on another service.
+    pub service_prompt: Option<ServicePrompt>,
     /// The open actions menu.
     pub menu: Option<Menu>,
     pub title: String,
@@ -495,6 +515,7 @@ impl App {
             placement: settings.placement,
             collapsed: settings.collapsed,
             group_prompt: None,
+            service_prompt: None,
             menu: None,
             title: settings.title,
             custom_title: settings.custom_title,
@@ -944,6 +965,7 @@ impl App {
             Mode::ConfirmRemove { .. } => self.on_confirm_key(key),
             Mode::Path => self.on_path_key(key),
             Mode::Group => self.on_group_key(key),
+            Mode::Service => self.on_service_key(key),
             Mode::Menu => self.on_menu_key(key),
             Mode::Add => self.on_add_key(key, ctrl),
             Mode::Filter => self.on_filter_key(key),
@@ -1116,7 +1138,102 @@ impl App {
         self.close_menu();
         match item {
             MigrateItem::Folder => self.open_move(),
+            MigrateItem::Service => self.open_service(),
         }
+    }
+
+    /// Asks for the address of the repository on another service. One
+    /// repository at a time: each goes to an address of its own.
+    fn open_service(&mut self) {
+        let repos: Vec<(String, PathBuf)> = self
+            .chosen_repos()
+            .iter()
+            .map(|repo| (repo.folder.clone(), repo.path.clone()))
+            .collect();
+        match repos.as_slice() {
+            [] => self.notice("Select a repository first.", true),
+            [(repo, path)] => {
+                self.service_prompt = Some(ServicePrompt {
+                    repo: repo.clone(),
+                    path: path.clone(),
+                    input: String::new(),
+                    error: None,
+                });
+                self.mode = Mode::Service;
+            }
+            _ => self.notice(
+                "Select one repository: each needs an address of its own.",
+                true,
+            ),
+        }
+    }
+
+    fn on_service_key(&mut self, key: KeyEvent) {
+        let Some(prompt) = self.service_prompt.as_mut() else {
+            self.mode = Mode::List;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.close_service(),
+            KeyCode::Enter => self.accept_service(),
+            _ => {
+                if input::edit(&mut prompt.input, key, Alt::Types) {
+                    prompt.error = None;
+                }
+            }
+        }
+    }
+
+    fn close_service(&mut self) {
+        self.service_prompt = None;
+        self.mode = Mode::List;
+    }
+
+    /// Enter in the service dialog: pushes, when the address can be one.
+    fn accept_service(&mut self) {
+        let Some(prompt) = self.service_prompt.as_mut() else {
+            return;
+        };
+        let url = match gitops::push_address(&prompt.input) {
+            Ok(url) => url,
+            Err(err) => {
+                prompt.error = Some(err);
+                return;
+            }
+        };
+        let Some(prompt) = self.service_prompt.take() else {
+            return;
+        };
+        self.mode = Mode::List;
+        self.marked.clear();
+        self.submit(Queued::Service(prompt.repo, prompt.path, url));
+    }
+
+    /// Pushes every branch and tag of one checkout to another service, in
+    /// the progress dialog. The checkout itself stays as it is.
+    fn push_to_service(&mut self, name: String, path: PathBuf, url: String) {
+        let host = gitops::address_host(&url).unwrap_or_else(|| url.clone());
+        let job = gitprogress::job(format!("Pushing {name} to {host}"), vec![name.clone()], 0);
+        self.start_job(
+            format!("Pushing {name} to {host}…"),
+            Some(job),
+            move |tx| {
+                send(tx, JobEvent::Start(0));
+                let done = gitops::migrate_to(&path, &url, |line, progress| {
+                    send_line(tx, line, progress)
+                })?;
+                let count = |count: u32, one: &str, many: &str| match count {
+                    1 => format!("1 {one}"),
+                    count => format!("{count} {many}"),
+                };
+                Ok(format!(
+                    "Pushed {name} to {host}: {} and {}. The address is kept as the remote {}.",
+                    count(done.branches, "branch", "branches"),
+                    count(done.tags, "tag", "tags"),
+                    done.remote
+                ))
+            },
+        );
     }
 
     /// Asks which folder the chosen repositories should move to.
@@ -1879,6 +1996,12 @@ impl App {
                     prompt.error = None;
                 }
             }
+            Mode::Service => {
+                if let Some(prompt) = self.service_prompt.as_mut() {
+                    prompt.input.push_str(text.trim());
+                    prompt.error = None;
+                }
+            }
             _ => {}
         }
     }
@@ -1960,8 +2083,10 @@ impl App {
             Action::Quit => self.quit(),
             Action::Confirm if self.mode == Mode::Path => self.accept_path(),
             Action::Confirm if self.mode == Mode::Group => self.accept_group(),
+            Action::Confirm if self.mode == Mode::Service => self.accept_service(),
             Action::Cancel if self.mode == Mode::Menu => self.close_menu(),
             Action::Cancel if self.mode == Mode::Group => self.close_group(),
+            Action::Cancel if self.mode == Mode::Service => self.close_service(),
             Action::Confirm => self.confirm_remove(),
             Action::Forget => self.forget_chosen(),
             Action::Import => self.open_import(),
@@ -2968,6 +3093,7 @@ impl App {
             Queued::Refresh => self.reload_lists(false, true),
             Queued::PullRequests(folders) => self.save_pull_requests(&folders),
             Queued::Move(repos, dir) => self.move_checkouts(repos, dir),
+            Queued::Service(name, path, url) => self.push_to_service(name, path, url),
         }
     }
 
@@ -4599,6 +4725,65 @@ mod tests {
         assert!(app.mode == Mode::List);
         assert_eq!(labels(&app), ["move api"]);
         app.drop_queue();
+        let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    #[test]
+    fn the_submenu_asks_where_on_another_service_a_repository_goes() {
+        let mut app = grouped_app();
+        // Several at once have no single address to go to.
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert!(app.status.contains("one repository"), "{}", app.status);
+        assert!(app.status_error);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.marked.is_empty());
+
+        app.selected = Some("api".into());
+        app.busy = true;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Service);
+        assert_eq!(app.service_prompt.as_ref().unwrap().repo, "api");
+
+        // Something that is no address stays in the dialog with a reason.
+        for ch in "--upload-pack=x".chars() {
+            press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Service);
+        assert!(app.service_prompt.as_ref().unwrap().error.is_some());
+        assert!(app.queue.is_empty());
+        // Typing clears the reason.
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(app.service_prompt.as_ref().unwrap().error.is_none());
+
+        // A pasted address is taken, and the push waits its turn.
+        app.service_prompt.as_mut().unwrap().input.clear();
+        app.paste(" https://gitlab.com/acme/api.git\n".into());
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert!(app.service_prompt.is_none());
+        assert_eq!(labels(&app), ["push api to another service"]);
+        assert!(matches!(
+            app.queue.front(),
+            Some(Queued::Service(_, _, url)) if url == "https://gitlab.com/acme/api.git"
+        ));
+        app.drop_queue();
+
+        // Esc closes the dialog without anything.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert!(app.queue.is_empty());
         let _ = std::fs::remove_file(&app.config_path);
     }
 
