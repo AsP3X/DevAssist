@@ -193,16 +193,19 @@ pub enum MenuItem {
     Remove,
     /// Start or stop pulling the repositories on a timer.
     Watch,
+    /// Switch saving pull requests, for every repository.
+    PullRequests,
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 7] = [
+    pub const ALL: [MenuItem; 8] = [
         MenuItem::Update,
         MenuItem::Open,
         MenuItem::Github,
         MenuItem::Group,
         MenuItem::CopyPath,
         MenuItem::Watch,
+        MenuItem::PullRequests,
         MenuItem::Remove,
     ];
 
@@ -211,6 +214,7 @@ impl MenuItem {
         match (self, many) {
             (MenuItem::Update, _) => "Update",
             (MenuItem::Watch, _) => "Auto-pull on or off",
+            (MenuItem::PullRequests, _) => "Save pull requests on or off",
             (MenuItem::Open, false) => "Open the folder",
             (MenuItem::Open, true) => "Open the folders",
             (MenuItem::Github, _) => "Open on GitHub",
@@ -227,6 +231,7 @@ impl MenuItem {
         match self {
             MenuItem::Update => 'u',
             MenuItem::Watch => 'w',
+            MenuItem::PullRequests => 'p',
             MenuItem::Open => 'o',
             MenuItem::Github => 'g',
             MenuItem::Group => 'm',
@@ -1032,6 +1037,7 @@ impl App {
         match item {
             MenuItem::Update => self.update_chosen(),
             MenuItem::Watch => self.toggle_watch(),
+            MenuItem::PullRequests => self.toggle_pull_requests(),
             MenuItem::Open => self.open_selected(),
             MenuItem::Github => self.open_on_github(),
             MenuItem::Group => self.open_group_prompt(),
@@ -2070,6 +2076,25 @@ impl App {
         };
         self.mode = Mode::List;
         self.submit(Queued::Update(vec![folder]));
+    }
+
+    /// Switches saving pull requests on or off. It is one setting for every
+    /// repository, the same one the settings dialog has.
+    fn toggle_pull_requests(&mut self) {
+        self.mode = Mode::List;
+        self.pull_requests = !self.pull_requests;
+        if self.pull_requests {
+            self.notice(
+                "Pull requests are saved with the next fetch, for every repository: press r.",
+                false,
+            );
+        } else {
+            self.notice(
+                "Pull requests are no longer saved. The ones already saved stay.",
+                false,
+            );
+        }
+        self.save_config();
     }
 
     pub fn is_watched(&self, path: &Path) -> bool {
@@ -4075,7 +4100,7 @@ mod tests {
         // A click on a line runs it too.
         app.selected = Some("web".into());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.click_row("menu:6".into());
+        app.click_row("menu:7".into());
         assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
     }
 
@@ -4109,6 +4134,34 @@ mod tests {
         let visible = app.visible_installed();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].repo, "tool");
+    }
+
+    #[test]
+    fn the_menu_switches_saving_pull_requests_for_every_repository() {
+        let mut app = grouped_app();
+        assert!(!app.pull_requests);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Menu);
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+        assert!(app.pull_requests);
+        assert!(app.status.contains("press r"), "{}", app.status);
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(text.contains("pull_requests = on"));
+
+        // The settings dialog shows the same setting.
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(app.form.as_ref().unwrap().pull_requests);
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // The same line switches it off again.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(!app.pull_requests);
+        assert!(app.status.contains("no longer saved"), "{}", app.status);
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(!text.contains("pull_requests"));
+        let _ = std::fs::remove_file(&app.config_path);
     }
 
     #[test]

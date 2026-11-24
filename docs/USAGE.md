@@ -172,12 +172,13 @@ day. Which repositories are watched is remembered between starts.
 
 ## Saving pull requests
 
-Switch **Pull requests** to `on` in the settings (`c`) and every fetch also
-saves the commits of all pull requests of a repository in its clone: open,
+Switch **Pull requests** to `on` in the settings (`c`), or choose **Save pull
+requests on or off** in the actions menu, and every fetch also saves the
+commits of all pull requests of a repository in its clone: open,
 merged and closed ones, also those that come from a fork. That covers the
 fetch at start, `r`, an update and an automatic pull. It is off by default,
 because a repository with thousands of pull requests takes a while the first
-time.
+time. It is one setting for every repository, whichever way it is switched.
 
 They are kept as `refs/pull/<number>/head`, the name GitHub gives them, apart
 from your branches: no local branch is made for them and they never count as
@@ -209,6 +210,7 @@ ticked, update, remove, open and move-to-group act on all of them.
 - Move to a group
 - Copy the path
 - Auto-pull on or off
+- Save pull requests on or off, for every repository
 - Remove
 
 Choose with `↑` `↓` and `Enter`, press the letter shown on the right, or click.

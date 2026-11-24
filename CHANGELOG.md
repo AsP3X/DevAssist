@@ -6,6 +6,13 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Saving pull requests can be switched in the actions menu.** The menu on a
+  repository has a line **Save pull requests on or off**, with the key `p`.
+  It is the same setting as **Pull requests** in the settings, and applies to
+  every repository.
+
 ## [0.6.0] - 2026-11-24
 
 Watched repositories pull themselves on a timer, and pull requests can be
