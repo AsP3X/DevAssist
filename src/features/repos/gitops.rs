@@ -598,6 +598,65 @@ fn fetch_pull_requests(
     run_git(args, on_line).map_err(|err| format!("pull requests: {err}"))
 }
 
+/// Moves a checkout to `to`, a path that must be free. On the same drive
+/// that is a rename; onto another drive everything is copied first and
+/// the original deleted after. A warning comes back when the copy is
+/// complete but the original could not be deleted.
+pub fn move_checkout(from: &Path, to: &Path) -> Result<Option<String>, String> {
+    if !from.is_dir() {
+        return Err(format!("{} is not there any more", from.display()));
+    }
+    if to.exists() {
+        return Err(format!("{} is there already", to.display()));
+    }
+    if to.starts_with(from) {
+        return Err("a folder cannot be moved into itself".into());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
+    }
+    match fs::rename(from, to) {
+        Ok(()) => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {}
+        Err(err) => return Err(format!("could not move {}: {err}", from.display())),
+    }
+    if let Err(err) = copy_tree(from, to) {
+        // Leave nothing half-copied behind; the original is untouched.
+        let _ = remove_tree(to);
+        return Err(format!("could not copy to {}: {err}", to.display()));
+    }
+    Ok(remove_tree(from).err().map(|err| {
+        format!(
+            "copied, but the old folder {} could not be deleted: {err}",
+            from.display()
+        )
+    }))
+}
+
+/// Copies a folder with everything in it.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|err| format!("{}: {err}", to.display()))?;
+    let entries = fs::read_dir(from).map_err(|err| format!("{}: {err}", from.display()))?;
+    for entry in entries {
+        if process::was_cancelled() {
+            return Err("cancelled".into());
+        }
+        let entry = entry.map_err(|err| format!("{}: {err}", from.display()))?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        let kind = entry
+            .file_type()
+            .map_err(|err| format!("{}: {err}", source.display()))?;
+        if kind.is_dir() {
+            copy_tree(&source, &target)?;
+        } else {
+            fs::copy(&source, &target).map_err(|err| format!("{}: {err}", source.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// What fetching the pull requests of one checkout found.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SavedPulls {
@@ -2027,6 +2086,38 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(refs.locals[0].behind, 2);
         assert!(!refs.locals[1].head);
         assert_eq!(refs.locals[1].upstream, "refs/remotes/origin/dev");
+    }
+
+    #[test]
+    fn a_checkout_moves_to_a_free_path_and_stays_a_repository() {
+        let root = std::env::temp_dir().join(format!("devassist-move-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let old = root.join("here").join("api");
+        fs::create_dir_all(root.join("here")).unwrap();
+        git(&root.join("here"), &["init", "-q", "-b", "main", "api"]);
+        commit(&old, "one");
+        fs::create_dir_all(root.join("taken").join("api")).unwrap();
+
+        // A path that is in use, or inside the checkout, is refused.
+        let taken = move_checkout(&old, &root.join("taken").join("api")).unwrap_err();
+        assert!(taken.contains("there already"), "{taken}");
+        let inside = move_checkout(&old, &old.join("deeper").join("api")).unwrap_err();
+        assert!(inside.contains("into itself"), "{inside}");
+        assert!(old.join(".git").exists());
+
+        // The folder it goes into is made when it is not there yet.
+        let new = root.join("there").join("deeper").join("api");
+        assert_eq!(move_checkout(&old, &new), Ok(None));
+        assert!(!old.exists());
+        assert_eq!(status(&new).unwrap().branch, "main");
+
+        // Copying, as onto another drive, brings everything along.
+        let copy = root.join("copy");
+        copy_tree(&new, &copy).unwrap();
+        assert_eq!(status(&copy).unwrap().branch, "main");
+        assert!(move_checkout(&old, &copy).is_err());
+        let _ = remove_tree(&root);
     }
 
     #[test]

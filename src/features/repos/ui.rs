@@ -14,7 +14,7 @@ use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::features::repos::app::{
-    Action, App, MenuItem, Mode, Purpose, RemoteState, Row, clone_target, group_key,
+    Action, App, MenuItem, MigrateItem, Mode, Purpose, RemoteState, Row, clone_target, group_key,
 };
 use crate::features::repos::gitops::LocalRepo;
 use crate::features::repos::gitprogress::{self, split_progress};
@@ -853,10 +853,16 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
         return;
     };
     let many = menu.repos.len() > 1;
-    let picked = menu.selected;
-    let title = match menu.repos.as_slice() {
-        [one] => format!(" {one} "),
-        several => format!(" {} ", count_repos(several.len())),
+    // The Migrate submenu takes the place of the menu's lines.
+    let submenu = menu.migrate;
+    let picked = submenu.unwrap_or(menu.selected);
+    let about = match menu.repos.as_slice() {
+        [one] => one.clone(),
+        several => count_repos(several.len()),
+    };
+    let title = match submenu {
+        Some(_) => format!(" {about} · Migrate "),
+        None => format!(" {about} "),
     };
     let names = {
         let shown = menu.repos[..menu.repos.len().min(4)].join(", ");
@@ -865,7 +871,10 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
             rest => format!("{shown} and {rest} more"),
         }
     };
-    let rows = MenuItem::ALL.len() as u16;
+    let rows = match submenu {
+        Some(_) => MigrateItem::ALL.len(),
+        None => MenuItem::ALL.len(),
+    } as u16;
     let extra = u16::from(many) * 2;
     let popup = centered(
         screen,
@@ -896,11 +905,24 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
     } else {
         y += 1;
     }
-    let entries = MenuItem::ALL.map(|item| menu::Entry {
-        label: item.label(many),
-        key: item.key(),
-        warn: item == MenuItem::Remove,
-    });
+    let entries: Vec<menu::Entry> = match submenu {
+        Some(_) => MigrateItem::ALL
+            .iter()
+            .map(|item| menu::Entry {
+                label: item.label(),
+                key: item.key(),
+                warn: false,
+            })
+            .collect(),
+        None => MenuItem::ALL
+            .iter()
+            .map(|item| menu::Entry {
+                label: item.label(many),
+                key: item.key(),
+                warn: *item == MenuItem::Remove,
+            })
+            .collect(),
+    };
     // The last line of the dialog is the hint.
     let lines = Rect {
         x: inner.x,
@@ -917,7 +939,14 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Span::styled(
-            fit(" ↑ ↓ choose · enter runs · esc closes", width),
+            fit(
+                if submenu.is_some() {
+                    " ↑ ↓ choose · enter runs · esc goes back"
+                } else {
+                    " ↑ ↓ choose · enter runs · esc closes"
+                },
+                width,
+            ),
             dim,
         )),
         hint,
@@ -1073,6 +1102,28 @@ fn draw_path(frame: &mut Frame, app: &mut App, screen: Rect) {
                 None => String::new(),
             };
             (" Clone into ", what, note, "Clone", "clones")
+        }
+        Purpose::Move(repos) => {
+            let what = match repos.as_slice() {
+                [(name, _)] => name.clone(),
+                many => {
+                    let shown: Vec<&str> =
+                        many.iter().take(3).map(|(name, _)| name.as_str()).collect();
+                    match many.len().saturating_sub(3) {
+                        0 => format!("{} repositories: {}", many.len(), shown.join(", ")),
+                        rest => format!(
+                            "{} repositories: {} and {rest} more",
+                            many.len(),
+                            shown.join(", ")
+                        ),
+                    }
+                }
+            };
+            let note = match clone_target(prompt) {
+                Some(target) => format!("becomes {}", target.display()),
+                None => "each repository keeps its folder name inside".to_string(),
+            };
+            (" Move to another folder ", what, note, "Move", "moves")
         }
         Purpose::Import => (
             " Import clones you already have ",
@@ -2365,6 +2416,7 @@ mod tests {
         app.menu = Some(Menu {
             repos: vec!["docs".into()],
             selected: 1,
+            migrate: None,
         });
         app.mode = Mode::Menu;
         let screen = render(&mut app, 120, 30);
@@ -2389,10 +2441,19 @@ mod tests {
             MenuItem::ALL.len()
         );
 
+        // The submenu takes the place of the lines, and says where it is.
+        app.menu.as_mut().unwrap().migrate = Some(0);
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ docs · Migrate "), "{screen}");
+        assert!(screen.contains("Move to another folder…"), "{screen}");
+        assert!(screen.contains("esc goes back"), "{screen}");
+        assert!(!screen.contains("Open the folder"), "{screen}");
+
         // Several repositories: the menu says which, and words change.
         app.menu = Some(Menu {
             repos: vec!["api".into(), "docs".into(), "web".into()],
             selected: 0,
+            migrate: None,
         });
         let screen = render(&mut app, 120, 30);
         assert!(screen.contains("╭ 3 repositories "));

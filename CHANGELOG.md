@@ -8,6 +8,11 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
+- **A repository can be moved to another folder.** The actions menu has a
+  submenu **Migrate** (`t`) with the line **Move to another folder…** (`f`).
+  It moves the highlighted or ticked repositories into the folder you name,
+  also onto another drive, and keeps them on the list with their group,
+  automatic pull and saved pull requests.
 - **The overview has a column for pull requests.** `pulls` shows how many
   pull requests a repository has on GitHub by state, such as `○2 ✓14 ✕3`:
   open in green, merged in purple, closed without a merge in red. The line

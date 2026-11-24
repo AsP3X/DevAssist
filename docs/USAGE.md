@@ -250,9 +250,26 @@ ticked, update, remove, open and move-to-group act on all of them.
 - Copy the path
 - Auto-pull on or off
 - Fetch the pull requests
+- Migrate, which opens a submenu
 - Remove
 
 Choose with `↑` `↓` and `Enter`, press the letter shown on the right, or click.
+
+### Migrate: moving a repository to another folder
+
+**Migrate** (`t`) opens a submenu; `Esc` goes back to the menu. Its line
+**Move to another folder…** (`f`) asks for a folder and moves the highlighted
+repository, or every ticked one, into it. Each keeps its folder name, so
+`D:\code\api` moved to `E:\work` becomes `E:\work\api`. The folder is created
+when it is not there yet.
+
+The repository stays on the list with everything it had: its group, the
+automatic pull and the saved pull requests. On the same drive the move is
+instant. Onto another drive everything is copied first and the original is
+deleted only after the copy is complete, so a failure halfway leaves the
+original as it was. A move is refused when the target folder exists already.
+Close programs that have files of the repository open first: Windows does not
+move a folder that is in use.
 
 ## Groups
 

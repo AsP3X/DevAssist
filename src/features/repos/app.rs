@@ -97,6 +97,8 @@ pub enum Queued {
     Refresh,
     /// Save the pull requests of these folders now.
     PullRequests(Vec<String>),
+    /// Move these checkouts, each by row name and path, into that folder.
+    Move(Vec<(String, PathBuf)>, PathBuf),
 }
 
 impl Queued {
@@ -116,6 +118,9 @@ impl Queued {
             Queued::Import(dir) => format!("import {}", dir.display()),
             Queued::Refresh => "refresh".to_string(),
             Queued::PullRequests(folders) => named("fetch the pull requests of", folders.clone()),
+            Queued::Move(repos, _) => {
+                named("move", repos.iter().map(|(name, _)| name.clone()).collect())
+            }
         }
     }
 }
@@ -127,6 +132,8 @@ pub enum Purpose {
     Clone(Vec<RemoteRepo>),
     /// Add the clones that already sit in the folder to the overview.
     Import,
+    /// Move these checkouts, each by row name and path, into the folder.
+    Move(Vec<(String, PathBuf)>),
 }
 
 impl Purpose {
@@ -145,6 +152,11 @@ pub fn clone_target(prompt: &PathPrompt<Purpose>) -> Option<PathBuf> {
             pathprompt::resolve(&prompt.input)
                 .ok()?
                 .join(&remotes[0].name),
+        ),
+        Purpose::Move(repos) if repos.len() == 1 => Some(
+            pathprompt::resolve(&prompt.input)
+                .ok()?
+                .join(repos[0].1.file_name()?),
         ),
         _ => None,
     }
@@ -198,10 +210,35 @@ pub enum MenuItem {
     Watch,
     /// Fetch the pull requests of the repositories now.
     PullRequests,
+    /// Opens the lines that take a repository somewhere else.
+    Migrate,
+}
+
+/// One line of the Migrate submenu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MigrateItem {
+    /// Move the checkout to another folder on disk.
+    Folder,
+}
+
+impl MigrateItem {
+    pub const ALL: [MigrateItem; 1] = [MigrateItem::Folder];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MigrateItem::Folder => "Move to another folder…",
+        }
+    }
+
+    pub fn key(self) -> char {
+        match self {
+            MigrateItem::Folder => 'f',
+        }
+    }
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 8] = [
+    pub const ALL: [MenuItem; 9] = [
         MenuItem::Update,
         MenuItem::Open,
         MenuItem::Github,
@@ -209,6 +246,7 @@ impl MenuItem {
         MenuItem::CopyPath,
         MenuItem::Watch,
         MenuItem::PullRequests,
+        MenuItem::Migrate,
         MenuItem::Remove,
     ];
 
@@ -218,6 +256,7 @@ impl MenuItem {
             (MenuItem::Update, _) => "Update",
             (MenuItem::Watch, _) => "Auto-pull on or off",
             (MenuItem::PullRequests, _) => "Fetch the pull requests",
+            (MenuItem::Migrate, _) => "Migrate ▸",
             (MenuItem::Open, false) => "Open the folder",
             (MenuItem::Open, true) => "Open the folders",
             (MenuItem::Github, _) => "Open on GitHub",
@@ -235,6 +274,7 @@ impl MenuItem {
             MenuItem::Update => 'u',
             MenuItem::Watch => 'w',
             MenuItem::PullRequests => 'p',
+            MenuItem::Migrate => 't',
             MenuItem::Open => 'o',
             MenuItem::Github => 'g',
             MenuItem::Group => 'm',
@@ -248,6 +288,8 @@ impl MenuItem {
 pub struct Menu {
     pub repos: Vec<String>,
     pub selected: usize,
+    /// The Migrate submenu is open, with this line highlighted.
+    pub migrate: Option<usize>,
 }
 
 /// The dialog that moves repositories into a group or renames a group.
@@ -297,6 +339,11 @@ enum Msg {
     JobFinished(Result<String, String>),
     /// The pull requests of the checkout at this path were just saved.
     PullsSaved(PathBuf),
+    /// A checkout was moved to another folder.
+    Moved {
+        from: PathBuf,
+        to: PathBuf,
+    },
     /// GitHub said how many pull requests these repositories have.
     Pulls {
         generation: u64,
@@ -1028,7 +1075,11 @@ impl App {
             self.notice("Select a repository first.", true);
             return;
         }
-        self.menu = Some(Menu { repos, selected: 0 });
+        self.menu = Some(Menu {
+            repos,
+            selected: 0,
+            migrate: None,
+        });
         self.mode = Mode::Menu;
     }
 
@@ -1042,6 +1093,16 @@ impl App {
             self.mode = Mode::List;
             return;
         };
+        if let Some(selected) = state.migrate.as_mut() {
+            // The submenu: Esc goes back to the menu it came from.
+            let keys = MigrateItem::ALL.map(MigrateItem::key);
+            match menu::on_key(selected, key, &keys) {
+                menu::Outcome::Stay => {}
+                menu::Outcome::Close => state.migrate = None,
+                menu::Outcome::Run(index) => self.run_migrate(MigrateItem::ALL[index]),
+            }
+            return;
+        }
         let keys = MenuItem::ALL.map(MenuItem::key);
         match menu::on_key(&mut state.selected, key, &keys) {
             menu::Outcome::Stay => {}
@@ -1050,14 +1111,140 @@ impl App {
         }
     }
 
-    /// Closes the menu and does what the line says, to the repositories
-    /// that are ticked or highlighted.
+    /// Closes the menu and does what a line of the Migrate submenu says.
+    fn run_migrate(&mut self, item: MigrateItem) {
+        self.close_menu();
+        match item {
+            MigrateItem::Folder => self.open_move(),
+        }
+    }
+
+    /// Asks which folder the chosen repositories should move to.
+    fn open_move(&mut self) {
+        let repos: Vec<(String, PathBuf)> = self
+            .chosen_repos()
+            .iter()
+            .map(|repo| (repo.folder.clone(), repo.path.clone()))
+            .collect();
+        let Some((_, first)) = repos.first() else {
+            self.notice("Select a repository first.", true);
+            return;
+        };
+        // Start where the first one is now.
+        let start = first
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.clone_dir.clone());
+        self.prompt = Some(Purpose::Move(repos).prompt(&start));
+        self.mode = Mode::Path;
+    }
+
+    /// Moves the checkouts into `dir` one after another, each under the
+    /// folder name it has now, and keeps them on the list.
+    fn move_checkouts(&mut self, repos: Vec<(String, PathBuf)>, dir: PathBuf) {
+        let named = match repos.as_slice() {
+            [(name, _)] => name.clone(),
+            many => count_label(many.len()),
+        };
+        let names = repos.iter().map(|(name, _)| name.clone()).collect();
+        let job = gitprogress::job(format!("Moving {named}"), names, 0);
+        self.start_job(format!("Moving {named}…"), Some(job), move |tx| {
+            let mut moved = 0;
+            let mut stayed = 0;
+            let mut failed = Vec::new();
+            for (index, (name, from)) in repos.iter().enumerate() {
+                if process::was_cancelled() {
+                    return Err("cancelled".into());
+                }
+                send(tx, JobEvent::Start(index));
+                let Some(folder) = from.file_name() else {
+                    failed.push(name.clone());
+                    send(tx, JobEvent::Failed(index, "has no folder name".into()));
+                    continue;
+                };
+                let to = dir.join(folder);
+                if paths::same_path(from, &to) {
+                    stayed += 1;
+                    send(tx, JobEvent::Done(index, "is there already".into()));
+                    continue;
+                }
+                send_line(tx, &format!("{} → {}", from.display(), to.display()), false);
+                match gitops::move_checkout(from, &to) {
+                    Ok(warning) => {
+                        moved += 1;
+                        let _ = tx.send(Msg::Moved {
+                            from: from.clone(),
+                            to,
+                        });
+                        if let Some(warning) = &warning {
+                            send_line(tx, warning, false);
+                        }
+                        send(tx, JobEvent::Done(index, "moved".into()));
+                    }
+                    Err(err) => {
+                        failed.push(name.clone());
+                        send(tx, JobEvent::Failed(index, err));
+                    }
+                }
+            }
+            if !failed.is_empty() {
+                return Err(format!(
+                    "Moved {moved}, {} failed: {}",
+                    failed.len(),
+                    failed.join(", ")
+                ));
+            }
+            Ok(match (moved, stayed) {
+                (0, _) => format!("{named} is in {} already.", dir.display()),
+                (_, 0) => format!("Moved {named} to {}.", dir.display()),
+                _ => format!(
+                    "Moved {moved} to {}. {stayed} already there.",
+                    dir.display()
+                ),
+            })
+        });
+    }
+
+    /// A checkout is in another folder now: everything that names it by
+    /// its path follows, and the settings are saved.
+    fn on_moved(&mut self, from: &Path, to: PathBuf) {
+        for path in self.checkouts.iter_mut().chain(self.watched.iter_mut()) {
+            if paths::same_path(path, from) {
+                *path = to.clone();
+            }
+        }
+        for (path, _) in &mut self.placement {
+            if paths::same_path(path, from) {
+                *path = to.clone();
+            }
+        }
+        if let Some(pending) = self.pulls_pending.remove(from) {
+            self.pulls_pending.insert(to.clone(), pending);
+        }
+        for repo in &mut self.installed {
+            if paths::same_path(&repo.path, from) {
+                repo.path = to.clone();
+            }
+        }
+        self.save_config();
+    }
+
+    /// Does what the line says, to the repositories that are ticked or
+    /// highlighted. Every line closes the menu, except the one that opens
+    /// a submenu.
     fn run_menu(&mut self, item: MenuItem) {
+        if item == MenuItem::Migrate {
+            if let Some(menu) = self.menu.as_mut() {
+                menu.migrate = Some(0);
+            }
+            return;
+        }
         self.close_menu();
         match item {
             MenuItem::Update => self.update_chosen(),
             MenuItem::Watch => self.toggle_watch(),
             MenuItem::PullRequests => self.fetch_pull_requests_chosen(),
+            MenuItem::Migrate => {}
             MenuItem::Open => self.open_selected(),
             MenuItem::Github => self.open_on_github(),
             MenuItem::Group => self.open_group_prompt(),
@@ -1444,6 +1631,10 @@ impl App {
                 self.submit(Queued::Clone(remotes, folder));
             }
             Purpose::Import => self.submit(Queued::Import(folder)),
+            Purpose::Move(repos) => {
+                self.marked.clear();
+                self.submit(Queued::Move(repos, folder));
+            }
         }
     }
 
@@ -1710,11 +1901,18 @@ impl App {
         });
         self.last_click = Some((name.clone(), now));
         if self.mode == Mode::Menu {
-            if let Some(item) = name
+            let index = name
                 .strip_prefix("menu:")
-                .and_then(|index| index.parse::<usize>().ok())
-                .and_then(|index| MenuItem::ALL.get(index).copied())
-            {
+                .and_then(|index| index.parse::<usize>().ok());
+            let submenu = self
+                .menu
+                .as_ref()
+                .is_some_and(|menu| menu.migrate.is_some());
+            if submenu {
+                if let Some(item) = index.and_then(|index| MigrateItem::ALL.get(index).copied()) {
+                    self.run_migrate(item);
+                }
+            } else if let Some(item) = index.and_then(|index| MenuItem::ALL.get(index).copied()) {
                 self.run_menu(item);
             }
         } else if self.mode == Mode::Progress {
@@ -2769,6 +2967,7 @@ impl App {
             Queued::Import(dir) => self.import_folder(&dir),
             Queued::Refresh => self.reload_lists(false, true),
             Queued::PullRequests(folders) => self.save_pull_requests(&folders),
+            Queued::Move(repos, dir) => self.move_checkouts(repos, dir),
         }
     }
 
@@ -3156,6 +3355,7 @@ impl App {
             Msg::PullsSaved(path) => {
                 self.pulls_pending.remove(&path);
             }
+            Msg::Moved { from, to } => self.on_moved(&from, to),
             Msg::Pulls { generation, counts } => {
                 if generation == self.pulls_generation {
                     self.pulls = counts.into_iter().collect();
@@ -4256,7 +4456,7 @@ mod tests {
         // A click on a line runs it too.
         app.selected = Some("web".into());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.click_row("menu:7".into());
+        app.click_row("menu:8".into());
         assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
     }
 
@@ -4351,6 +4551,79 @@ mod tests {
         // Saving them clears it.
         app.on_msg(Msg::PullsSaved(api.path.clone()));
         assert!(!app.pending_pulls(&api).any());
+        let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    #[test]
+    fn migrate_opens_a_submenu_that_moves_to_another_folder() {
+        let mut app = grouped_app();
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        // The menu stays open, on its submenu.
+        assert!(app.mode == Mode::Menu);
+        assert_eq!(app.menu.as_ref().unwrap().migrate, Some(0));
+        // Esc goes back to the menu, not out of it.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Menu);
+        assert_eq!(app.menu.as_ref().unwrap().migrate, None);
+        // A key of the main menu does nothing in the submenu.
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(app.mode == Mode::Menu);
+
+        // Its line asks for the folder, starting where the repository is.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.mode == Mode::Path);
+        assert!(app.menu.is_none());
+        let prompt = app.prompt.as_mut().unwrap();
+        assert!(matches!(&prompt.purpose, Purpose::Move(repos) if repos[0].0 == "api"));
+        // It keeps its folder name inside the folder that is typed.
+        let dir = std::env::temp_dir();
+        prompt.input = dir.display().to_string();
+        assert_eq!(
+            clone_target(prompt).unwrap().file_name().unwrap(),
+            std::ffi::OsStr::new("api")
+        );
+        // Esc there closes the dialog; nothing was moved.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.mode == Mode::List);
+
+        // A click on the submenu's line does the same, and accepting the
+        // folder queues the move behind what is running.
+        app.busy = true;
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        app.click_row("menu:0".into());
+        assert!(app.mode == Mode::Path);
+        app.use_folder(PathBuf::from("/srv/elsewhere"));
+        assert!(app.mode == Mode::List);
+        assert_eq!(labels(&app), ["move api"]);
+        app.drop_queue();
+        let _ = std::fs::remove_file(&app.config_path);
+    }
+
+    #[test]
+    fn a_moved_checkout_keeps_its_place_on_the_list() {
+        let mut app = grouped_app();
+        let old = PathBuf::from("/srv/code/api");
+        let new = PathBuf::from("/srv/elsewhere/api");
+        app.watched = vec![old.clone()];
+        app.placement = vec![(old.clone(), "Work".into())];
+        let waiting = gitops::PendingPulls { new: 1, changed: 0 };
+        app.pulls_pending.insert(old.clone(), waiting);
+
+        app.on_msg(Msg::Moved {
+            from: old.clone(),
+            to: new.clone(),
+        });
+        assert!(app.checkouts.contains(&new));
+        assert!(!app.checkouts.contains(&old));
+        assert_eq!(app.watched, std::slice::from_ref(&new));
+        assert_eq!(app.placement, [(new.clone(), "Work".to_string())]);
+        assert_eq!(app.installed[0].path, new);
+        assert_eq!(app.pending_pulls(&app.installed[0].clone()), waiting);
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(text.contains("elsewhere"), "{text}");
         let _ = std::fs::remove_file(&app.config_path);
     }
 
