@@ -652,6 +652,11 @@ impl Repos {
         self.queue.clear();
         self.lookup_due = None;
         self.fetch_after_read = false;
+        // No catalog read was asked for, and none will be: nothing is
+        // loading. One already asked for (by `reading`) is left to land.
+        if self.remote_generation == 0 && self.remotes_state == RemoteState::Loading {
+            self.remotes_state = RemoteState::Ready;
+        }
     }
 
     /// Whether `hold_work` holds all work.
@@ -1306,7 +1311,10 @@ impl Repos {
         };
         self.toggle_mark_of(&row);
         self.selected = Some(row);
-        self.move_by(1);
+        // The overview's highlight moves, also while Add is open over it.
+        if matches!(self.mode, Mode::List | Mode::Filter | Mode::Add) {
+            list::move_by(&mut self.selected, &names, 1);
+        }
     }
 
     /// Ticks or unticks the row with this key (a repository's folder or a
@@ -1469,6 +1477,10 @@ impl Repos {
             return;
         };
         self.mode = Mode::List;
+        // Held, the dialog closes and the ticks stay.
+        if self.held() {
+            return;
+        }
         self.marked.clear();
         self.submit(Queued::Service(prompt.repo, prompt.path, url));
     }
@@ -1970,6 +1982,10 @@ impl Repos {
             return;
         };
         self.mode = Mode::List;
+        // Held, the dialog closes and the ticks and the clone folder stay.
+        if self.held() {
+            return;
+        }
         match prompt.purpose {
             Purpose::Clone(remotes) => {
                 self.add_marked.clear();
@@ -2598,6 +2614,9 @@ impl Repos {
             self.notice("Select a repository first.", true);
             return;
         }
+        if self.held() {
+            return;
+        }
         self.marked.clear();
         self.mode = Mode::List;
         self.submit(Queued::Update(folders));
@@ -2624,6 +2643,9 @@ impl Repos {
         self.mode = Mode::List;
         if folders.is_empty() {
             self.notice("Select a repository first.", true);
+            return;
+        }
+        if self.held() {
             return;
         }
         self.marked.clear();
@@ -2709,6 +2731,9 @@ impl Repos {
         self.mode = Mode::List;
         if folders.is_empty() {
             self.notice("Select a repository first.", true);
+            return;
+        }
+        if self.held() {
             return;
         }
         self.marked.clear();
@@ -3192,6 +3217,10 @@ impl Repos {
             return;
         };
         self.mode = Mode::List;
+        // Held, the dialog closes and the ticks stay.
+        if self.held() {
+            return;
+        }
         self.marked.clear();
         self.submit(Queued::Remove(folders));
     }
@@ -5024,9 +5053,39 @@ mod tests {
         app.watched = vec![path.clone()];
         app.watch_due = Instant::now();
         app.selected = Some("tool".into());
-        app.remotes_state = RemoteState::Ready;
         app.hold_work();
         (app, root)
+    }
+
+    #[test]
+    fn a_held_repos_that_asked_github_nothing_waits_for_nothing() {
+        let mut app = Repos::empty(test_settings());
+        assert!(app.waiting(), "a fresh one waits for the catalog");
+        app.hold_work();
+        assert!(!app.waiting(), "held, no catalog is coming");
+        assert!(app.remotes_state == RemoteState::Ready);
+        // A catalog read already asked for is left to land.
+        let mut app = Repos::empty(test_settings());
+        app.remote_generation = 1;
+        app.hold_work();
+        assert!(app.remotes_state == RemoteState::Loading);
+    }
+
+    #[test]
+    fn space_in_add_moves_the_overviews_highlight_not_adds() {
+        let mut app = Repos::empty(test_settings());
+        for name in ["api", "web"] {
+            app.installed.push(installed("acme", name));
+        }
+        app.remotes = vec![remote("acme", "one"), remote("acme", "two")];
+        app.remotes_state = RemoteState::Ready;
+        app.selected = Some("api".into());
+        app.open_add();
+        app.add_selected = Some("acme/one".into());
+        app.toggle_list_mark();
+        assert_eq!(app.marked, ["api"]);
+        assert_eq!(app.selected.as_deref(), Some("web"));
+        assert_eq!(app.add_selected.as_deref(), Some("acme/one"));
     }
 
     #[test]
@@ -5089,12 +5148,21 @@ mod tests {
             }),
             ("run Refresh", |app| app.run(Action::Refresh)),
         ];
+        let clone_dir = app.clone_dir.clone();
         for (what, call) in calls {
             app.notice("before", false);
+            app.marked = vec!["tool".into()];
+            app.add_marked = vec![remote("acme", "new")];
             call(&mut app);
             assert_eq!(app.status, HELD, "{what}");
             assert!(!app.status_error, "{what}");
             idle(&app, what);
+            // A refused action leaves what a person sees as it was.
+            assert_eq!(app.marked, ["tool"], "{what}: the tick is kept");
+            assert_eq!(app.add_marked.len(), 1, "{what}: Add's tick is kept");
+            assert_eq!(app.clone_dir, clone_dir, "{what}: the clone folder");
+            assert!(app.mode == Mode::List, "{what}: back on the list");
+            assert!(app.prompt.is_none() && app.service_prompt.is_none());
         }
         // The watch is as it was, and nothing pulls it, though it is due.
         assert_eq!(app.watched_count(), 1);
