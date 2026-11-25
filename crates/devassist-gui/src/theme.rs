@@ -40,7 +40,7 @@ pub const ICON: f32 = 16.0;
 /// How far the backdrop is blurred behind the panes.
 pub const BACKDROP_BLUR: f32 = 24.0;
 /// How strong the quiet text colour is, of the full text colour.
-pub const QUIET_OPACITY: f32 = 0.68;
+pub const QUIET_OPACITY: f32 = 0.74;
 /// How long the window must be left alone after a resize before its glass is redrawn at the new size.
 pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 /// How far down the window the veil keeps its top opacity, as a share of the height; below, it rises
@@ -184,12 +184,13 @@ pub fn palette(mode: Mode) -> Palette {
 pub fn veil(backdrop: &str, mode: Mode) -> [f32; 2] {
     match (backdrop, mode) {
         ("midday", Mode::Dark) => [0.45, 0.72],
-        ("dusk", Mode::Light) => [0.2, 0.62],
+        ("forest", Mode::Dark) => [0.57, 0.82],
+        ("dusk", Mode::Light) => [0.22, 0.62],
         ("dusk", Mode::Dark) => [0.2, 0.5],
-        ("night", Mode::Light) => [0.5, 0.82],
+        ("golden", Mode::Dark) | ("night", Mode::Light) => [0.5, 0.82],
         ("night", Mode::Dark) => [0.1, 0.35],
         (_, Mode::Light) => [0.0, 0.0],
-        (_, Mode::Dark) => [0.5, 0.82],
+        (_, Mode::Dark) => [0.54, 0.82],
     }
 }
 
@@ -266,25 +267,26 @@ mod tests {
         assert_eq!(light.danger_tint, Color32::from_rgba_unmultiplied(0xb3, 0x26, 0x1e, 0x1a));
         assert_eq!(dark.danger_tint, Color32::from_rgba_unmultiplied(0x6b, 0x1d, 0x18, 0xcc));
         assert_eq!(light.on_dark_glass, Color32::WHITE);
-        assert_eq!(light.quiet, Color32::from_rgba_unmultiplied(0, 0, 0, 173));
-        assert_eq!(dark.quiet, Color32::from_rgba_unmultiplied(255, 255, 255, 173));
+        assert_eq!(light.quiet, Color32::from_rgba_unmultiplied(0, 0, 0, 189));
+        assert_eq!(dark.quiet, Color32::from_rgba_unmultiplied(255, 255, 255, 189));
     }
 
     #[test]
     fn every_backdrop_has_its_veil_in_both_themes() {
         let want = [
-            ("lake", [0.0, 0.0], [0.5, 0.82]),
+            ("lake", [0.0, 0.0], [0.54, 0.82]),
             ("golden", [0.0, 0.0], [0.5, 0.82]),
             ("midday", [0.0, 0.0], [0.45, 0.72]),
-            ("forest", [0.0, 0.0], [0.5, 0.82]),
-            ("dusk", [0.2, 0.62], [0.2, 0.5]),
+            ("forest", [0.0, 0.0], [0.57, 0.82]),
+            ("dusk", [0.22, 0.62], [0.2, 0.5]),
             ("night", [0.5, 0.82], [0.1, 0.35]),
         ];
         for (key, light, dark) in want {
             assert_eq!(veil(key, Mode::Light), light, "{key}");
             assert_eq!(veil(key, Mode::Dark), dark, "{key}");
         }
-        assert_eq!(veil("moon", Mode::Light), veil("lake", Mode::Light)); // an unknown key is the default backdrop
+        assert_eq!(veil("moon", Mode::Light), veil("lake", Mode::Light));
+        assert_eq!(veil("moon", Mode::Dark), veil("lake", Mode::Dark)); // an unknown key is the default backdrop
     }
 
     #[test]
