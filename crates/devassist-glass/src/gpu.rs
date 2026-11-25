@@ -2,6 +2,7 @@
 // Imports: `crate::app::lock` is `crate::sync::lock`.
 // Renamed: `install_for_tests` is `install_own_device`, public and in every build (no longer `#[cfg(test)]`).
 // Its doc text is Quill's, written when it was test-only.
+// New code, not from Quill: `ADAPTER`, which `install_own_device` fills with its adapter's kind, and `software`.
 
 //! Runs a compiled shader on the GPU and reads the picture it drew back into memory.
 //!
@@ -53,6 +54,18 @@ struct Built {
 
 static GPU: OnceLock<Gpu> = OnceLock::new();
 
+/// The kind of adapter `install_own_device` made its device on.
+// New code, not from Quill.
+static ADAPTER: OnceLock<wgpu::DeviceType> = OnceLock::new();
+
+/// Whether the device [`install_own_device`] made runs on a software adapter (the CPU), such as WARP or lavapipe
+/// on a build server. False when it made none, and for a device a window lent with [`install`].
+// New code, not from Quill.
+#[must_use]
+pub fn software() -> bool {
+    ADAPTER.get() == Some(&wgpu::DeviceType::Cpu)
+}
+
 /// Keeps the window's device for running shaders. Called once at start-up; without it shaders aren't drawn.
 pub fn install(device: wgpu::Device, queue: wgpu::Queue) {
     let vertex = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -89,6 +102,7 @@ pub fn install_own_device() -> bool {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let Ok(adapter) = wait(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else { return };
         if let Ok((device, queue)) = wait(adapter.request_device(&wgpu::DeviceDescriptor::default())) {
+            let _ = ADAPTER.set(adapter.get_info().device_type);
             install(device, queue);
         }
     });

@@ -13,7 +13,7 @@ To compare with Quill later: diff each file against the same path at that commit
 | `src/material.rs` | `src/material.rs` | `pen_doc::color::Rgba` is `crate::color::Rgba`; `pen_doc::value::narrow` is `crate::color::narrow`. |
 | `src/raster.rs` | `src/raster.rs` | None. |
 | `src/shader.rs` | `src/shader.rs` | `pen_doc::color::Rgba` is `crate::color::Rgba`; `pen_doc::value::narrow` is `crate::color::narrow`. Removed: `load` (reads a shader file from disk by path and again when it changed), its `STORE`, the type `Loaded` only it used, and the imports only it used (`Path`, `PathBuf`, `Arc`, `Mutex`, `OnceLock`, `SystemTime`). Added: `#[expect]` on `Type::len` (`clippy::len_without_is_empty`) and on `declarations` and `uniform` (`clippy::map_unwrap_or`), lints this workspace's clippy raises on Quill's unchanged code. Built and checked with rustc 1.100.0 and clippy 0.1.100 (0ef1bc3860 2026-11-09); a clippy that doesn't raise these lints fails the build on the unfulfilled `#[expect]`s, which are then removed. |
-| `src/gpu.rs` | `src/gpu.rs` | `crate::app::lock` is `crate::sync::lock` (rustfmt moved the import below `crate::shader`). `install_for_tests` is `install_own_device`, public and no longer `#[cfg(test)]`, so the window and its `--screenshot` run can make a device of their own. |
+| `src/gpu.rs` | `src/gpu.rs` | `crate::app::lock` is `crate::sync::lock` (rustfmt moved the import below `crate::shader`). `install_for_tests` is `install_own_device`, public and no longer `#[cfg(test)]`, so the tests and measurements of both crates can make a device of their own (no code outside them calls it; the window lends its own device with `install`). New code, not from Quill: `ADAPTER`, the kind of adapter `install_own_device` made its device on, and `software()`, whether that is a software adapter (the CPU); the glass test `the_panes_match_the_kept_pictures` compares the glass pictures with the kept ones only when it is not. |
 | `src/glass.frag` | `src/render/glass.frag` | None (a header comment above `#version`, which GLSL allows). |
 | `src/color.rs` | `crates/pen-doc/src/color.rs`, `crates/pen-doc/src/value.rs` | Only `Rgba` with `BLACK`, `WHITE` and `parse`, and `narrow`. |
 | `src/sync.rs` | `src/app.rs` | Only `lock`. |
@@ -62,7 +62,9 @@ Rewritten for one pane that is a single rounded box and never turned:
 - The test `the_rim_bends_what_is_behind_it_and_the_middle_does_not` follows Quill's test of that name
   (`src/render/glass/drawn.rs`), over the photo instead of a checkerboard; `matches_golden` and `shader_runs`
   follow the functions of those names there, with this crate's environment variables (`DEVASSIST_BLESS`,
-  `DEVASSIST_REQUIRE_GPU`), at most 0.5 % of pixels more than 6 off.
+  `DEVASSIST_REQUIRE_GPU`), at most 0.5 % of pixels more than 6 off. On a software adapter (`gpu::software()`) the glass
+  pictures are drawn and checked for their size and for not being frosted, but not compared with the kept
+  ones, which were drawn on a real GPU.
 
 ## Left out, and why
 

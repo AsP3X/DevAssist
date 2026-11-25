@@ -96,6 +96,11 @@ The glass has tests of its own:
   `crates/devassist-glass/golden/`. After a change that should alter them,
   run the tests once with `DEVASSIST_BLESS=1` to keep the new pictures, and
   look at what changed before you commit.
+- The kept glass pictures were drawn on a real GPU. On a software adapter,
+  which is what wgpu takes on a machine without a GPU (WARP on the Windows
+  runners of CI), the glass pictures are still drawn and checked for their
+  size and for not being frosted, but not compared with the kept ones; the
+  test says so on its output. The frosted pictures are always compared.
 - One test in `devassist-gui` measures how long a bake of the glass takes. It
   is marked `#[ignore]`, so it only runs when asked for:
 
