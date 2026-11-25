@@ -713,7 +713,7 @@ fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
         (after.owners.clone(), after.owners_set)
     } else if after.owners != before.owners {
         (
-            merge_list(&before.owners, &after.owners, owners, same_name),
+            merge_ordered(&before.owners, &after.owners, owners, same_name),
             after.owners_set,
         )
     } else {
@@ -723,7 +723,7 @@ fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
         title: pick(&before.title, &after.title, title),
         owners,
         owners_set,
-        pinned: merge_list(&before.pinned, &after.pinned, pinned, |left, right| {
+        pinned: merge_ordered(&before.pinned, &after.pinned, pinned, |left, right| {
             left.id().eq_ignore_ascii_case(&right.id())
         }),
         protocol: pick(&before.protocol, &after.protocol, protocol),
@@ -780,6 +780,31 @@ fn merge_list<T: Clone>(
     for item in after {
         if !has(before, item) && !has(&merged, item) {
             merged.push(item.clone());
+        }
+    }
+    merged
+}
+
+/// Like `merge_list`, but a list this program only put in a new order or
+/// spelled differently is taken as it has it, with the entries the file
+/// has that this program never had appended.
+fn merge_ordered<T: Clone + PartialEq>(
+    before: &[T],
+    after: &[T],
+    file: Vec<T>,
+    same: impl Fn(&T, &T) -> bool,
+) -> Vec<T> {
+    let has = |list: &[T], item: &T| list.iter().any(|known| same(known, item));
+    let rearranged = after != before
+        && after.iter().all(|item| has(before, item))
+        && before.iter().all(|item| has(after, item));
+    if !rearranged {
+        return merge_list(before, after, file, same);
+    }
+    let mut merged = after.to_vec();
+    for item in file {
+        if !has(before, &item) && !has(after, &item) {
+            merged.push(item);
         }
     }
     merged
@@ -1913,6 +1938,61 @@ mod tests {
             read.owners,
             vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
         );
+    }
+
+    /// Accounts and pinned repositories as the settings dialog shows them.
+    fn two_accounts_and_two_pins() -> Saved {
+        Saved {
+            owners: vec!["alpha".into(), "beta".into()],
+            owners_set: true,
+            pinned: vec![acme("api"), acme("web")],
+            ..one_checkout()
+        }
+    }
+
+    fn acme(name: &str) -> RepoSpec {
+        RepoSpec {
+            owner: "acme".into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn a_new_order_or_spelling_of_the_accounts_and_pins_is_written() {
+        let path = temp_file("merge-reorder");
+        let before = two_accounts_and_two_pins();
+        save(&path, &before).unwrap();
+        let after = Saved {
+            owners: vec!["Beta".into(), "alpha".into()],
+            pinned: vec![acme("web"), acme("api")],
+            ..before.clone()
+        };
+        save_changes(&path, &before, &after).unwrap();
+        let read = read_back(&path);
+        assert_eq!(read.owners, after.owners);
+        assert_eq!(read.pinned, after.pinned);
+    }
+
+    #[test]
+    fn an_account_and_a_pin_the_other_program_added_survive_a_new_order() {
+        let path = temp_file("merge-reorder-added");
+        let before = two_accounts_and_two_pins();
+        other_program_writes(&path, &before, |theirs| {
+            theirs.owners.push("gamma".into());
+            theirs.pinned.push(acme("gui"));
+        });
+        let after = Saved {
+            owners: vec!["beta".into(), "alpha".into()],
+            pinned: vec![acme("web"), acme("api")],
+            ..before.clone()
+        };
+        save_changes(&path, &before, &after).unwrap();
+        let read = read_back(&path);
+        assert_eq!(
+            read.owners,
+            vec!["beta".to_string(), "alpha".to_string(), "gamma".to_string()]
+        );
+        assert_eq!(read.pinned, vec![acme("web"), acme("api"), acme("gui")]);
     }
 
     #[test]
