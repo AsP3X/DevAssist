@@ -6,5 +6,16 @@ rust-version.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+egui.workspace = true
+# wgpu's default features: its GPU backends and WGSL (for `gpu.rs`'s vertex shader). In Quill eframe switches
+# them on (egui-wgpu asks for `wgpu/default`); this crate has no eframe, and its tests make their own device.
+wgpu = { workspace = true, features = ["default"] }
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+image.workspace = true
+
 [lints]
 workspace = true
