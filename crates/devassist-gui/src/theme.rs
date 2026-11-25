@@ -81,6 +81,9 @@ pub const LABEL_GAP: f32 = 8.0;
 pub const WORKSPACE_MARK: f32 = 32.0;
 /// The gap between the sidebar button and the title.
 pub const BAR_GAP: f32 = 12.0;
+/// The room the top row keeps for the title, from its left edge; the title is shorter, and the window's own
+/// buttons start further right.
+pub const TITLE_ROOM: f32 = 472.0;
 /// The room at either end of the status bar before its text.
 pub const STATUS_PADDING: f32 = 16.0;
 /// How many frames a `--screenshot` run draws before it takes the picture (fonts, layout and the glass have

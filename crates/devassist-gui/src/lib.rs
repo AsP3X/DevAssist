@@ -8,3 +8,6 @@ pub mod launch;
 pub mod screenshot;
 pub mod shell;
 pub mod theme;
+
+#[cfg(test)]
+mod contrast;

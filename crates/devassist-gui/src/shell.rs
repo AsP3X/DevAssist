@@ -10,7 +10,7 @@ use crate::baker::Want;
 use crate::theme::{
     self, BAR_GAP, BAR_HEIGHT, CAPTION_BUTTON, GROUP_GAP, ICON, ICON_GAP, INSET, LABEL_GAP, LABEL_ROW, Mode, NAV_ROW, Palette, RADIUS_PANE,
     RADIUS_PANEL, RADIUS_ROW, RADIUS_SMALL, ROW_GAP, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, SIDEBAR_WIDTH, STATUS_HEIGHT, STATUS_PADDING,
-    Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WORKSPACE_MARK,
+    Surface, TEXT, TEXT_SMALL, TEXT_TITLE, TITLE_ROOM, WORKSPACE_MARK,
 };
 
 /// The sidebar's pane.
@@ -62,6 +62,20 @@ pub fn wants(size: Vec2, sidebar_shown: bool) -> Vec<Want> {
     wants
 }
 
+/// The room of the title in the top row whose sidebar button is at `toggle`: the title's text starts at its left
+/// edge, centred on its height, and lies within it.
+#[must_use]
+pub fn title_rect(toggle: Rect) -> Rect {
+    let left = toggle.right() + BAR_GAP;
+    Rect::from_min_max(pos2(left, toggle.top()), pos2(left + TITLE_ROOM, toggle.bottom()))
+}
+
+/// The rows of the sidebar's two group labels, in the sidebar pane at `sidebar`: where [`draw`] puts their text.
+#[must_use]
+pub fn label_rows(sidebar: Rect) -> Vec<Rect> {
+    placed_rows(sidebar).into_iter().filter(|(row, _)| matches!(row, Row::Label(_))).map(|(_, rect)| rect).collect()
+}
+
 /// What the shell shows that is not its layout.
 #[derive(Clone, Copy, Debug)]
 pub struct Shown<'a> {
@@ -101,13 +115,8 @@ pub fn draw(ui: &mut Ui, wants: &[Want], sidebar_shown: &mut bool, shown: Shown<
         ui.ctx().request_repaint();
     }
     draw_icon(&painter, toggle.center(), Icon::PanelLeft, palette.on_glass);
-    painter.text(
-        pos2(toggle.right() + BAR_GAP, toggle.center().y),
-        Align2::LEFT_CENTER,
-        SCREEN,
-        font(TEXT_TITLE, assets::medium_family()),
-        palette.on_glass,
-    );
+    let title = title_rect(toggle);
+    painter.text(pos2(title.left(), title.center().y), Align2::LEFT_CENTER, SCREEN, font(TEXT_TITLE, assets::medium_family()), palette.on_glass);
     if !cfg!(target_os = "macos") {
         caption_buttons(ui, Rect::from_min_max(pos2(toggle.left(), toggle.top()), pos2(panel.right(), toggle.bottom())), palette);
     }
@@ -173,39 +182,53 @@ const TOP_ROWS: [Row; 10] = [
 /// The rows at the sidebar's foot, from the top.
 const FOOT_ROWS: [(Icon, &str); 3] = [(Icon::Search, "Go to a tool"), (Icon::Settings, "Settings"), (Icon::CircleHelp, "Help")];
 
-/// Draws the sidebar's rows into the pane at `sidebar`. A click on a row does nothing yet.
-fn draw_sidebar(painter: &Painter, sidebar: Rect, palette: Palette) {
-    let (left, right) = (sidebar.left() + SIDEBAR_PADDING, sidebar.right() - SIDEBAR_PADDING);
-    let row_at = |top: f32, height: f32| Rect::from_min_max(pos2(left, top), pos2(right, top + height));
-
-    let workspace = row_at(sidebar.top() + SIDEBAR_TOP, WORKSPACE_MARK);
-    draw_workspace(painter, workspace, palette);
-
-    let mut top = workspace.bottom();
+/// A row of the sidebar's top part (not its gaps) with the rectangle it fills, in the pane at `sidebar`.
+fn placed_rows(sidebar: Rect) -> Vec<(&'static Row, Rect)> {
+    let mut placed = Vec::new();
+    let mut top = sidebar.top() + SIDEBAR_TOP + WORKSPACE_MARK;
     let mut after_nav = false;
     for row in &TOP_ROWS {
-        match *row {
+        match row {
             Row::Gap => top += GROUP_GAP,
-            Row::Label(text) => {
-                let label = row_at(top, LABEL_ROW);
-                let small = font(TEXT_SMALL, FontFamily::Proportional);
-                painter.text(pos2(label.left() + ROW_PADDING, label.center().y), Align2::LEFT_CENTER, text, small, palette.quiet);
-                top = label.bottom() + LABEL_GAP;
+            Row::Label(_) => {
+                placed.push((row, row_at(sidebar, top, LABEL_ROW)));
+                top += LABEL_ROW + LABEL_GAP;
             }
-            Row::Nav(icon, text, chosen) => {
+            Row::Nav(..) => {
                 if after_nav {
                     top += ROW_GAP;
                 }
-                draw_nav(painter, row_at(top, NAV_ROW), icon, text, chosen, palette);
+                placed.push((row, row_at(sidebar, top, NAV_ROW)));
                 top += NAV_ROW;
             }
         }
         after_nav = matches!(row, Row::Nav(..));
     }
+    placed
+}
+
+/// The row of `height` at `top` across the sidebar pane at `sidebar`, inside its padding.
+fn row_at(sidebar: Rect, top: f32, height: f32) -> Rect {
+    Rect::from_min_max(pos2(sidebar.left() + SIDEBAR_PADDING, top), pos2(sidebar.right() - SIDEBAR_PADDING, top + height))
+}
+
+/// Draws the sidebar's rows into the pane at `sidebar`. A click on a row does nothing yet.
+fn draw_sidebar(painter: &Painter, sidebar: Rect, palette: Palette) {
+    draw_workspace(painter, row_at(sidebar, sidebar.top() + SIDEBAR_TOP, WORKSPACE_MARK), palette);
+    for (row, rect) in placed_rows(sidebar) {
+        match *row {
+            Row::Label(text) => {
+                let small = font(TEXT_SMALL, FontFamily::Proportional);
+                painter.text(pos2(rect.left() + ROW_PADDING, rect.center().y), Align2::LEFT_CENTER, text, small, palette.quiet);
+            }
+            Row::Nav(icon, text, chosen) => draw_nav(painter, rect, icon, text, chosen, palette),
+            Row::Gap => {}
+        }
+    }
 
     let mut bottom = sidebar.bottom() - SIDEBAR_PADDING;
     for (icon, text) in FOOT_ROWS.into_iter().rev() {
-        draw_nav(painter, row_at(bottom - NAV_ROW, NAV_ROW), icon, text, false, palette);
+        draw_nav(painter, row_at(sidebar, bottom - NAV_ROW, NAV_ROW), icon, text, false, palette);
         bottom -= NAV_ROW + ROW_GAP;
     }
 }
