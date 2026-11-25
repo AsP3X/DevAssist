@@ -7,3 +7,4 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+ureq = "3.5"

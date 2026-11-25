@@ -18,6 +18,7 @@ pub fn set_text(text: &str) -> Result<(), String> {
 fn set_windows(text: &str) -> Result<(), String> {
     use std::ffi::c_void;
 
+    #[link(name = "user32")]
     unsafe extern "system" {
         fn OpenClipboard(hwnd: *mut c_void) -> i32;
         fn CloseClipboard() -> i32;
@@ -174,6 +175,7 @@ mod tests {
     }
 
     use std::ffi::c_void;
+    #[link(name = "user32")]
     unsafe extern "system" {
         fn OpenClipboard(hwnd: *mut c_void) -> i32;
         fn CloseClipboard() -> i32;
