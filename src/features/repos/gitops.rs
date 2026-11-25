@@ -994,6 +994,9 @@ pub struct ForksSaved {
     pub fetched: u32,
     /// Forks that could not be fetched, as `owner/name`.
     pub failed: Vec<String>,
+    /// Forks that have commits of their own, each with a folder of its
+    /// files.
+    pub folders: u32,
     /// Branches the folder holds now, of the original and of every fork.
     pub branches: u32,
     /// Pull requests it holds now.
@@ -1029,12 +1032,16 @@ fn valid_remote_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
 }
 
-/// Collects the forks of the checkout `source` in the repository `dest`,
-/// which is made when it is not there: one repository that has the
-/// original and every fork as a remote named after its owner. The
-/// branches of `bob`'s fork are `bob/<branch>`, its pull requests
+/// Collects the forks of the checkout `source` in the folder `dest`,
+/// which is made when it is not there. Its `.git` is one repository that
+/// has the original and every fork as a remote named after its owner:
+/// the branches of `bob`'s fork are `bob/<branch>`, its pull requests
 /// `refs/pull/bob/<number>/head`. Forks share nearly all their commits,
 /// so one repository holds them in the room of one.
+///
+/// Every fork that has commits the original lacks gets a folder named
+/// after its owner, `dest/bob`, with its files: a worktree of that one
+/// repository. A fork that changed nothing gets none.
 ///
 /// What `source` has already is taken from disk first. A fork that cannot
 /// be fetched is named in the result and the rest goes on. Nothing is
@@ -1087,6 +1094,7 @@ pub fn save_forks(
         created,
         ..ForksSaved::default()
     };
+    store_only(dest, &mut on_line);
 
     // The remotes it has, with their addresses.
     let known: std::collections::HashMap<String, String> =
@@ -1125,21 +1133,6 @@ pub fn save_forks(
     }
     on_line(&format!("Fetching {id}, the original."), false);
     fetch_fork(dest, owner, token, &mut on_line)?;
-    if created {
-        // Files to look at: the branch the checkout is on, as the
-        // original has it.
-        let branch = git_lines(source, &["symbolic-ref", "--short", "-q", "HEAD"])
-            .ok()
-            .and_then(|lines| lines.into_iter().next());
-        if let Some(branch) = branch {
-            let start = format!("{owner}/{branch}");
-            let out = git_lines(dest, &["checkout", "-q", "-b", &branch, "--track", &start]);
-            if let Err(err) = out {
-                on_line(&format!("No files were checked out: {err}"), false);
-            }
-        }
-    }
-
     let total = forks.len();
     for (index, (fork_owner, fork_name)) in forks.iter().enumerate() {
         if process::was_cancelled() {
@@ -1186,8 +1179,237 @@ pub fn save_forks(
     };
     saved.branches = count("refs/remotes");
     saved.pulls = count("refs/pull");
+    saved.folders = fork_folders(dest, owner, &mut on_line)?;
     Ok(saved)
 }
+
+/// The tree without any file, which every Git repository knows.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Makes the top of the fork collection hold no checkout of its own, so
+/// that it shows the folders of the forks and nothing else. A collection
+/// made by an earlier version had the files of the original there: they
+/// are taken away, unless one of them was changed.
+fn store_only(dest: &Path, on_line: &mut dyn FnMut(&str, bool)) {
+    let first = |args: &[&str]| {
+        git_lines(dest, args)
+            .ok()
+            .and_then(|lines| lines.into_iter().next())
+    };
+    if first(&["config", "--get", "core.bare"]).as_deref() == Some("true") {
+        return;
+    }
+    // A file that was only touched, as by a copy of the folder, is not
+    // a changed one: look at the contents first.
+    let _ = git_lines(dest, &["update-index", "-q", "--refresh"]);
+    if first(&["rev-parse", "-q", "--verify", "HEAD"]).is_some()
+        && let Err(err) = git_lines(dest, &["read-tree", "-m", "-u", "HEAD", EMPTY_TREE])
+    {
+        on_line(
+            &format!("The files of the original stay in the folder: {err}"),
+            false,
+        );
+        return;
+    }
+    let _ = git_lines(dest, &["config", "core.bare", "true"]);
+}
+
+/// One branch of a fork: its full name, its commit and when that was made.
+struct ForkBranch {
+    name: String,
+    commit: String,
+    date: i64,
+}
+
+/// The branch whose files a fork's folder shows, or None for a fork
+/// that has no commit the original lacks. It is the fork's default
+/// branch when that one has such commits, else the branch with the
+/// newest commit among those that do.
+fn branch_to_show<'a>(
+    branches: &'a [ForkBranch],
+    default: Option<&str>,
+    original: &std::collections::HashSet<String>,
+) -> Option<&'a ForkBranch> {
+    let mut changed = branches
+        .iter()
+        .filter(|branch| !original.contains(&branch.commit));
+    let newest = changed.clone().max_by_key(|branch| branch.date);
+    changed
+        .find(|branch| Some(branch.name.as_str()) == default)
+        .or(newest)
+}
+
+/// Gives every fork with commits of its own a folder in the collection,
+/// named after its owner, and brings the folders that are there to what
+/// was fetched. Hands back how many forks have one. A folder someone
+/// changed files in keeps them.
+fn fork_folders(
+    dest: &Path,
+    original: &str,
+    on_line: &mut dyn FnMut(&str, bool),
+) -> Result<u32, String> {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    let _ = git_lines(dest, &["worktree", "prune"]);
+    // Every commit of the original: a branch that ends on one of them
+    // has nothing of its own.
+    let pattern = format!("--remotes={original}");
+    let own: HashSet<String> = git_lines(dest, &["rev-list", &pattern])?
+        .into_iter()
+        .collect();
+    let format = "--format=%(objectname) %(committerdate:unix) %(refname) %(symref)";
+    let mut forks: BTreeMap<String, (Vec<ForkBranch>, Option<String>)> = BTreeMap::new();
+    for line in git_lines(dest, &["for-each-ref", format, "refs/remotes"])? {
+        let mut parts = line.split_whitespace();
+        let (Some(commit), Some(date), Some(name)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let Some((owner, branch)) = name
+            .strip_prefix("refs/remotes/")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            continue;
+        };
+        if owner.eq_ignore_ascii_case(original) {
+            continue;
+        }
+        let fork = forks.entry(owner.to_string()).or_default();
+        if branch == "HEAD" {
+            fork.1 = parts.next().map(str::to_string);
+        } else {
+            fork.0.push(ForkBranch {
+                name: name.to_string(),
+                commit: commit.to_string(),
+                date: date.parse().unwrap_or(0),
+            });
+        }
+    }
+    // The folders that are there, with the commit each shows.
+    let mut shown: HashMap<String, String> = HashMap::new();
+    let mut folder = None;
+    for line in git_lines(dest, &["worktree", "list", "--porcelain"]).unwrap_or_default() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            folder = Path::new(path)
+                .file_name()
+                .and_then(OsStr::to_str)
+                .map(str::to_lowercase);
+        } else if let (Some(commit), Some(folder)) = (line.strip_prefix("HEAD "), folder.take()) {
+            shown.insert(folder, commit.to_string());
+        }
+    }
+
+    let changed: Vec<(&String, &ForkBranch)> = forks
+        .iter()
+        .filter_map(|(owner, (branches, default))| {
+            Some((owner, branch_to_show(branches, default.as_deref(), &own)?))
+        })
+        .collect();
+    let total = changed.len();
+    let mut folders = 0;
+    for (index, (owner, branch)) in changed.into_iter().enumerate() {
+        if process::was_cancelled() {
+            return Err("cancelled".into());
+        }
+        let path = dest.join(owner);
+        let made = if shown.get(&owner.to_lowercase()) == Some(&branch.commit) {
+            Ok(())
+        } else if path.join(".git").exists() {
+            // A folder from before: its files follow the fork.
+            git_lines(&path, &["checkout", "-q", "--detach", &branch.name]).map(drop)
+        } else if path.exists() {
+            Err("a folder of that name is there already".to_string())
+        } else {
+            let mut cmd = git_command();
+            cmd.arg("-C")
+                .arg(dest)
+                .args(["worktree", "add", "-q", "--detach"])
+                .arg(&path)
+                .arg(&branch.name);
+            match cmd.output() {
+                Ok(output) if output.status.success() => Ok(()),
+                Ok(output) => Err(last_line(&String::from_utf8_lossy(&output.stderr))),
+                Err(err) => Err(format!("could not start git ({err})")),
+            }
+        };
+        match made {
+            Ok(()) => folders += 1,
+            Err(err) => on_line(&format!("No folder for {owner}: {err}"), false),
+        }
+        let done = index + 1;
+        on_line(
+            &format!(
+                "Making folders: {:>3}% ({done}/{total})",
+                done * 100 / total
+            ),
+            true,
+        );
+    }
+    Ok(folders)
+}
+
+/// "1:05" for 65 seconds, "1:01:05" from an hour on.
+fn clock(seconds: u64) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// Waits `seconds` and says so: one line that it pauses and why, a
+/// countdown that replaces itself every second, and a line when it goes
+/// on. Cancelling ends the wait at once, with an error.
+pub fn pause_for(
+    seconds: u64,
+    why: &str,
+    on_line: &mut dyn FnMut(&str, bool),
+) -> Result<(), String> {
+    if seconds == 0 {
+        return Ok(());
+    }
+    on_line(&format!("{why}. Paused for {}.", clock(seconds)), false);
+    for left in (1..=seconds).rev() {
+        on_line(&format!("Paused, going on in {}", clock(left)), true);
+        for _ in 0..4 {
+            if process::was_cancelled() {
+                return Err("cancelled".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    on_line("Going on.", false);
+    Ok(())
+}
+
+/// Whether a failed fetch is worth trying again after a pause: the
+/// connection timed out or broke, or the server asked for patience. A
+/// repository that is gone or refuses the sign-in is not.
+fn worth_retrying(err: &str) -> bool {
+    let err = err.to_ascii_lowercase();
+    [
+        "timed out",
+        "timeout",
+        "failed to connect",
+        "could not resolve host",
+        "connection reset",
+        "connection was reset",
+        "connection refused",
+        "rpc failed",
+        "early eof",
+        "unexpected disconnect",
+        "error: 429",
+        "error: 500",
+        "error: 502",
+        "error: 503",
+        "error: 504",
+    ]
+    .iter()
+    .any(|sign| err.contains(sign))
+}
+
+/// The pauses before a fetch that timed out is tried again.
+const FETCH_PAUSES: [u64; 3] = [10, 30, 90];
 
 /// Makes `name` a remote of the fork collection, or gives it the address
 /// it has now. A new remote also fetches its pull requests, kept under
@@ -1218,17 +1440,33 @@ fn set_fork_remote(
 }
 
 /// Fetches the branches and pull requests of one remote of the fork
-/// collection.
+/// collection. A fetch that times out pauses and is tried again, three
+/// times at most; what it had brought by then is kept.
 fn fetch_fork(
     dest: &Path,
     name: &str,
     token: Option<&str>,
-    on_line: impl FnMut(&str, bool),
+    mut on_line: impl FnMut(&str, bool),
 ) -> Result<(), String> {
-    let mut args = auth_args(token);
-    args.extend([OsString::from("-C"), dest.as_os_str().to_os_string()]);
-    args.extend(["fetch", "--no-prune", "--recurse-submodules=no", "--", name].map(OsString::from));
-    run_git(args, on_line)
+    let mut tries = 0;
+    loop {
+        let mut args = auth_args(token);
+        args.extend([OsString::from("-C"), dest.as_os_str().to_os_string()]);
+        args.extend(
+            ["fetch", "--no-prune", "--recurse-submodules=no", "--", name].map(OsString::from),
+        );
+        match run_git(args, &mut on_line) {
+            Err(err)
+                if tries < FETCH_PAUSES.len()
+                    && worth_retrying(&err)
+                    && !process::was_cancelled() =>
+            {
+                tries += 1;
+                pause_for(FETCH_PAUSES[tries - 1], "The fetch timed out", &mut on_line)?;
+            }
+            done => return done,
+        }
+    }
 }
 
 /// What an update changed in one checkout.
@@ -2782,6 +3020,75 @@ refs/remotes/fork/dev\tiii\t\t
     }
 
     #[test]
+    fn a_forks_folder_shows_the_branch_that_has_its_work() {
+        let branch = |name: &str, commit: &str, date: i64| ForkBranch {
+            name: format!("refs/remotes/bob/{name}"),
+            commit: commit.to_string(),
+            date,
+        };
+        let original: std::collections::HashSet<String> =
+            ["a", "b"].iter().map(|id| (*id).to_string()).collect();
+        let show = |branches: &[ForkBranch], default: Option<&str>| {
+            branch_to_show(branches, default, &original).map(|branch| branch.name.clone())
+        };
+        let main = Some("refs/remotes/bob/main");
+        // Nothing of its own, even on an older commit of the original.
+        assert_eq!(
+            show(&[branch("main", "b", 5), branch("old", "a", 1)], main),
+            None
+        );
+        // Its default branch when that has work of its own.
+        let both = [branch("main", "x", 5), branch("fix", "y", 9)];
+        assert_eq!(show(&both, main).as_deref(), main);
+        // Else the newest branch that has.
+        let side = [
+            branch("main", "b", 5),
+            branch("fix", "y", 7),
+            branch("try", "z", 9),
+        ];
+        assert_eq!(show(&side, main).as_deref(), Some("refs/remotes/bob/try"));
+        assert_eq!(show(&side, None).as_deref(), Some("refs/remotes/bob/try"));
+    }
+
+    #[test]
+    fn a_pause_counts_down_and_only_a_timeout_is_tried_again() {
+        assert_eq!(clock(65), "1:05");
+        assert_eq!(clock(9), "0:09");
+        assert_eq!(clock(3665), "1:01:05");
+        let mut lines = Vec::new();
+        let mut on_line = |line: &str, progress: bool| lines.push((line.to_string(), progress));
+        assert_eq!(pause_for(0, "Nothing", &mut on_line), Ok(()));
+        assert_eq!(
+            pause_for(1, "GitHub's limit is reached", &mut on_line),
+            Ok(())
+        );
+        let said: Vec<(&str, bool)> = lines.iter().map(|(line, p)| (line.as_str(), *p)).collect();
+        assert_eq!(
+            said,
+            [
+                ("GitHub's limit is reached. Paused for 0:01.", false),
+                ("Paused, going on in 0:01", true),
+                ("Going on.", false),
+            ]
+        );
+        for again in [
+            "fatal: unable to access 'https://github.com/a/b.git/': Failed to connect to github.com port 443 after 21050 ms: Timed out",
+            "fatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 429",
+            "error: RPC failed; curl 56 Recv failure: Connection was reset",
+            "ssh: connect to host github.com port 22: Connection timed out",
+        ] {
+            assert!(worth_retrying(again), "{again}");
+        }
+        for stays in [
+            "fatal: repository 'https://github.com/a/b.git/' not found",
+            "fatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 403",
+            "fatal: Authentication failed for 'https://github.com/a/b.git/'",
+        ] {
+            assert!(!worth_retrying(stays), "{stays}");
+        }
+    }
+
+    #[test]
     fn the_forks_of_a_checkout_are_collected_in_one_repository_beside_it() {
         let root = std::env::temp_dir().join(format!("devassist-forks-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -2831,10 +3138,15 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(tip(&dest, "refs/pull/ada/7/head"), tip(&ada, "main"));
         assert_eq!(tip(&dest, "refs/pull/bob/1/head"), tip(&bob, "feature"));
         assert_eq!(tip(&dest, "refs/tags/v1"), tip(&ada, "v1"));
-        // The files of the original are there to look at.
-        assert_eq!(status(&dest).unwrap().branch, "main");
-        assert!(dest.join("one").exists());
         assert!(lines.contains(&"Fetching forks: 100% (4/4)".to_string()));
+        // The fork that changed something has a folder with its files.
+        // The one that did not has none, and neither has the original.
+        assert_eq!(saved.folders, 1, "{lines:?}");
+        assert!(dest.join("bob").join("bobs").exists());
+        assert_eq!(tip(&dest.join("bob"), "HEAD"), tip(&bob, "feature"));
+        assert!(!dest.join("eve").exists());
+        assert!(!dest.join("ada").exists());
+        assert!(!dest.join("one").exists());
 
         // Again: what is new comes in, nothing is made twice.
         commit(&bob, "more");
@@ -2851,6 +3163,28 @@ refs/remotes/fork/dev\tiii\t\t
         assert!(!again.created);
         assert_eq!((again.fetched, again.branches), (2, 4));
         assert_eq!(tip(&dest, "refs/remotes/bob/feature"), tip(&bob, "feature"));
+        // The folder follows its fork.
+        assert_eq!(again.folders, 1);
+        assert!(dest.join("bob").join("more").exists());
+
+        // A collection of the first kind had the files of the original at
+        // the top: they go, the forks stay.
+        git(&dest, &["config", "core.bare", "false"]);
+        git(&dest, &["checkout", "-q", "-f", "-B", "main", "ada/main"]);
+        assert!(dest.join("one").exists());
+        let moved = save_forks(
+            &api,
+            &dest,
+            &original,
+            &forks[..2],
+            &url_of,
+            None,
+            |_, _| {},
+        );
+        assert_eq!(moved.unwrap().folders, 1);
+        assert!(!dest.join("one").exists());
+        assert!(dest.join("bob").join("more").exists());
+        assert!(dest.join(".git").is_dir());
         let config = fs::read_to_string(dest.join(".git").join("config")).unwrap();
         assert_eq!(config.matches("[remote \"bob\"]").count(), 1, "{config}");
 

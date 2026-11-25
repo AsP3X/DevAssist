@@ -246,11 +246,19 @@ and fetches them all into a folder beside the checkout: its name with `-fork`
 added. The forks of `D:\code\api` go into `D:\code\api-fork`. With several
 repositories ticked, each gets a folder of its own.
 
-That folder is one Git repository, not one clone per fork. Forks share nearly
-all their commits with the original, so they are stored once, and a
-repository with hundreds of forks stays about as large as one clone. The
-original and every fork are remotes, each named after the account it belongs
-to:
+Every fork that changed something gets a folder of its own in there, named
+after the account it belongs to: `D:\code\api-fork\bob` holds the files of
+`bob`'s fork. A fork counts as changed when one of its branches has commits
+the original does not have. Most forks never do, and get no folder: their
+files would be the original's. The folder shows the fork's default branch
+when the changes are there, and otherwise the branch with its newest commit
+among those that have changes.
+
+Behind the folders is one Git repository, in `api-fork\.git`, not one clone
+per fork. Forks share nearly all their commits with the original, so they are
+stored once, and hundreds of forks take about the room of one clone plus the
+files of each folder. The original and every fork, changed or not, are
+remotes of that repository, each named after its account:
 
 | What | Where it is |
 | --- | --- |
@@ -258,10 +266,11 @@ to:
 | The pull requests of `bob`'s fork | `refs/pull/bob/<number>/head` |
 | The branches and pull requests of the original, owned by `ada` | `ada/main`, `refs/pull/ada/<number>/head` |
 
-The files in the folder are the original's, on the branch your checkout is
-on. To look at what a fork did:
+A fork's folder is a Git worktree, so Git works in it as in any checkout. To
+look at more than its files:
 
 ```
+cd api-fork\bob
 git branch -r --list "bob/*"
 git log ada/main..bob/feature
 git switch --detach bob/feature
@@ -272,13 +281,25 @@ added is downloaded. The progress dialog counts the forks. A fork that cannot
 be fetched, because it is private or was deleted, is named there and the rest
 goes on.
 
-Choose the line again later to bring in new forks and new commits. Nothing is
-removed: a branch or a fork that disappears from GitHub stays in the folder.
+Choose the line again later to bring in new forks and new commits. The
+folders follow their forks, and a fork that has changes by then gets its
+folder. Files you changed in a folder are kept. Nothing is removed: a branch
+or a fork that disappears from GitHub stays. A `-fork` folder from before
+this layout, which had the original's files at the top, is brought over the
+same way: those files go, unless you changed one, and the forks' folders
+appear.
 The folder is not put on the overview, and a folder of that name that is
 something else is left alone. Only commits are saved: titles and comments of
 pull requests are not. GitHub lists at most 10,000 forks of one repository
-here, and without a sign-in it answers only 60 requests an hour, which is
-enough for about 6,000 forks.
+here.
+
+A limit or a timeout does not end the run. Without a sign-in GitHub answers
+only 60 requests an hour, enough to list about 6,000 forks. When that limit
+is reached, the run pauses until GitHub resets it, at most an hour later, and
+then goes on where it was. When GitHub does not answer, or the fetch of a
+fork times out, it pauses and tries again, three times with longer pauses.
+The progress dialog says why it pauses and counts down to when it goes on.
+`Esc` cancels during a pause too.
 
 ## Selecting several
 

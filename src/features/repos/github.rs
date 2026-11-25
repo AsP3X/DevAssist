@@ -97,7 +97,17 @@ struct RawResponse {
 }
 
 enum GhError {
-    Status { code: u16, message: String },
+    Status {
+        code: u16,
+        message: String,
+    },
+    /// GitHub answers no more requests for now. `wait` is how many
+    /// seconds it asked to be left alone, where it said so.
+    Limited {
+        wait: Option<u64>,
+    },
+    /// No answer came: no connection, or the request timed out.
+    Unreachable(String),
     Other(String),
 }
 
@@ -105,7 +115,11 @@ impl fmt::Display for GhError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Status { code, message } => write!(f, "GitHub HTTP {code}: {message}"),
-            Self::Other(message) => write!(f, "GitHub: {message}"),
+            Self::Limited { .. } => write!(
+                f,
+                "GitHub: rate limit reached. Set GH_TOKEN or run gh auth login"
+            ),
+            Self::Unreachable(message) | Self::Other(message) => write!(f, "GitHub: {message}"),
         }
     }
 }
@@ -640,14 +654,18 @@ pub fn parse_fork_list(body: &str) -> Result<Vec<(Fork, u32)>, String> {
         .collect())
 }
 
-/// Every fork of a repository, and the forks of those forks. `on_found`
+/// Every fork of a repository, and the forks of those forks. `on_line`
 /// hears how many are known so far. A fork whose own forks cannot be
 /// listed is kept, and the list says that it is not complete.
+///
+/// A long list is not lost to a limit or a timeout: when GitHub's limit
+/// is reached, or it does not answer, the listing pauses and then goes
+/// on with the page it was at. `on_line` hears about the pause.
 pub fn fetch_forks(
     owner: &str,
     name: &str,
     token: Option<&str>,
-    mut on_found: impl FnMut(usize),
+    mut on_line: impl FnMut(&str, bool),
 ) -> Result<Forks, String> {
     let mut found = Forks::default();
     let mut seen = std::collections::HashSet::new();
@@ -669,7 +687,7 @@ pub fn fetch_forks(
                 ));
                 break;
             }
-            let page = gh_get(&next, token)
+            let page = gh_get_patiently(&next, token, &mut on_line)
                 .map_err(|err| {
                     if err.not_found() {
                         format!("repository {owner}/{name} was not found")
@@ -697,7 +715,7 @@ pub fn fetch_forks(
                 }
                 found.forks.push(fork);
             }
-            on_found(found.forks.len());
+            on_line(&format!("Listing forks: {}", found.forks.len()), true);
             url = link.as_deref().and_then(next_link);
         }
     }
@@ -728,7 +746,7 @@ fn gh_get(url: &str, token: Option<&str>) -> Result<RawResponse, GhError> {
         ],
         token,
     )
-    .map_err(GhError::Other)?;
+    .map_err(GhError::Unreachable)?;
     let status = response.status();
     let header = |name: &str| {
         response
@@ -739,21 +757,67 @@ fn gh_get(url: &str, token: Option<&str>) -> Result<RawResponse, GhError> {
     };
     let link = header("link");
     let remaining = header("x-ratelimit-remaining");
+    let retry_after = header("retry-after");
+    let reset = header("x-ratelimit-reset");
     let body = response.body_mut().read_to_string();
     if status.is_success() {
         let body = body.map_err(|err| GhError::Other(err.to_string()))?;
         return Ok(RawResponse { body, link });
     }
     let code = status.as_u16();
-    if matches!(code, 403 | 429) && remaining.as_deref() == Some("0") {
-        return Err(GhError::Other(
-            "rate limit reached. Set GH_TOKEN or run gh auth login".into(),
-        ));
+    if matches!(code, 403 | 429) && (remaining.as_deref() == Some("0") || retry_after.is_some()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        return Err(GhError::Limited {
+            wait: limit_wait(retry_after.as_deref(), reset.as_deref(), now),
+        });
     }
     Err(GhError::Status {
         code,
         message: github_message(&body.unwrap_or_default()),
     })
+}
+
+/// How many seconds GitHub wants to be left alone: what `Retry-After`
+/// says, else the time until the limit is reset, which the
+/// `X-RateLimit-Reset` header gives as seconds since 1970.
+fn limit_wait(retry_after: Option<&str>, reset: Option<&str>, now: u64) -> Option<u64> {
+    let number = |text: Option<&str>| text.and_then(|text| text.trim().parse::<u64>().ok());
+    number(retry_after).or_else(|| number(reset).map(|reset| reset.saturating_sub(now)))
+}
+
+/// The pauses before a request that got no answer is tried again.
+const RETRY_PAUSES: [u64; 3] = [5, 20, 60];
+
+/// The longest single wait for a limit: GitHub resets it every hour.
+const LONGEST_WAIT: u64 = 3660;
+
+/// A GET that waits instead of giving up. When GitHub's limit is reached
+/// it pauses until the limit is reset and asks again, however often that
+/// takes; when no answer comes it pauses and tries three more times.
+/// `on_line` hears about every pause, and cancelling ends one.
+fn gh_get_patiently(
+    url: &str,
+    token: Option<&str>,
+    on_line: &mut dyn FnMut(&str, bool),
+) -> Result<RawResponse, GhError> {
+    let mut tries = 0;
+    loop {
+        let (why, wait) = match gh_get(url, token) {
+            Err(GhError::Limited { wait }) => (
+                "GitHub's limit is reached",
+                // A little longer than asked, so the clocks need not agree.
+                wait.unwrap_or(60).min(LONGEST_WAIT) + 2,
+            ),
+            Err(GhError::Unreachable(_)) if tries < RETRY_PAUSES.len() => {
+                tries += 1;
+                ("GitHub did not answer", RETRY_PAUSES[tries - 1])
+            }
+            other => return other,
+        };
+        gitops::pause_for(wait, why, on_line).map_err(GhError::Other)?;
+    }
 }
 
 fn github_message(body: &str) -> String {
@@ -1002,6 +1066,61 @@ mod tests {
         assert_eq!(
             parse_fork_list(r#"{"message": "Not Found"}"#).unwrap_err(),
             "Not Found"
+        );
+    }
+
+    #[test]
+    fn a_reached_limit_says_how_long_to_wait() {
+        // Retry-After counts seconds; the reset is a time of day.
+        assert_eq!(limit_wait(Some("30"), Some("5000"), 1000), Some(30));
+        assert_eq!(limit_wait(None, Some("1600"), 1000), Some(600));
+        // A reset that has passed already means: ask again now.
+        assert_eq!(limit_wait(None, Some("900"), 1000), Some(0));
+        assert_eq!(limit_wait(None, None, 1000), None);
+        assert_eq!(limit_wait(Some("soon"), None, 1000), None);
+        // It reads as before where nothing waits for it.
+        let limited = GhError::Limited { wait: Some(5) }.to_string();
+        assert!(limited.contains("rate limit reached"), "{limited}");
+    }
+
+    #[test]
+    fn a_request_pauses_at_the_limit_and_then_goes_on() {
+        use std::io::{Read, Write};
+        // A server that refuses the first request for the limit and
+        // answers the second.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/forks", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let replies = [
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n[]",
+            ];
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut seen = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let size = stream.read(&mut chunk).unwrap();
+                    if size == 0 {
+                        break;
+                    }
+                    seen.extend_from_slice(&chunk[..size]);
+                }
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let mut lines = Vec::new();
+        let mut on_line = |line: &str, progress: bool| {
+            if !progress {
+                lines.push(line.to_string());
+            }
+        };
+        let answer = gh_get_patiently(&url, None, &mut on_line);
+        server.join().unwrap();
+        assert_eq!(answer.ok().map(|answer| answer.body).as_deref(), Some("[]"));
+        assert_eq!(
+            lines,
+            ["GitHub's limit is reached. Paused for 0:02.", "Going on."]
         );
     }
 

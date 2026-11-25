@@ -10,11 +10,15 @@ What changed in each version of DevAssist. The format follows
 
 - **The forks of a repository can be cloned.** **Clone the forks** (`f`) in
   the actions menu fetches every fork of a repository on GitHub, and the forks
-  of those, into a folder beside the checkout: `api-fork` for `api`. It is one
-  repository with each fork as a remote named after its owner, so the shared
-  history is stored once. Every fork comes with all its branches, as
-  `bob/<branch>`, and its pull requests, as `refs/pull/bob/<number>/head`.
-  Choosing it again brings in new forks and commits.
+  of those, into a folder beside the checkout: `api-fork` for `api`. Every
+  fork that has commits of its own gets a folder with its files in there,
+  named after its owner, such as `api-fork\bob`. Behind them is one
+  repository with each fork as a remote, so the shared history is stored
+  once. Every fork comes with all its branches, as `bob/<branch>`, and its
+  pull requests, as `refs/pull/bob/<number>/head`. Choosing it again brings
+  in new forks and commits. When GitHub's request limit is reached or a fetch
+  times out, the run pauses, counts down in the progress dialog and goes on
+  by itself.
 - **The overview shows where each repository is on disk.** A `path` column
   holds the folder of the checkout, in full where the window has the room:
   the other columns are now only as wide as their longest entry. A path that

@@ -2584,8 +2584,11 @@ impl App {
                         fetched += saved.fetched;
                         missed += saved.failed.len();
                         let note = match saved.failed.len() {
-                            0 => format!("{} forks", saved.fetched),
-                            count => format!("{} forks, {count} not fetched", saved.fetched),
+                            0 => format!("{} forks, {} changed", saved.fetched, saved.folders),
+                            count => format!(
+                                "{} forks, {} changed, {count} not fetched",
+                                saved.fetched, saved.folders
+                            ),
                         };
                         last = Some((dest, saved));
                         send(tx, JobEvent::Done(index, note));
@@ -2613,9 +2616,10 @@ impl App {
             Ok(match (&last, work.len()) {
                 (None, _) => format!("{named} has no forks."),
                 (Some((dest, saved)), 1) => format!(
-                    "Forks of {named}: {} in {}, with {} branches and {} pull requests.{missed}",
+                    "Forks of {named}: {} in {}, {} of them changed and with a folder. {} branches, {} pull requests.{missed}",
                     saved.fetched,
                     dest.display(),
+                    saved.folders,
                     saved.branches,
                     saved.pulls
                 ),
@@ -3667,8 +3671,8 @@ fn forks_of(
         &format!("Asking GitHub for the forks of {owner}/{name}."),
         false,
     );
-    let listed = github::fetch_forks(owner, name, token.as_deref(), |count| {
-        send_line(tx, &format!("Listing forks: {count}"), true)
+    let listed = github::fetch_forks(owner, name, token.as_deref(), |line, progress| {
+        send_line(tx, line, progress)
     })?;
     if let Some(warning) = &listed.warning {
         send_line(tx, &format!("The list is not complete: {warning}."), false);
@@ -5014,7 +5018,10 @@ mod tests {
         assert!(saved.fetched > 1, "{saved:?}");
         assert!(saved.branches > saved.fetched, "{saved:?}");
         assert!(saved.pulls > 0, "{saved:?}");
-        assert!(gitops::status(&dest).is_ok());
+        assert!(saved.folders > 0, "{saved:?}");
+        let folders = std::fs::read_dir(&dest).unwrap().count();
+        // The folders of the changed forks, and the repository itself.
+        assert_eq!(folders, saved.folders as usize + 1);
         let _ = gitops::remove_checkout(&dest);
         let _ = gitops::remove_checkout(&path);
         let _ = std::fs::remove_dir_all(&root);
