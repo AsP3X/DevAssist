@@ -12,7 +12,7 @@ repository = "https://github.com/AsP3X/DevAssist"
 [package]
 name = "devassist"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
 description = "Terminal app that keeps your local GitHub clones in one overview and manages Docker containers, with keyboard or mouse"
 license-file.workspace = true
 repository.workspace = true
@@ -20,7 +20,7 @@ homepage = "https://github.com/AsP3X/DevAssist"
 readme = "README.md"
 keywords = ["git", "github", "tui", "repositories", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-rust-version = "1.88"
+rust-version.workspace = true
 publish = false
 
 [dependencies]
