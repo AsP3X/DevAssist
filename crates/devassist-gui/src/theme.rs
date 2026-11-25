@@ -167,6 +167,38 @@ pub const SELECTED_OPACITY_LIGHT: f32 = 0.14;
 /// How strong the fill of a selected row is in the dark mode, of the accent colour.
 pub const SELECTED_OPACITY_DARK: f32 = 0.32;
 
+/// The width of the lines under the table's rows, of the rule's ticks and of its zero line (`LINE`'s
+/// `strokeWidth: { bottom: 1 }`, the ticks' `size: 1` and the origin's `width: 1` in `v5-app.mjs`).
+pub const HAIRLINE: f32 = 1.0;
+/// The size of a small icon: the watched eye, the sort arrow and the pull request states (`icon(…, 14)` in
+/// `reposTable` and `pullCell`).
+pub const ICON_SMALL: f32 = 14.0;
+/// The size of the mark in a ticked checkbox (`icon("check", WHITE, 12)` in `checkbox`).
+pub const CHECK_MARK: f32 = 12.0;
+/// The gap between a repository's name and its eye (the `Name` row's `gap: 8` in `reposTable`).
+pub const NAME_ICON_GAP: f32 = 8.0;
+/// The gap between an icon and its text in a cell: the branch, the sort arrow, a failure (`gap: 6` in
+/// `reposTable` and `origin`).
+pub const CELL_ICON_GAP: f32 = 6.0;
+/// The gap between a pull request state's icon and its number (`piece`'s `gap: 4` in `pullCell`).
+pub const PULL_ICON_GAP: f32 = 4.0;
+/// The gap between the parts of the pull requests cell (`gap: 8` in `pullCell`).
+pub const PULL_GAP: f32 = 8.0;
+/// The gap between the rule's zero line and the head's words "Behind" (ending before it) and "Ahead" (starting
+/// after it): the legend's `fixed("Behind", ZERO - 8, …)` and `gap: 17` (8, the line, 8) in `reposTable`.
+pub const RULE_LEGEND_GAP: f32 = 8.0;
+/// The gap that breaks a bar past the rule's scale, near its outer end (the fork table's "Ahead, past the
+/// scale", from 141 to 147, in `forward`).
+pub const RULE_BREAK_GAP: f32 = 6.0;
+/// The length of a broken bar's outer piece past the gap (the fork table's 14 in `forward`).
+pub const RULE_BREAK_END: f32 = 14.0;
+/// The height of a progress bar; its ends are round (`bar`'s `height: 6`, `cornerRadius: 3`).
+pub const PROGRESS_HEIGHT: f32 = 6.0;
+/// The least length of a progress bar's filled part (`Math.max(6, …)` in `bar`).
+pub const PROGRESS_LEAST: f32 = 6.0;
+/// How strong a progress bar's track is, of the text colour (`fill: soft(0.12)` in `bar`).
+pub const PROGRESS_TRACK_OPACITY: f32 = 0.12;
+
 /// The value of [`RULE_WIDTH`].
 #[expect(clippy::cast_precision_loss, reason = "RULE_HALF is a few commits, far below what an f32 holds exactly")]
 const fn rule_width() -> f32 {
@@ -534,6 +566,19 @@ mod tests {
             ("SELECTED_OPACITY_LIGHT", SELECTED_OPACITY_LIGHT, 0.14),
             ("SELECTED_OPACITY_DARK", SELECTED_OPACITY_DARK, 0.32),
             ("GROUP_ROW_GAP", GROUP_ROW_GAP, 8.0),
+            ("HAIRLINE", HAIRLINE, 1.0),
+            ("ICON_SMALL", ICON_SMALL, 14.0),
+            ("CHECK_MARK", CHECK_MARK, 12.0),
+            ("NAME_ICON_GAP", NAME_ICON_GAP, 8.0),
+            ("CELL_ICON_GAP", CELL_ICON_GAP, 6.0),
+            ("PULL_ICON_GAP", PULL_ICON_GAP, 4.0),
+            ("PULL_GAP", PULL_GAP, 8.0),
+            ("RULE_LEGEND_GAP", RULE_LEGEND_GAP, 8.0),
+            ("RULE_BREAK_GAP", RULE_BREAK_GAP, 6.0),
+            ("RULE_BREAK_END", RULE_BREAK_END, 14.0),
+            ("PROGRESS_HEIGHT", PROGRESS_HEIGHT, 6.0),
+            ("PROGRESS_LEAST", PROGRESS_LEAST, 6.0),
+            ("PROGRESS_TRACK_OPACITY", PROGRESS_TRACK_OPACITY, 0.12),
         ];
         for (constant, got, expected) in want {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");

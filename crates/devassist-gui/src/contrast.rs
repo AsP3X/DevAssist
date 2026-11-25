@@ -18,7 +18,8 @@ use devassist_glass::raster::{self, Bitmap, Pixel};
 use egui::epaint::{Mesh, Shape, TessellationOptions, Tessellator};
 use egui::{Color32, Pos2, Rect, TextureId, pos2, vec2};
 
-use crate::baker::{Scene, Sheet, SheetPicture, frosted_pane_picture, pane_picture, sheet_picture, wallpaper};
+use crate::baker::{Scene, Sheet, SheetPicture, frosted_pane_picture, pane_picture, sheet_picture};
+use crate::picture::{over, wallpaper_window};
 use crate::theme::{
     self, Mode, PANEL_TEXT_INSET, RADIUS_PANEL, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT_SMALL, TEXT_TITLE, WINDOW,
 };
@@ -103,12 +104,6 @@ fn ratio(a: f64, b: f64) -> f64 {
     (high + 0.05) / (low + 0.05)
 }
 
-/// `over` (premultiplied) painted on `under`.
-fn over(under: Pixel, over: Pixel) -> Pixel {
-    let keep = 1.0 - over[3];
-    [0, 1, 2, 3].map(|i| over[i] + under[i] * keep)
-}
-
 /// The frosted panel at `panel` in a window of `w` by `h` points at one pixel per point, painted as the window
 /// paints it: the shapes [`frost::paint`] adds, tessellated by egui and filled from `sheet` read between its
 /// pixels, as the GPU's linear sampler reads the texture. A picture of the whole window, clear outside the panel.
@@ -130,23 +125,11 @@ fn painted_panel(sheet: &SheetPicture, panel: Rect, w: usize, h: usize) -> Bitma
 
 /// A window of `WINDOW` points as pixels: the wallpaper scaled up with bilinear sampling, the shell's glass panes
 /// and its frosted panel over it.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    reason = "pixel places on a 1440 by 900 window, far inside every range"
-)]
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixel places on a 1440 by 900 window, far inside every range")]
 fn window(backdrop: &str, mode: Mode, rendering: Rendering) -> Window {
     let scene = Scene { size: WINDOW, pixels_per_point: 1.0, mode, backdrop: backdrop.to_owned(), blur: true };
-    let wall = wallpaper(&scene).unwrap();
-    let (w, h) = (WINDOW[0] as usize, WINDOW[1] as usize);
-    let mut bitmap = Bitmap::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let (u, v) = ((x as f32 + 0.5) * wall.scale, (y as f32 + 0.5) * wall.scale);
-            bitmap.px[y * w + x] = wall.bitmap.sample(u, v);
-        }
-    }
+    let (wall, mut bitmap) = wallpaper_window(&scene);
+    let (w, h) = (bitmap.w, bitmap.h);
     let mut panes = Vec::new();
     let mut shaded = false;
     for want in shell::wants(vec2(WINDOW[0], WINDOW[1]), true) {

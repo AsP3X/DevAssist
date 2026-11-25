@@ -13,7 +13,11 @@ pub mod repos_view;
 pub mod screenshot;
 pub mod session;
 pub mod shell;
+pub mod table;
 pub mod theme;
+pub mod widgets;
 
 #[cfg(test)]
 mod contrast;
+#[cfg(test)]
+mod picture;
