@@ -301,6 +301,30 @@ pub const OUTPUT_LINE: f32 = 14.0;
 pub const OUTPUT_ROWS: usize = 7;
 /// The size of the output's text (`mono`'s `fontSize: 12`).
 pub const OUTPUT_TEXT: f32 = 12.0;
+/// The width of the remove dialog (`dialog("Remove", 480, …)`), and of the group dialog, which the design does not
+/// draw and which is built to the remove dialog's pattern.
+pub const DIALOG_WIDTH: f32 = 480.0;
+/// The room inside a dialog's list above its first row and below its last, then at either side of its rows
+/// (`What goes`'s `padding: [4, 12]`).
+pub const LIST_PAD: [f32; 2] = [4.0, 12.0];
+/// The height of a row of a dialog's list (`Folder`'s `height: 36`).
+pub const LIST_ROW: f32 = 36.0;
+/// The gap between a path's icon, the path and its note in the remove dialog (`Folder`'s `gap: 8`).
+pub const LIST_GAP: f32 = 8.0;
+/// How many paths the remove dialog lists before its list scrolls.
+pub const REMOVE_ROWS: usize = 8;
+/// How many groups the group dialog lists before its list scrolls.
+pub const GROUP_ROWS: usize = 6;
+/// The height of a dialog's text field; its ends are round (`field`'s `height: 36`, `cornerRadius: 18`).
+pub const DIALOG_FIELD_HEIGHT: f32 = 36.0;
+/// How strong the outline of a dialog's text field is, of the text colour (`field`'s `stroke: soft(0.16)`).
+pub const FIELD_EDGE_OPACITY: f32 = 0.16;
+/// The gap between the group dialog's field, its note and its list of groups (not the design's: it draws no group
+/// dialog; the plan's own, half a dialog's gap).
+pub const GROUP_DIALOG_GAP: f32 = 12.0;
+/// The room between the group list's box and a picked row's fill at either side, and that fill's corner radius:
+/// a menu's row in its pane (`MENU_PAD`, `MENU_ROW_RADIUS`; not the design's: it draws no group dialog).
+pub const GROUP_PICK: [f32; 2] = [4.0, 12.0];
 /// The width of the ring around the control of an overlay that Enter and Space act on (not the design's: it has
 /// no keyboard; the accent, as egui marks its focus).
 pub const FOCUS_RING: f32 = 2.0;
@@ -750,7 +774,13 @@ mod tests {
             ("OUTPUT_GAP", OUTPUT_GAP, 8.0),
             ("OUTPUT_LINE", OUTPUT_LINE, 14.0),
             ("OUTPUT_TEXT", OUTPUT_TEXT, 12.0),
+            ("DIALOG_WIDTH", DIALOG_WIDTH, 480.0),
+            ("LIST_ROW", LIST_ROW, 36.0),
+            ("LIST_GAP", LIST_GAP, 8.0),
+            ("DIALOG_FIELD_HEIGHT", DIALOG_FIELD_HEIGHT, 36.0),
+            ("FIELD_EDGE_OPACITY", FIELD_EDGE_OPACITY, 0.16),
         ];
+        assert_eq!(LIST_PAD, [4.0, 12.0]);
         for (constant, got, expected) in want {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
         }

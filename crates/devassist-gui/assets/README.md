@@ -62,6 +62,9 @@ not stored). The file is long, so it was read in four successive parts of that o
 | `chevron-right` | `e06f` | `clock` | `e087` |
 | `arrow-up` | `e04a` | `arrow-down` | `e042` |
 
+`group` (`e464`, the group dialog's field) was read on 2026-11-25 from the bundled `lucide.ttf` itself: its `post`
+table names the glyph `group` and its `cmap` maps `e464` to it; the same reading gives `folder-git-2` as `e40a`.
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

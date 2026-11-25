@@ -13,7 +13,7 @@ use egui::{
     pos2, vec2,
 };
 
-use super::{Dialogs, Parts, Plan, Which, after, before, progress, which};
+use super::{Dialogs, Parts, Plan, Which, after, before, group, progress, remove, which};
 use crate::baker::Sheet;
 use crate::overlay;
 use crate::repos_screen::{self, Screen};
@@ -161,6 +161,8 @@ impl Window {
     pub(super) fn buttons(&self) -> Vec<(Rect, &'static str)> {
         let (room, words) = match self.parts() {
             Parts::Progress(places) => (places.buttons, progress::button_words(self.job())),
+            Parts::Remove(places) => (places.buttons, remove::button_words()),
+            Parts::Group(places) => (places.buttons, group::said(self.repos())),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()

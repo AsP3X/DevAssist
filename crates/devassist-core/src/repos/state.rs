@@ -1832,6 +1832,18 @@ impl Repos {
         prompt.error = None;
     }
 
+    /// The group dialog's name becomes `name`, as typed or picked; what
+    /// went wrong with the last one is forgotten. Nothing while the dialog
+    /// is closed. The name is tidied and checked by `accept_group`.
+    pub fn set_group_name(&mut self, name: &str) {
+        if let Some(prompt) = self.group_prompt.as_mut()
+            && prompt.input != name
+        {
+            name.clone_into(&mut prompt.input);
+            prompt.error = None;
+        }
+    }
+
     /// Enter in the group dialog: moves the repositories, or renames.
     pub fn accept_group(&mut self) {
         let Some(prompt) = self.group_prompt.as_mut() else {
@@ -5318,6 +5330,30 @@ mod tests {
             !root.join("devassist.toml").exists(),
             "the settings file is not written"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_group_name_is_set_whole_and_forgets_the_last_error() {
+        let (mut app, root) = held_app("group-name");
+        app.set_group_name("Tools");
+        assert!(
+            app.group_prompt.is_none(),
+            "nothing while the dialog is closed"
+        );
+        app.open_group_prompt();
+        app.set_group_name(&"x".repeat(41));
+        app.accept_group();
+        assert!(app.mode == Mode::Group, "too long a name is refused");
+        assert!(app.group_prompt.as_ref().unwrap().error.is_some());
+        app.set_group_name("Tools");
+        let prompt = app.group_prompt.as_ref().unwrap();
+        assert_eq!(
+            (prompt.input.as_str(), prompt.error.as_deref()),
+            ("Tools", None)
+        );
+        app.accept_group();
+        assert_eq!(app.installed[0].group, "Tools");
         let _ = std::fs::remove_dir_all(&root);
     }
 

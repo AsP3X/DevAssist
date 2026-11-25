@@ -159,7 +159,7 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 1] = [("progress", show_progress)];
+pub const SHOWS: [(&str, Opener); 3] = [("progress", show_progress), ("remove", show_remove), ("group", show_group)];
 
 /// What sets an overlay up in the demo's repositories.
 pub type Opener = fn(&mut Repos);
@@ -211,6 +211,16 @@ fn show_progress(repos: &mut Repos) {
     repos.show_job();
 }
 
+/// The drawing's remove dialog: for the ticked api and web, as the core asks.
+fn show_remove(repos: &mut Repos) {
+    repos.begin_remove();
+}
+
+/// The group dialog (the design draws none): moving the ticked api and web, their group in the field.
+fn show_group(repos: &mut Repos) {
+    repos.open_group_prompt();
+}
+
 #[cfg(test)]
 mod tests {
     use devassist_core::repos::state::Mode;
@@ -236,7 +246,20 @@ mod tests {
             repos.drain();
         }
         assert!(repos.mode == Mode::Progress && !repos.waiting());
-        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, not nothing");
+        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, not nothing");
+    }
+
+    #[test]
+    fn the_demo_opens_the_remove_and_group_dialogs_as_the_core_asks() {
+        let mut repos = repos();
+        show(&mut repos, "remove").unwrap();
+        assert!(repos.mode == Mode::ConfirmRemove { folders: vec!["api".to_owned(), "web".to_owned()] });
+        assert!(repos.remove_lines().iter().all(|line| !line.dirty));
+        let mut repos = super::repos();
+        show(&mut repos, "group").unwrap();
+        assert!(repos.mode == Mode::Group);
+        let prompt = repos.group_prompt.as_ref().unwrap();
+        assert_eq!((prompt.repos.as_slice(), prompt.input.as_str()), (["api".to_owned(), "web".to_owned()].as_slice(), "Work"));
     }
 
     #[test]

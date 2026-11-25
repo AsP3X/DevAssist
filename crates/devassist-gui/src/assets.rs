@@ -121,6 +121,7 @@ icons! {
     LoaderCircle => 0xe10a, "loader-circle",
     RotateCw => 0xe149, "rotate-cw",
     Clock => 0xe087, "clock",
+    Group => 0xe464, "group",
 }
 
 /// The JPEG bytes of the backdrop picture for `key`, one of `devassist_core::config::BACKDROPS`.
@@ -225,8 +226,8 @@ mod tests {
         assert_eq!(codes.len(), Icon::ALL.len(), "two icons share a code point");
         assert_eq!(names.len(), Icon::ALL.len(), "two icons share a name");
         assert!(!codes.contains(&char::REPLACEMENT_CHARACTER), "an icon has no valid code point");
-        // The README lists 16 icons beyond the 14 the sidebar and bar already had.
-        assert_eq!(Icon::ALL.len(), 30);
+        // The README lists 16 icons beyond the 14 the sidebar and bar already had, and the group dialog's.
+        assert_eq!(Icon::ALL.len(), 31);
         assert_eq!(Icon::X.name(), "x");
         assert_eq!(Icon::FolderGit2.name(), "folder-git-2");
     }

@@ -336,7 +336,7 @@ mod tests {
 
     /// The progress dialog's places in the window's last frame.
     fn parts(window: &Window) -> Places {
-        let Parts::Progress(places) = window.parts();
+        let Parts::Progress(places) = window.parts() else { panic!("not the progress dialog") };
         places
     }
 

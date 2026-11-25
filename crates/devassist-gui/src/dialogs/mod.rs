@@ -19,9 +19,14 @@
 //! parts are shared: [`Header`] (the title and the quiet line under it) and [`inset`] (a box with the field's fill
 //! that scrolls with the wheel).
 //!
-//! The dialogs: [`progress`], the run the core keeps.
+//! The dialogs: [`progress`], the run the core keeps; [`remove`], which deletes or forgets the chosen
+//! repositories; [`group`], which moves them into a group or renames one. A dialog with a main button opens with
+//! the focus on it, the group dialog with the focus in its name field, the remove dialog (which has no main
+//! button) with no focus at all.
 
+mod group;
 mod progress;
+mod remove;
 
 use std::sync::Arc;
 
@@ -29,11 +34,12 @@ use devassist_core::repos::state::{Mode as CoreMode, Repos};
 use egui::text::LayoutJob;
 use egui::{Color32, Context, FontFamily, Galley, Id, LayerId, Painter, Rect, Ui, pos2};
 
+pub use self::remove::remove_title;
 use crate::assets;
 use crate::baker::{Drawn, Want};
 use crate::overlay;
 use crate::shell::Page;
-use crate::theme::{self, DIALOG_TITLE, HEADER_GAP, HEADER_LINE_HEIGHT, INSET_RADIUS, Mode, Palette, TEXT};
+use crate::theme::{self, DIALOG_TITLE, HEADER_GAP, HEADER_LINE_HEIGHT, INSET_RADIUS, LIST_PAD, LIST_ROW, Mode, Palette, TEXT};
 use crate::widgets::font;
 
 /// A dialog the core's mode asks for.
@@ -41,6 +47,10 @@ use crate::widgets::font;
 pub enum Which {
     /// The progress of the core's run (`Mode::Progress`).
     Progress,
+    /// The question before the chosen repositories are deleted or forgotten (`Mode::ConfirmRemove`).
+    Remove,
+    /// The name of the group the chosen repositories go into, or a group's new name (`Mode::Group`).
+    Group,
 }
 
 /// The dialog `repos`'s mode asks for, if any.
@@ -48,6 +58,8 @@ pub enum Which {
 pub fn which(repos: &Repos) -> Option<Which> {
     match repos.mode {
         CoreMode::Progress if repos.job.is_some() => Some(Which::Progress),
+        CoreMode::ConfirmRemove { .. } => Some(Which::Remove),
+        CoreMode::Group if repos.group_prompt.is_some() => Some(Which::Group),
         _ => None,
     }
 }
@@ -63,6 +75,10 @@ pub struct Dialogs {
     shown: Option<usize>,
     /// The wheel turned over the output that does not come to a whole line yet, in points.
     wheel: f32,
+    /// How far the remove dialog's paths or the group dialog's groups are moved up, in points.
+    list_scroll: f32,
+    /// The group the group dialog's list showed picked last, so the list follows Up and Down.
+    list_shown: Option<usize>,
 }
 
 /// The id of a dialog's main button, the one Enter presses: every dialog's, so that the focus [`sync`] gives it
@@ -72,9 +88,10 @@ fn main_id() -> Id {
 }
 
 /// The bridge from the core's mode to the overlay: in the frame `repos`'s mode first asks for a dialog, opens the
-/// overlay with the focus on that dialog's main button, and starts its own state afresh. Once the mode asks for
-/// none, there is nothing to open: the dialog is no longer shown, and the overlay closes. Called before the screen
-/// (for what the core's workers changed) and after it (for what the screen asked: `l`, a click on the status bar).
+/// overlay with the focus on that dialog's main button (the group dialog's name field; nothing in the remove
+/// dialog, which has no main button), and starts its own state afresh. Once the mode asks for none, there is
+/// nothing to open: the dialog is no longer shown, and the overlay closes. Called before the screen (for what the
+/// core's workers changed) and after it (for what the screen asked: `l`, a click on the status bar).
 pub fn sync(ctx: &Context, repos: Option<&Repos>, dialogs: &mut Dialogs) {
     let want = repos.and_then(which);
     if want == dialogs.open {
@@ -83,6 +100,8 @@ pub fn sync(ctx: &Context, repos: Option<&Repos>, dialogs: &mut Dialogs) {
     *dialogs = Dialogs { open: want, ..Dialogs::default() };
     match want {
         Some(Which::Progress) => overlay::open(ctx, Some(main_id())),
+        Some(Which::Remove) => overlay::open(ctx, None),
+        Some(Which::Group) => overlay::open(ctx, Some(group::field_id())),
         None => {}
     }
 }
@@ -145,6 +164,16 @@ fn rows(count: usize) -> f32 {
     f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
+/// How tall a dialog's list of `count` rows is in its box: the rows and the room above and below them.
+fn list_height(count: usize) -> f32 {
+    2.0 * LIST_PAD[0] + rows(count) * LIST_ROW
+}
+
+/// How far a dialog's list of `count` rows can be moved up in a box `height` points tall.
+fn most_scroll(count: usize, height: f32) -> f32 {
+    (list_height(count) - height).max(0.0)
+}
+
 /// Where a dialog's parts are, decided before the bake: its pane is baked there.
 #[derive(Clone, Debug)]
 pub struct Plan {
@@ -159,6 +188,10 @@ pub struct Plan {
 enum Parts {
     /// The progress dialog's.
     Progress(progress::Places),
+    /// The remove dialog's.
+    Remove(remove::Places),
+    /// The group dialog's.
+    Group(group::Places),
 }
 
 impl Parts {
@@ -166,6 +199,8 @@ impl Parts {
     fn which(self) -> Which {
         match self {
             Parts::Progress(_) => Which::Progress,
+            Parts::Remove(_) => Which::Remove,
+            Parts::Group(_) => Which::Group,
         }
     }
 
@@ -173,6 +208,8 @@ impl Parts {
     fn pane(self) -> Rect {
         match self {
             Parts::Progress(places) => places.pane,
+            Parts::Remove(places) => places.pane,
+            Parts::Group(places) => places.pane,
         }
     }
 }
@@ -192,6 +229,8 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>) -> Option<Pl
     let repos = repos?;
     match which(repos)? {
         Which::Progress => progress::plan(painter, window, repos),
+        Which::Remove => Some(remove::plan(painter, window, repos)),
+        Which::Group => group::plan(painter, window, repos),
     }
 }
 
@@ -240,6 +279,8 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
         ui.set_clip_rect(plan.parts.pane());
         match plan.parts {
             Parts::Progress(places) => progress::show(ui, &plan.header, places, repos, palette, dialogs, scrim),
+            Parts::Remove(places) => remove::show(ui, &plan.header, places, repos, palette, dialogs, scrim),
+            Parts::Group(places) => group::show(ui, &plan.header, places, repos, palette, dialogs, scrim),
         }
     });
     if which(repos) != Some(plan.parts.which()) {
