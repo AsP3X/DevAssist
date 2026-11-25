@@ -199,6 +199,28 @@ pub const PROGRESS_LEAST: f32 = 6.0;
 /// How strong a progress bar's track is, of the text colour (`fill: soft(0.12)` in `bar`).
 pub const PROGRESS_TRACK_OPACITY: f32 = 0.12;
 
+/// The height of the badge with a count at the end of a sidebar row (`navRow`'s `Count`, `height: 20`).
+pub const BADGE_HEIGHT: f32 = 20.0;
+/// The room inside the badge at either side of its count (`padding: [0, 6]`).
+pub const BADGE_PAD: f32 = 6.0;
+/// The room between the badge and its row's right edge (`navRow`'s `padding: [0, 4, …]` with a count).
+pub const BADGE_INSET: f32 = 4.0;
+/// The room inside a capsule's label before its words and after them, left then right (the selection's `Count`,
+/// `padding: [0, 8, 0, 10]`).
+pub const LABEL_PAD: [f32; 2] = [10.0, 8.0];
+/// The size of an icon in the status bar (`note`'s `icon(…, QUIET, 12)`).
+pub const STATUS_ICON: f32 = 12.0;
+/// The gap between a status note's icon and its words (`note`'s `gap: 6`).
+pub const STATUS_ICON_GAP: f32 = 6.0;
+/// The gap between the parts of the status bar (`statusBar`'s `gap: 24`).
+pub const STATUS_GAP: f32 = 24.0;
+/// The gap between the title of an empty or broken panel and the lines under it.
+pub const STATE_GAP: f32 = 8.0;
+/// How long the settings warning is the status bar's text after the window opens.
+pub const NOTICE_TIME: Duration = Duration::from_secs(10);
+/// How many rows Page Up and Page Down move the highlight, as in the terminal app.
+pub const PAGE_ROWS: isize = 10;
+
 /// The value of [`RULE_WIDTH`].
 #[expect(clippy::cast_precision_loss, reason = "RULE_HALF is a few commits, far below what an f32 holds exactly")]
 const fn rule_width() -> f32 {
@@ -592,6 +614,17 @@ mod tests {
         }
         assert_eq!(RULE_HALF, 10);
         assert_eq!(ACTION_PAD, [8.0, 10.0]);
+        assert_eq!(LABEL_PAD, [10.0, 8.0]);
+        for (constant, got, expected) in [
+            ("BADGE_HEIGHT", BADGE_HEIGHT, 20.0),
+            ("BADGE_PAD", BADGE_PAD, 6.0),
+            ("BADGE_INSET", BADGE_INSET, 4.0),
+            ("STATUS_ICON", STATUS_ICON, 12.0),
+            ("STATUS_ICON_GAP", STATUS_ICON_GAP, 6.0),
+            ("STATUS_GAP", STATUS_GAP, 24.0),
+        ] {
+            assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
+        }
     }
 
     #[test]

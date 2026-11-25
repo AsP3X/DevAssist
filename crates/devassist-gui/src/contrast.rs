@@ -132,7 +132,7 @@ fn window(backdrop: &str, mode: Mode, rendering: Rendering) -> Window {
     let (w, h) = (bitmap.w, bitmap.h);
     let mut panes = Vec::new();
     let mut shaded = false;
-    for want in shell::wants(vec2(WINDOW[0], WINDOW[1]), true) {
+    for want in shell::wants(&shell::layout(vec2(WINDOW[0], WINDOW[1]), true, false)).as_slice().iter().cloned() {
         let frosted = frosted_pane_picture(&wall, &scene, &want).unwrap();
         let picture = match rendering {
             Rendering::Frosted => frosted,
@@ -152,7 +152,7 @@ fn window(backdrop: &str, mode: Mode, rendering: Rendering) -> Window {
         panes.push(Laid { id: want.id, left, top, picture });
     }
     let sheet = sheet_picture(&wall, &scene, Surface::Panel).unwrap();
-    let painted = painted_panel(&sheet, shell::panel_rect(vec2(WINDOW[0], WINDOW[1]), true), w, h);
+    let painted = painted_panel(&sheet, shell::layout(vec2(WINDOW[0], WINDOW[1]), true, false).panel, w, h);
     for (under, over_it) in bitmap.px.iter_mut().zip(&painted.px) {
         *under = over(*under, *over_it);
     }
@@ -170,8 +170,9 @@ fn line_band(rect: Rect, size: f32) -> Rect {
 
 /// The places to measure, from the shell's own geometry and the insets it gives its text.
 fn places() -> Vec<Place> {
-    let wants = shell::wants(vec2(WINDOW[0], WINDOW[1]), true);
-    let rect = |id: &str| wants.iter().find(|want| want.id == id).unwrap().rect;
+    let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, false);
+    let wants = shell::wants(&layout);
+    let rect = |id: &str| wants.as_slice().iter().find(|want| want.id == id).unwrap().rect;
     let sidebar = rect("sidebar");
     // The sidebar's rows lie inside `SIDEBAR_PADDING` at the sides and the foot and `SIDEBAR_TOP` below its top.
     let sidebar_text = Rect::from_min_max(
@@ -182,7 +183,7 @@ fn places() -> Vec<Place> {
     let status = rect("status");
     let status_ends = Rect::from_min_max(pos2(status.left() + STATUS_PADDING, status.top()), pos2(status.right() - STATUS_PADDING, status.bottom()));
     // Text comes no closer to the panel's edge than `PANEL_TEXT_INSET`.
-    let panel_text = shell::panel_rect(vec2(WINDOW[0], WINDOW[1]), true).shrink(PANEL_TEXT_INSET);
+    let panel_text = layout.panel.shrink(PANEL_TEXT_INSET);
     let mut places = vec![
         Place { name: "sidebar", pane: Some("sidebar"), rect: sidebar_text, ink: Ink::OnGlass, least: LEAST_TEXT },
         // The version line under the workspace's name is quiet text at `TEXT_SMALL`.
@@ -192,13 +193,7 @@ fn places() -> Vec<Place> {
         // The panel's sentence is quiet text at `TEXT` (normal size), as will be a table's quiet cells.
         Place { name: "panel-quiet", pane: Some("panel"), rect: panel_text, ink: Ink::Quiet, least: LEAST_TEXT },
         // The title can be longer than the one word now, so its whole room is measured, as one line.
-        Place {
-            name: "title",
-            pane: None,
-            rect: line_band(shell::title_rect(rect("sidebar-toggle")), TEXT_TITLE),
-            ink: Ink::OnGlass,
-            least: LEAST_TEXT,
-        },
+        Place { name: "title", pane: None, rect: line_band(layout.title, TEXT_TITLE), ink: Ink::OnGlass, least: LEAST_TEXT },
         Place { name: "status", pane: Some("status"), rect: line_band(status_ends, TEXT_SMALL), ink: Ink::Quiet, least: LEAST_QUIET },
     ];
     // A group label's text starts `ROW_PADDING` in from its row's left and fills one line of `TEXT_SMALL`.

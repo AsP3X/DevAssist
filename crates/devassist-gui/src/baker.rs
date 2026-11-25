@@ -1117,7 +1117,7 @@ mod tests {
         let design = [(12.0, 12.0, 256.0, 876.0), (280.0, 12.0, 36.0, 36.0), (280.0, 856.0, 1148.0, 32.0)];
         assert_eq!(rects, design.map(|(x, y, w, h)| Rect::from_min_size(pos2(x, y), vec2(w, h))));
         // The frosted panel, drawn from the sheet, is the design's too.
-        assert_eq!(crate::shell::panel_rect(WINDOW.into(), true), Rect::from_min_size(pos2(280.0, 60.0), vec2(1148.0, 784.0)));
+        assert_eq!(crate::shell::layout(WINDOW.into(), true, false).panel, Rect::from_min_size(pos2(280.0, 60.0), vec2(1148.0, 784.0)));
         // Frosted first: once a device is installed it stays for the rest of the run.
         measure("frosted");
         if devassist_glass::gpu::install_own_device() {

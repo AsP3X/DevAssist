@@ -1,13 +1,22 @@
-//! The small pieces the table is drawn with, painted as the shell paints (text and icons through a [`Painter`]),
-//! not egui's stock widgets: a checkbox, and text cut to the room it has.
+//! The small pieces the screens are drawn with, painted as the shell paints (text and icons through a
+//! [`Painter`]), not egui's stock widgets: a checkbox, text cut to the room it has, a glass capsule of actions and
+//! the glass text field (whose text editing is egui's own).
 
 use std::hash::Hash;
 
-use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, pos2};
+use egui::{
+    Align2, Color32, FontFamily, FontId, Frame, Id, Margin, Painter, Pos2, Rect, Response, RichText, Role, Sense, Stroke, StrokeKind, TextEdit, Ui,
+    Vec2, WidgetInfo, pos2, vec2,
+};
 
 use crate::assets::{self, Icon};
+use crate::baker::Want;
 use crate::repos_view::shorten_path;
-use crate::theme::{CHECK_MARK, CHECKBOX, CHECKBOX_STROKE_OPACITY, HAIRLINE, Palette, RADIUS_SMALL};
+use crate::shell::Wants;
+use crate::theme::{
+    ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX, CHECKBOX_STROKE_OPACITY, FIELD_PAD, HAIRLINE,
+    HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD, Palette, RADIUS_SMALL, Surface, TEXT,
+};
 
 /// The mark that ends a text cut short.
 const ELLIPSIS: &str = "…";
@@ -101,6 +110,116 @@ pub fn width(painter: &Painter, text: &str, font: &FontId) -> f32 {
     painter.layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER).size().x
 }
 
+/// What a capsule holds, from its left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Item<'a> {
+    /// Words that say something and take no press.
+    Label(&'a str),
+    /// A button: its icon, its words (none for an icon alone), and whether it is on.
+    Action {
+        /// Its icon.
+        icon: Icon,
+        /// Its words; empty for an icon alone.
+        words: &'a str,
+        /// It is on, and drawn on the selection's fill.
+        on: bool,
+    },
+}
+
+/// Adds the glass pane of a capsule or a field at `rect` to the panes baked this frame, its ends round.
+pub fn add_glass(wants: &mut Wants, id: &'static str, rect: Rect) {
+    wants.add(Want { id, rect, radius: rect.height() / 2.0, surface: Surface::Capsule });
+}
+
+/// How wide `item` is in a capsule.
+fn item_width(painter: &Painter, item: &Item<'_>) -> f32 {
+    let medium = font(TEXT, assets::medium_family());
+    match item {
+        Item::Label(words) => LABEL_PAD[0] + width(painter, words, &medium) + LABEL_PAD[1],
+        Item::Action { words: "", .. } => ACTION_HEIGHT,
+        Item::Action { words, .. } => ACTION_PAD[0] + ICON + ACTION_GAP + width(painter, words, &medium) + ACTION_PAD[1],
+    }
+}
+
+/// How wide a capsule holding `items` is.
+#[must_use]
+pub fn capsule_width(painter: &Painter, items: &[Item<'_>]) -> f32 {
+    let gaps = CAPSULE_GAP * f32::from(u16::try_from(items.len().saturating_sub(1)).unwrap_or(u16::MAX));
+    2.0 * CAPSULE_PAD + items.iter().map(|item| item_width(painter, item)).sum::<f32>() + gaps
+}
+
+/// The places of `items` in a capsule at `rect`, each [`ACTION_HEIGHT`] high and centred on its height.
+fn item_rects(painter: &Painter, rect: Rect, items: &[Item<'_>]) -> Vec<Rect> {
+    let mut left = rect.left() + CAPSULE_PAD;
+    items
+        .iter()
+        .map(|item| {
+            let width = item_width(painter, item);
+            let place = Rect::from_min_size(pos2(left, rect.center().y - ACTION_HEIGHT / 2.0), vec2(width, ACTION_HEIGHT));
+            left = place.right() + CAPSULE_GAP;
+            place
+        })
+        .collect()
+}
+
+/// Draws `items` in the capsule at `rect`, whose glass is baked ([`add_glass`]), and says which action was pressed.
+pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) -> Option<usize> {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let medium = font(TEXT, assets::medium_family());
+    let mut pressed = None;
+    for (index, (item, place)) in items.iter().zip(item_rects(&painter, rect, items)).enumerate() {
+        match *item {
+            Item::Label(words) => {
+                painter.text(pos2(place.left() + LABEL_PAD[0], place.center().y), Align2::LEFT_CENTER, words, medium.clone(), palette.on_glass);
+            }
+            Item::Action { icon, words, on } => {
+                let response = ui.interact(place, ui.scope_id().with(("capsule", rect.min.x.to_bits(), index)), Sense::click());
+                let name = if words.is_empty() { icon.name() } else { words };
+                response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, name));
+                let fill = if on {
+                    palette.selection
+                } else if response.hovered() {
+                    palette.on_glass.gamma_multiply(HOVER_OPACITY)
+                } else {
+                    Color32::TRANSPARENT
+                };
+                painter.rect_filled(place, ACTION_HEIGHT / 2.0, fill);
+                if words.is_empty() {
+                    draw_icon(&painter, place.center(), icon, ICON, palette.quiet);
+                } else {
+                    draw_icon(&painter, pos2(place.left() + ACTION_PAD[0] + ICON / 2.0, place.center().y), icon, ICON, palette.on_glass);
+                    let x = place.left() + ACTION_PAD[0] + ICON + ACTION_GAP;
+                    painter.text(pos2(x, place.center().y), Align2::LEFT_CENTER, words, medium.clone(), palette.on_glass);
+                }
+                if response.clicked() {
+                    pressed = Some(index);
+                }
+            }
+        }
+    }
+    pressed
+}
+
+/// Draws a one-line text field at `rect`, whose glass is baked ([`add_glass`]): `icon` at its left, then `text`,
+/// or `hint` in the quiet colour while `text` is empty. `id` names it, so it can be given the focus.
+pub fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon, palette: Palette, id: Id) -> Response {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    draw_icon(&painter, pos2(rect.left() + FIELD_PAD + ICON / 2.0, rect.center().y), icon, ICON, palette.quiet);
+    let room = Rect::from_min_max(pos2(rect.left() + FIELD_PAD + ICON + ICON_GAP, rect.top()), pos2(rect.right() - FIELD_PAD, rect.bottom()));
+    let regular = font(TEXT, FontFamily::Proportional);
+    let edit = TextEdit::singleline(text)
+        .id(id)
+        .font(regular.clone())
+        .text_color(palette.on_glass)
+        .hint_text(RichText::new(hint).font(regular).color(palette.quiet))
+        .frame(Frame::NONE)
+        .margin(Margin::ZERO)
+        .desired_width(room.width())
+        .min_size(room.size())
+        .align(Align2::LEFT_CENTER);
+    ui.put(room, edit)
+}
+
 /// A face at `size` points.
 #[must_use]
 pub fn font(size: f32, family: FontFamily) -> FontId {
@@ -188,6 +307,38 @@ pub(crate) mod tests {
         assert!(narrow.ends_with("scripts"), "{narrow}");
         assert!(narrow_width <= 110.0, "{narrow} is {narrow_width} wide");
         assert_eq!(none, "");
+    }
+
+    #[test]
+    fn a_capsule_is_as_wide_as_its_items_and_only_its_actions_take_a_press() {
+        let palette = theme::palette(Mode::Light);
+        let items = [Item::Label("2 selected"), Item::Action { icon: Icon::X, words: "", on: false }];
+        let width = with_ui(|ui| capsule_width(ui.painter(), &items));
+        let words = with_ui(|ui| self::width(ui.painter(), "2 selected", &font(TEXT, assets::medium_family())));
+        // The design's padding, the label's padding and words, a gap, and the round clear button.
+        assert!((width - (CAPSULE_PAD + LABEL_PAD[0] + words + LABEL_PAD[1] + CAPSULE_GAP + ACTION_HEIGHT + CAPSULE_PAD)).abs() < 1e-3, "{width}");
+        let rect = Rect::from_min_size(pos2(880.0, 60.0), vec2(width, 36.0));
+        let press = |at: Pos2| {
+            let ctx = context();
+            let button =
+                |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+            let mut said = Vec::new();
+            for events in [vec![], vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)]] {
+                let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), events, ..Default::default() };
+                ctx.run_ui(input, |ui| said.push(capsule(ui, rect, &items, palette))).drop_without_applying_deltas();
+            }
+            said.into_iter().flatten().collect::<Vec<usize>>()
+        };
+        assert_eq!(press(pos2(rect.right() - CAPSULE_PAD - ACTION_HEIGHT / 2.0, rect.center().y)), [1]);
+        assert_eq!(press(pos2(rect.left() + CAPSULE_PAD + LABEL_PAD[0] + 4.0, rect.center().y)), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_glass_control_is_baked_as_a_capsule_with_round_ends() {
+        let mut wants = Wants::default();
+        add_glass(&mut wants, "filter", Rect::from_min_size(pos2(280.0, 60.0), vec2(280.0, 36.0)));
+        let [want] = wants.as_slice() else { panic!("{wants:?}") };
+        assert_eq!((want.id, want.surface, want.radius), ("filter", Surface::Capsule, 18.0));
     }
 
     #[test]

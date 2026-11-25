@@ -9,10 +9,12 @@ use egui::{Color32, LayerId, Mesh};
 use crate::assets;
 use crate::baker::{Baker, Scene};
 use crate::launch::{self, Launch};
+use crate::repos_screen::{self, Screen};
+use crate::repos_view::Status;
 use crate::screenshot;
 use crate::session::Session;
-use crate::shell::{self, Shown};
-use crate::theme::{self, Mode, RESIZE_SETTLE, Surface};
+use crate::shell::{self, Page, Shown};
+use crate::theme::{self, Mode, NOTICE_TIME, RESIZE_SETTLE, Surface};
 
 /// The window's title, and the app's name to the system.
 const TITLE: &str = "DevAssist";
@@ -79,6 +81,13 @@ pub struct App {
     start: Instant,
     /// The repositories, loaded and kept current.
     session: Session,
+    /// The screen the sidebar has chosen.
+    page: Page,
+    /// What the Repositories screen keeps between frames.
+    screen: Screen,
+    /// The settings warning, said in the status bar for the first [`NOTICE_TIME`]: a window started without a
+    /// console has nowhere else to say it.
+    notice: Option<String>,
 }
 
 impl App {
@@ -90,6 +99,7 @@ impl App {
             gpu::install(state.device.clone(), state.queue.clone());
         }
         let looks = [launch::look(settings.clone(), launch, false), launch::look(settings.clone(), launch, true)];
+        let notice = settings_warning(&settings);
         App {
             looks,
             sidebar_shown: !launch.sidebar_hidden,
@@ -98,6 +108,9 @@ impl App {
             shot: launch.screenshot.clone().map(screenshot::Job::new),
             start: Instant::now(),
             session: Session::start(settings, launch.demo),
+            page: Page::default(),
+            screen: Screen::default(),
+            notice,
         }
     }
 }
@@ -138,12 +151,19 @@ impl eframe::App for App {
         }
 
         let size = ctx.content_rect().size();
-        let scene = Scene { size: size.into(), pixels_per_point: ctx.pixels_per_point(), mode, backdrop: backdrop.clone(), blur };
-        let wants = shell::wants(size, self.sidebar_shown);
+        let on_repositories = self.page == Page::Repositories;
+        let layout = shell::layout(size, self.sidebar_shown, on_repositories && repos_screen::has_toolbar(&self.session));
         let painter = ctx.layer_painter(LayerId::background());
+        // The screen's glass is placed before the bake, so it is baked where the screen draws over it.
+        let plan = if on_repositories { repos_screen::plan(&painter, &layout, &self.session) } else { None };
+        let mut wants = shell::wants(&layout);
+        if let Some(plan) = &plan {
+            plan.add_wants(&mut wants);
+        }
+        let scene = Scene { size: size.into(), pixels_per_point: ctx.pixels_per_point(), mode, backdrop, blur };
         // The wallpaper first, stretched over the window, then each glass pane; each shows only its own part of
         // its texture (`uv`), or the backdrop behind a pane would sit shifted against the wallpaper.
-        for drawn in self.baker.frame(&ctx, &scene, &wants, self.start.elapsed()) {
+        for drawn in self.baker.frame(&ctx, &scene, wants.as_slice(), self.start.elapsed()) {
             let mut mesh = Mesh::with_texture(drawn.texture);
             mesh.add_rect_with_uv(drawn.rect, drawn.uv, Color32::WHITE);
             painter.add(mesh);
@@ -152,10 +172,19 @@ impl eframe::App for App {
             ctx.request_repaint_after(RESIZE_SETTLE);
         }
 
-        // The frosted panel is no picture: the shell paints it from the sheet, which costs nothing to move.
+        // The frosted panel is no picture: the screen paints it from the sheet, which costs nothing to move.
         let sheet = self.baker.sheet(Surface::Panel);
+        let notice = self.notice.clone().filter(|_| self.start.elapsed() < NOTICE_TIME).map(|text| Status { text, error: true, notes: Vec::new() });
+        let status = notice.or_else(|| repos_screen::status(&self.session));
+        let waiting = self.session.repos().map_or(0, |repos| repos.queue.len());
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
-            shell::draw(ui, &wants, &mut self.sidebar_shown, Shown { mode, backdrop: &backdrop, sheet });
+            let shown = Shown { mode, waiting, status: status.as_ref() };
+            shell::draw(ui, &layout, &mut self.sidebar_shown, &mut self.page, shown);
+            if on_repositories {
+                repos_screen::show(ui, &layout, plan.as_ref(), &mut self.session, sheet.as_ref(), mode, &mut self.screen);
+            } else {
+                shell::placeholder(ui, layout.panel, sheet.as_ref(), theme::palette(mode));
+            }
         });
     }
 }
