@@ -5,6 +5,10 @@
 //! where the pane's own picture is (all but) opaque. The rounded corners and the antialiased edge of a pane show
 //! the bare wallpaper through it, and no text is ever drawn there. The panel is also measured only inside
 //! `PANEL_TEXT_INSET`, the closest any text comes to its edge (its rim highlight is no place for text).
+//!
+//! Both renderings are measured: the panes frosted on the CPU, as a window draws them when the glass shader
+//! cannot run, and, where there is a GPU adapter, the glass panes through the shader, as people with a GPU see
+//! them.
 
 use std::thread;
 
@@ -12,7 +16,7 @@ use devassist_core::config::BACKDROPS;
 use devassist_glass::raster::{self, Bitmap, Pixel};
 use egui::{Color32, Rect, pos2, vec2};
 
-use crate::baker::{Scene, pane_picture, wallpaper};
+use crate::baker::{Scene, frosted_pane_picture, pane_picture, wallpaper};
 use crate::shell;
 use crate::theme::{self, Mode, PANEL_TEXT_INSET, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, TEXT_SMALL, TEXT_TITLE, WINDOW};
 
@@ -35,6 +39,15 @@ enum Ink {
     OnGlass,
     /// `quiet`, laid over the pixel it is on.
     Quiet,
+}
+
+/// How the panes are drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rendering {
+    /// Every pane frosted on the CPU.
+    Frosted,
+    /// The glass panes through the glass shader on the GPU; the panel is frosted in both.
+    Glass,
 }
 
 /// A place text is on: its name, the pane whose picture it is on (none: the bare wallpaper), where text can sit,
@@ -99,7 +112,7 @@ fn over(under: Pixel, over: Pixel) -> Pixel {
     clippy::cast_precision_loss,
     reason = "pixel places on a 1440 by 900 window, far inside every range"
 )]
-fn window(backdrop: &str, mode: Mode) -> Window {
+fn window(backdrop: &str, mode: Mode, rendering: Rendering) -> Window {
     let scene = Scene { size: WINDOW, pixels_per_point: 1.0, mode, backdrop: backdrop.to_owned(), blur: true };
     let wall = wallpaper(&scene).unwrap();
     let (w, h) = (WINDOW[0] as usize, WINDOW[1] as usize);
@@ -111,8 +124,17 @@ fn window(backdrop: &str, mode: Mode) -> Window {
         }
     }
     let mut panes = Vec::new();
+    let mut shaded = false;
     for want in shell::wants(vec2(WINDOW[0], WINDOW[1]), true) {
-        let picture = pane_picture(&wall, &scene, &want).unwrap();
+        let frosted = frosted_pane_picture(&wall, &scene, &want).unwrap();
+        let picture = match rendering {
+            Rendering::Frosted => frosted,
+            Rendering::Glass => {
+                let picture = pane_picture(&wall, &scene, &want).unwrap();
+                shaded |= picture.px != frosted.px;
+                picture
+            }
+        };
         let (left, top) = (want.rect.min.x.round() as usize, want.rect.min.y.round() as usize);
         for y in 0..picture.h.min(h - top) {
             for x in 0..picture.w.min(w - left) {
@@ -122,6 +144,8 @@ fn window(backdrop: &str, mode: Mode) -> Window {
         }
         panes.push(Laid { id: want.id, left, top, picture });
     }
+    // Glass that fell back to frost would measure the frosted panes twice.
+    assert!(rendering == Rendering::Frosted || shaded, "{backdrop} {mode:?}: no pane was drawn through the glass shader");
     Window { bitmap, panes }
 }
 
@@ -204,6 +228,7 @@ fn lowest(window: &Window, place: &Place, ink: Color32) -> Lowest {
 
 /// One line of the table: a place on a backdrop in a mode and its lowest contrast.
 struct Row {
+    rendering: Rendering,
     backdrop: &'static str,
     mode: Mode,
     name: &'static str,
@@ -214,7 +239,8 @@ struct Row {
 impl Row {
     fn text(&self) -> String {
         format!(
-            "{:<7} {:<6} {:<13} lowest {:>6.2} (needs {:.1}) at x={} y={} over {} px{}\n",
+            "{:<7} {:<7} {:<6} {:<13} lowest {:>6.2} (needs {:.1}) at x={} y={} over {} px{}\n",
+            format!("{:?}", self.rendering),
             self.backdrop,
             format!("{:?}", self.mode),
             self.name,
@@ -229,11 +255,11 @@ impl Row {
 }
 
 /// The rows of one backdrop in both modes; the places sharing a name (the two labels) give their lowest.
-fn measure(backdrop: &'static str) -> Vec<Row> {
+fn measure(backdrop: &'static str, rendering: Rendering) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
     for mode in [Mode::Light, Mode::Dark] {
         let palette = theme::palette(mode);
-        let window = window(backdrop, mode);
+        let window = window(backdrop, mode, rendering);
         let first = rows.len();
         for place in places() {
             let ink = match place.ink {
@@ -247,38 +273,65 @@ fn measure(backdrop: &'static str) -> Vec<Row> {
                     row.found = if found.contrast < row.found.contrast { found } else { row.found };
                     row.found.count = count;
                 }
-                None => rows.push(Row { backdrop, mode, name: place.name, least: place.least, found }),
+                None => rows.push(Row { rendering, backdrop, mode, name: place.name, least: place.least, found }),
             }
         }
         for row in &rows[first..] {
-            assert!(row.found.count >= LEAST_PIXELS, "{backdrop} {mode:?} {}: only {} pixels measured", row.name, row.found.count);
+            assert!(row.found.count >= LEAST_PIXELS, "{rendering:?} {backdrop} {mode:?} {}: only {} pixels measured", row.name, row.found.count);
         }
     }
     rows
 }
 
+/// The rows of every backdrop in both modes, drawn as `rendering` draws them.
+fn measure_all(rendering: Rendering) -> Vec<Row> {
+    thread::scope(|scope| {
+        let jobs: Vec<_> = BACKDROPS.into_iter().map(|backdrop| scope.spawn(move || measure(backdrop, rendering))).collect();
+        jobs.into_iter().flat_map(|job| job.join().unwrap()).collect()
+    })
+}
+
+/// Whether the glass shader can run here. A machine without a GPU adapter skips the glass rendering, said on
+/// the test's output, unless `DEVASSIST_REQUIRE_GPU` is set, as it should be where the tests must not be skipped.
+fn shader_runs() -> bool {
+    let ready = devassist_glass::gpu::install_own_device();
+    assert!(ready || std::env::var_os("DEVASSIST_REQUIRE_GPU").is_none(), "no GPU adapter was found for the glass rendering");
+    if !ready {
+        eprintln!("no GPU adapter: the glass rendering is not measured");
+    }
+    ready
+}
+
 #[test]
 fn every_text_on_the_shell_holds_its_contrast_on_all_six_backdrops() {
-    let rows: Vec<Row> = thread::scope(|scope| {
-        let jobs: Vec<_> = BACKDROPS.into_iter().map(|backdrop| scope.spawn(move || measure(backdrop))).collect();
-        jobs.into_iter().flat_map(|job| job.join().unwrap()).collect()
-    });
+    // Frosted first; the frosted pictures are drawn on the CPU whatever device is installed.
+    let mut renderings = vec![Rendering::Frosted];
+    if shader_runs() {
+        renderings.push(Rendering::Glass);
+    }
+    let rows: Vec<Row> = renderings.iter().flat_map(|&rendering| measure_all(rendering)).collect();
     let mut names: Vec<&str> = places().iter().map(|place| place.name).collect();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(rows.len(), names.len() * BACKDROPS.len() * 2, "one row per place, backdrop and mode");
-    for backdrop in BACKDROPS {
-        for mode in [Mode::Light, Mode::Dark] {
-            for name in &names {
-                assert!(
-                    rows.iter().any(|row| row.backdrop == backdrop && row.mode == mode && row.name == *name),
-                    "no row for {backdrop} {mode:?} {name}"
-                );
+    assert_eq!(rows.len(), names.len() * BACKDROPS.len() * 2 * renderings.len(), "one row per place, backdrop, mode and rendering");
+    for &rendering in &renderings {
+        for backdrop in BACKDROPS {
+            for mode in [Mode::Light, Mode::Dark] {
+                for name in &names {
+                    assert!(
+                        rows.iter().any(|row| row.rendering == rendering && row.backdrop == backdrop && row.mode == mode && row.name == *name),
+                        "no row for {rendering:?} {backdrop} {mode:?} {name}"
+                    );
+                }
             }
         }
     }
     let table: String = rows.iter().map(Row::text).collect();
     eprintln!("{table}");
     let failures: String = rows.iter().filter(|row| row.found.contrast < row.least).map(Row::text).collect();
-    assert!(failures.is_empty(), "text below its contrast:\n{failures}");
+    assert!(
+        failures.is_empty(),
+        "text below its contrast:
+{failures}"
+    );
 }

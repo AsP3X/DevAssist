@@ -317,6 +317,15 @@ pub fn pane_picture(wallpaper: &Wallpaper, scene: &Scene, want: &Want) -> Option
     draw_pane(&mut HashMap::new(), wallpaper, scene, &pane_of(scene, want)?)
 }
 
+/// The picture of the pane `want` as [`pane_picture`] makes it, but always frosted on the CPU, as a window draws
+/// it when the glass shader cannot run, whether or not there is a GPU device now.
+#[must_use]
+pub fn frosted_pane_picture(wallpaper: &Wallpaper, scene: &Scene, want: &Want) -> Option<Bitmap> {
+    scene.pixels()?;
+    let pane = pane_of(scene, want)?;
+    pane::frosted(&behind(&mut HashMap::new(), wallpaper, scene, &pane.params), &pane)
+}
+
 /// What a pane's picture shows besides the scene: its rectangle in whole pixels, its radius and its surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PaneKey {
