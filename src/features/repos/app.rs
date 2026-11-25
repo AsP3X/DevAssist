@@ -20,7 +20,7 @@ use crate::atoms::ui::path::{self as pathprompt, PathPrompt};
 use crate::features::repos::github::{self, AccountQuery, RemoteRepo};
 use crate::features::repos::gitops::{self, LocalRepo};
 use crate::features::repos::gitprogress;
-use crate::features::repos::settings::{Form, Outcome};
+use crate::features::repos::settings::{self, Form, Outcome};
 use crate::shell::config::{self, Settings};
 
 /// How long the Add search waits after the last key before asking GitHub.
@@ -2228,7 +2228,7 @@ impl App {
             self.mode = Mode::List;
             return;
         };
-        match form.on_key(key) {
+        match settings::on_key(form, key) {
             Outcome::Stay => {}
             Outcome::Save => self.save_settings(),
             Outcome::Close => self.close_settings(),
