@@ -4,6 +4,7 @@
 pub mod app;
 pub use devassist_core::repos::{github, gitops, gitprogress};
 pub mod settings;
+pub mod state;
 pub mod ui;
 
 use ratatui::Frame;
@@ -72,7 +73,7 @@ impl Feature for app::App {
 
     fn modal(&self) -> bool {
         // The fork overview has keys of its own, such as its filter.
-        self.mode != app::Mode::List || self.forks.is_some()
+        self.mode != state::Mode::List || self.forks.is_some()
     }
 
     fn help(&self) -> &'static str {
@@ -86,11 +87,11 @@ impl Feature for app::App {
     }
 
     fn drain(&mut self) -> bool {
-        app::App::drain(self)
+        self.core.drain()
     }
 
     fn waiting(&self) -> bool {
-        app::App::waiting(self)
+        self.core.waiting()
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
@@ -103,7 +104,7 @@ impl Feature for app::App {
 
     fn closing(&mut self) {
         // Stops git if this tool started some, however the program ends.
-        app::App::quit(self);
+        self.core.quit();
     }
 }
 

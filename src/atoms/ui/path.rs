@@ -4,8 +4,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::input::{self, Alt};
+pub use devassist_core::prompt::PathPrompt;
 use devassist_core::prompt::delete_segment;
-pub use devassist_core::prompt::{PathPrompt, resolve};
 
 pub enum Outcome {
     Stay,

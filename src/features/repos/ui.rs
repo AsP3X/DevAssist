@@ -13,13 +13,14 @@ use crate::atoms::ui::list::align_scroll;
 use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
-use crate::features::repos::app::{
-    Action, App, ForksView, MenuItem, MigrateItem, Mode, Purpose, RemoteState, Row, clone_target,
-    group_key,
-};
+use crate::features::repos::app::App;
 use crate::features::repos::gitops::{self, ForkInfo, LocalRepo};
 use crate::features::repos::gitprogress::{self, split_progress};
 use crate::features::repos::settings::{Field, PROTOCOLS};
+use crate::features::repos::state::{
+    Action, ForksView, MenuItem, MigrateItem, Mode, Purpose, RemoteState, Row, clone_target,
+    group_key,
+};
 
 /// Draws the overview and its open dialog into `area`.
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -145,7 +146,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         let mut hint =
             "  arrows move · enter actions · space selects · m group · / filter · s sort · ? help"
                 .to_string();
-        if app.sort == crate::features::repos::app::SortMode::NeedsUpdate {
+        if app.sort == crate::features::repos::state::SortMode::NeedsUpdate {
             hint.push_str(" · sorted by attention");
         }
         Line::from(Span::styled(
@@ -1845,7 +1846,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, screen: Rect) {
 fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
     let tick = app.tick as usize;
     let queued = app.queue.len();
-    let Some(job) = app.job.as_mut() else {
+    let Some(job) = app.core.job.as_mut() else {
         return;
     };
     let running = job.running();
@@ -2575,7 +2576,7 @@ mod tests {
 
     #[test]
     fn the_fork_overview_lists_the_forks_of_a_repository() {
-        use crate::features::repos::app::ForkSort;
+        use crate::features::repos::state::ForkSort;
         use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         assert_eq!(day(0), "1970-01-01");
         assert_eq!(day(1_795_596_570), "2026-11-25");
@@ -2970,7 +2971,7 @@ mod tests {
 
     #[test]
     fn the_group_dialog_moves_and_renames() {
-        use crate::features::repos::app::GroupPrompt;
+        use crate::features::repos::state::GroupPrompt;
         let mut app = app(false);
         let mut api = local("api", false);
         api.group = "Work".into();
@@ -3005,7 +3006,7 @@ mod tests {
 
     #[test]
     fn enter_shows_the_actions_for_the_selection() {
-        use crate::features::repos::app::Menu;
+        use crate::features::repos::state::Menu;
         let mut app = app(false);
         app.installed = vec![
             local("api", false),
@@ -3052,7 +3053,7 @@ mod tests {
         assert!(screen.contains("Push to another service…"), "{screen}");
 
         // Its dialog asks for the address and says what will happen.
-        app.service_prompt = Some(crate::features::repos::app::ServicePrompt {
+        app.service_prompt = Some(crate::features::repos::state::ServicePrompt {
             repo: "docs".into(),
             path: PathBuf::from("development").join("docs"),
             input: "https://gitlab.com/AsP3X/docs.git".into(),
@@ -3090,7 +3091,7 @@ mod tests {
 
     #[test]
     fn queued_actions_show_under_the_list_and_on_the_dialog() {
-        use crate::features::repos::app::Queued;
+        use crate::features::repos::state::Queued;
         let mut app = app(false);
         app.installed = vec![local("api", false), local("docs", false)];
         app.busy = true;
