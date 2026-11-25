@@ -30,11 +30,11 @@ use crate::columns::{self, Span};
 use crate::picture::{over, wallpaper_window};
 use crate::repos_view::{self, Line};
 use crate::theme::{
-    self, CHECK_MARK, GROUP_FILL_OPACITY, GROUP_HEIGHT, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, Mode, PANEL_TEXT_INSET,
-    Palette, RADIUS_PANEL, ROW_HEIGHT, ROW_PAD_RIGHT, ROW_PADDING, RULE_LABEL_GAP, RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface,
-    TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
+    self, CHECK_MARK, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, Mode, PANEL_TEXT_INSET, Palette,
+    RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING, RULE_LABEL_GAP, RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL,
+    TEXT_TITLE, WINDOW,
 };
-use crate::{demo, frost, shell, widgets};
+use crate::{demo, frost, shell, table, widgets};
 
 /// The least contrast of text at `TEXT` (WCAG's level AA for normal text).
 const LEAST_TEXT: f64 = 4.5;
@@ -334,23 +334,19 @@ fn cell(row: Rect, span: Span) -> Rect {
 /// The demo's lines on the table at `panel` as the table places them unscrolled, under its head row: each line's
 /// row and whether it is a group's header.
 fn demo_rows(panel: Rect) -> Vec<(Rect, bool)> {
-    let mut top = panel.top() + HEAD_HEIGHT;
+    let mut top = table::body_rect(panel).top();
     repos_view::lines(&demo::repos())
         .iter()
         .map(|line| {
-            let (height, group) = match line {
-                Line::Group(_) => (GROUP_HEIGHT, true),
-                Line::Repo(_) => (ROW_HEIGHT, false),
-            };
-            let row = Rect::from_min_max(pos2(panel.left(), top), pos2(panel.right(), top + height));
+            let row = Rect::from_min_max(pos2(panel.left(), top), pos2(panel.right(), top + table::height(line)));
             top = row.bottom();
-            (row, group)
+            (row, matches!(line, Line::Group(_)))
         })
         .collect()
 }
 
 /// The cells of `row` that `ink` is drawn in. `on_glass`: the name, the branch, "Uncommitted", the pull requests'
-/// counts and the origin's plain words; `quiet`: those and the folder, "Clean", the icons and the row's menu;
+/// counts and the origin's plain words; `quiet`: those and the folder, "Clean" and the icons;
 /// `warning`: the pull requests waiting and the words of a repository behind; `danger`: the origin's cell.
 fn cells(row: Rect, columns: &columns::Columns, ink: Ink) -> Vec<Rect> {
     let words = || {
@@ -359,9 +355,7 @@ fn cells(row: Rect, columns: &columns::Columns, ink: Ink) -> Vec<Rect> {
     };
     let spans = match ink {
         Ink::OnGlass => vec![Some(columns.name), columns.branch, columns.changes, columns.pulls, Some(columns.origin)],
-        Ink::Quiet => {
-            vec![Some(columns.name), columns.folder, columns.branch, columns.changes, columns.pulls, Some(columns.origin), Some(columns.action)]
-        }
+        Ink::Quiet => vec![Some(columns.name), columns.folder, columns.branch, columns.changes, columns.pulls, Some(columns.origin)],
         Ink::Warning => return columns.pulls.map(|span| cell(row, span)).into_iter().chain([words()]).collect(),
         Ink::Danger => vec![Some(columns.origin)],
         Ink::OnDarkGlass => Vec::new(),
@@ -521,7 +515,7 @@ fn shader_runs() -> bool {
 }
 
 #[test]
-fn every_text_on_the_shell_holds_its_contrast_on_all_six_backdrops() {
+fn every_text_in_the_window_holds_its_contrast_on_all_six_backdrops() {
     // Frosted first; the frosted pictures are drawn on the CPU whatever device is installed.
     let mut renderings = vec![Rendering::Frosted];
     if shader_runs() {

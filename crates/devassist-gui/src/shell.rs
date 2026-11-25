@@ -5,7 +5,7 @@
 //! on it, or by [`placeholder`]; [`draw`] puts the text, icons and buttons of the frame over them all.
 
 use devassist_core::update::VERSION;
-use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2};
+use egui::{Align2, Color32, FontFamily, Painter, Pos2, Rect, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::{Sheet, Want};
@@ -17,7 +17,7 @@ use crate::theme::{
     SIDEBAR_WIDTH, STATUS_GAP, STATUS_HEIGHT, STATUS_ICON, STATUS_ICON_GAP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, TITLE_ROOM,
     WORKSPACE_MARK,
 };
-use crate::widgets;
+use crate::widgets::{self, draw_icon, font};
 
 /// The sidebar's pane.
 const SIDEBAR: &str = "sidebar";
@@ -255,7 +255,7 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
         *sidebar_shown = !*sidebar_shown;
         ui.ctx().request_repaint();
     }
-    draw_icon(&painter, toggle.center(), Icon::PanelLeft, palette.on_glass);
+    draw_icon(&painter, toggle.center(), Icon::PanelLeft, ICON, palette.on_glass);
     let title = layout.title;
     painter.with_clip_rect(title).text(
         pos2(title.left(), title.center().y),
@@ -298,16 +298,6 @@ fn draw_status(ui: &Ui, status: Rect, shown: Option<&Status>, palette: Palette) 
     };
     let text = widgets::ellipsis(&text, &small, right - left, ui);
     painter.text(pos2(left, y), Align2::LEFT_CENTER, text, small, colour);
-}
-
-/// A face at `size` points.
-fn font(size: f32, family: FontFamily) -> FontId {
-    FontId::new(size, family)
-}
-
-/// Draws the icon `name` centred on `center`.
-fn draw_icon(painter: &Painter, center: Pos2, name: Icon, colour: Color32) {
-    painter.text(center, Align2::CENTER_CENTER, assets::icon(name).to_string(), font(ICON, assets::icons_family()), colour);
 }
 
 /// A row of the sidebar.
@@ -413,7 +403,7 @@ fn draw_sidebar(ui: &Ui, sidebar: Rect, page: Page, waiting: usize, palette: Pal
 fn draw_workspace(painter: &Painter, row: Rect, palette: Palette) {
     let mark = Rect::from_min_size(pos2(row.left() + ROW_PADDING, row.top()), Vec2::splat(WORKSPACE_MARK));
     painter.rect_filled(mark, RADIUS_SMALL, palette.accent);
-    draw_icon(painter, mark.center(), Icon::Wrench, palette.on_dark_glass);
+    draw_icon(painter, mark.center(), Icon::Wrench, ICON, palette.on_dark_glass);
     let name = painter.layout_no_wrap("DevAssist".to_owned(), font(TEXT, assets::medium_family()), palette.on_glass);
     let version = painter.layout_no_wrap(format!("Version {VERSION}"), font(TEXT_SMALL, FontFamily::Proportional), palette.quiet);
     let x = mark.right() + ICON_GAP;
@@ -427,7 +417,7 @@ fn draw_workspace(painter: &Painter, row: Rect, palette: Palette) {
 fn draw_nav(painter: &Painter, row: Rect, icon: Icon, text: &str, fill: Color32, palette: Palette) {
     painter.rect_filled(row, RADIUS_ROW, fill);
     let icon_center = pos2(row.left() + ROW_PADDING + ICON / 2.0, row.center().y);
-    draw_icon(painter, icon_center, icon, palette.on_glass);
+    draw_icon(painter, icon_center, icon, ICON, palette.on_glass);
     painter.text(
         pos2(icon_center.x + ICON / 2.0 + ICON_GAP, row.center().y),
         Align2::LEFT_CENTER,
@@ -472,7 +462,7 @@ fn caption_buttons(ui: &Ui, captions: Rect, palette: Palette) {
             (false, _) => (Color32::TRANSPARENT, palette.on_glass),
         };
         ui.painter().rect_filled(rect, RADIUS_ROW, fill);
-        draw_icon(ui.painter(), rect.center(), icon, mark);
+        draw_icon(ui.painter(), rect.center(), icon, ICON, mark);
         if response.clicked() {
             ctx.send_viewport_cmd(command);
         }

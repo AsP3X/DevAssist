@@ -33,15 +33,15 @@ pub struct Columns {
     pub branch: Option<Span>,
     /// Whether the checkout has uncommitted changes, when there is room.
     pub changes: Option<Span>,
-    /// The commits ahead and behind, when there is room.
+    /// The pull requests, when there is room.
     pub pulls: Option<Span>,
-    /// The origin's address.
+    /// How the repository stands to its remote: the rule and its words.
     pub origin: Span,
-    /// The row's menu button.
+    /// The room of the row's menu button, kept for when it has a menu; nothing is drawn there yet.
     pub action: Span,
 }
 
-/// The optional columns in the order they are given up when the row is narrow.
+/// How many optional columns a narrow row can give up, one at a time: folder, changes, branch, pulls.
 const GIVEN_UP_IN_ORDER: usize = 4;
 
 /// How many of the optional columns have been given up: the folder first, then changes, branch and pulls.
@@ -103,9 +103,11 @@ impl Given {
 
 /// The columns of a row `row_width` points wide. The check starts at the row's left padding and the columns from
 /// the origin on are anchored to the right padding, so a wider row only gives the name more. A row too narrow for
-/// even the permanent columns gets a name of no width and columns that may overlap it; nothing is negative.
+/// even the permanent columns gets a name of no width and columns that may overlap it; nothing is negative. A width
+/// that is no number, or an infinite one, is taken as no width.
 #[must_use]
 pub fn columns(row_width: f32) -> Columns {
+    let row_width = if row_width.is_finite() { row_width } else { 0.0 };
     let shown = Given::fitting(row_width);
     let mut edge = row_width - theme::ROW_PAD_RIGHT;
     // From the right: each column ends at the edge, and the next one ends a gap before its left.
@@ -134,7 +136,7 @@ fn points(commits: u32) -> f32 {
 /// of it), and whether each is past the scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rule {
-    /// Where the one-point zero line is, from the rule's left edge.
+    /// Where the zero line ([`theme::RULE_ZERO_WIDTH`] wide) is, from the rule's left edge.
     pub zero: f32,
     /// The behind bar's left edge and width, or `None` for no commits behind.
     pub behind: Option<(f32, f32)>,
@@ -156,8 +158,8 @@ pub fn rule(behind: u32, ahead: u32) -> Rule {
     Rule {
         zero,
         behind: (behind > 0).then_some((zero - behind_width, behind_width)),
-        // The ahead bar starts just after the zero line, which is one point wide.
-        ahead: (ahead > 0).then_some((zero + 1.0, ahead_width)),
+        // The ahead bar starts just after the zero line.
+        ahead: (ahead > 0).then_some((zero + theme::RULE_ZERO_WIDTH, ahead_width)),
         behind_over: behind > theme::RULE_HALF,
         ahead_over: ahead > theme::RULE_HALF,
     }
@@ -271,6 +273,17 @@ mod tests {
                 assert!(span.width >= 0.0 && !span.left.is_nan() && !span.width.is_nan(), "{width}: {span:?}");
             }
             assert_eq!(shown_of(&c), [false; 4]);
+        }
+    }
+
+    #[test]
+    fn a_row_width_that_is_no_number_gives_places_that_are() {
+        for width in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let c = columns(width);
+            for span in in_order(&c) {
+                assert!(span.left.is_finite() && span.width.is_finite() && span.width >= 0.0, "{width}: {span:?}");
+            }
+            assert_eq!(c, columns(0.0), "{width}");
         }
     }
 

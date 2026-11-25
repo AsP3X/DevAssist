@@ -19,7 +19,7 @@ use crate::theme::{
     self, CELL_ICON_GAP, GROUP_FILL_OPACITY, GROUP_HEIGHT, GROUP_ROW_GAP, HAIRLINE, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, ICON, ICON_SMALL,
     LINE_OPACITY, Mode, NAME_ICON_GAP, PROGRESS_HEIGHT, PROGRESS_LEAST, PROGRESS_TRACK_OPACITY, PULL_GAP, PULL_ICON_GAP, Palette, RADIUS_PANEL,
     ROW_HEIGHT, ROW_PAD_RIGHT, RULE_BAR, RULE_BAR_TOP, RULE_BREAK_END, RULE_BREAK_GAP, RULE_FIFTH_OPACITY, RULE_HEIGHT, RULE_LABEL_GAP,
-    RULE_LEGEND_GAP, RULE_TICK, RULE_TICK_FIFTH, RULE_TICK_OPACITY, RULE_WIDTH, TEXT, TEXT_SMALL,
+    RULE_LEGEND_GAP, RULE_TICK, RULE_TICK_FIFTH, RULE_TICK_OPACITY, RULE_WIDTH, RULE_ZERO_WIDTH, TEXT, TEXT_SMALL,
 };
 use crate::widgets::{self, Tick, draw_icon, font};
 
@@ -390,7 +390,7 @@ fn draw_head(ui: &Ui, head: Rect, columns: &Columns, palette: Palette) {
     }
     let zero = head.left() + columns.origin.left + columns::rule(0, 0).zero;
     painter.text(pos2(zero - RULE_LEGEND_GAP, y), Align2::RIGHT_CENTER, BEHIND, medium.clone(), palette.on_glass);
-    painter.text(pos2(zero + HAIRLINE + RULE_LEGEND_GAP, y), Align2::LEFT_CENTER, AHEAD, medium, palette.on_glass);
+    painter.text(pos2(zero + RULE_ZERO_WIDTH + RULE_LEGEND_GAP, y), Align2::LEFT_CENTER, AHEAD, medium, palette.on_glass);
 }
 
 /// Paints a group's header: its fold arrow, its name and its note.
@@ -457,9 +457,9 @@ fn draw_repo(ui: &Ui, row: Rect, columns: &Columns, repo: &RepoLine, palette: Pa
         let clipped = painter.with_clip_rect(cell(row, span).intersect(painter.clip_rect()));
         draw_pulls(&clipped, row.left() + span.left, y, repo.pulls, palette);
     }
+    // The menu button's column stays empty: the button comes with its menu, and a button that does nothing is not
+    // drawn.
     draw_origin(ui, cell(row, columns.origin), &repo.origin, palette);
-    let action = cell(row, columns.action);
-    draw_icon(painter, action.center(), Icon::Ellipsis, ICON, palette.quiet);
 }
 
 /// Paints the pull requests cell from `left`: open, merged and closed each with its icon (a state with none left
@@ -530,7 +530,7 @@ fn draw_rule(painter: &Painter, left: f32, y: f32, behind: u32, ahead: u32, pale
         painter.rect_filled(Rect::from_min_max(pos2(left + x, bottom - tall), pos2(left + x + HAIRLINE, bottom)), 0.0, soft(palette, opacity));
     }
     let rule = columns::rule(behind, ahead);
-    painter.rect_filled(Rect::from_min_max(pos2(left + rule.zero, top), pos2(left + rule.zero + HAIRLINE, bottom)), 0.0, palette.on_glass);
+    painter.rect_filled(Rect::from_min_max(pos2(left + rule.zero, top), pos2(left + rule.zero + RULE_ZERO_WIDTH, bottom)), 0.0, palette.on_glass);
     let bars = [(rule.behind, rule.behind_over, true, palette.warning), (rule.ahead, rule.ahead_over, false, palette.on_glass)];
     for (bar, over, outer_left, colour) in bars {
         let Some((start, width)) = bar else { continue };
@@ -759,6 +759,31 @@ mod tests {
     }
 
     #[test]
+    fn a_row_draws_no_menu_button_until_it_has_a_menu() {
+        let ctx = context();
+        let mut scroll = 0.0;
+        let lines = demo();
+        frame(&ctx, table_rect(), &lines, Vec::new(), &mut scroll).1.drop_without_applying_deltas();
+        let (_, output) = frame(&ctx, table_rect(), &lines, Vec::new(), &mut scroll);
+        let menu = assets::icon(Icon::Ellipsis).to_string();
+        let action = columns::columns(table_rect().width()).action;
+        let drawn: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text().contains(&menu) || text.pos.x >= table_rect().left() + action.left - 0.5 => {
+                    Some(text.galley.text().to_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+        assert_eq!(drawn, Vec::<String>::new(), "something is drawn in the menu button's column");
+        // Its room is kept for the menu to come.
+        assert!(action.width > 0.0);
+    }
+
+    #[test]
     fn the_heads_box_is_on_some_or_off() {
         let lines = demo();
         assert_eq!(head_tick(&lines), Tick::Some, "api and web of twelve");
@@ -943,8 +968,7 @@ mod tests {
             for centre in
                 [pos2(panel.left() + RADIUS_PANEL, panel.bottom() - RADIUS_PANEL), pos2(panel.right() - RADIUS_PANEL, panel.bottom() - RADIUS_PANEL)]
             {
-                let beyond =
-                    (p.x - centre.x).abs() >= 0.0 && p.y > centre.y && (p.x < panel.left() + RADIUS_PANEL || p.x > panel.right() - RADIUS_PANEL);
+                let beyond = p.y > centre.y && (p.x < panel.left() + RADIUS_PANEL || p.x > panel.right() - RADIUS_PANEL);
                 if beyond && (p.x - centre.x).abs() <= RADIUS_PANEL {
                     assert!((*p - centre).length() <= RADIUS_PANEL + 1e-3, "{p:?} is outside the corner at {centre:?}");
                 }

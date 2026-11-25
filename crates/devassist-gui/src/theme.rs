@@ -179,9 +179,11 @@ pub const SELECTED_OPACITY_LIGHT: f32 = 0.14;
 /// How strong the fill of a selected row is in the dark mode, of the accent colour.
 pub const SELECTED_OPACITY_DARK: f32 = 0.32;
 
-/// The width of the lines under the table's rows, of the rule's ticks and of its zero line (`LINE`'s
-/// `strokeWidth: { bottom: 1 }`, the ticks' `size: 1` and the origin's `width: 1` in `v5-app.mjs`).
+/// The width of the lines under the table's rows and of the rule's ticks (`LINE`'s `strokeWidth: { bottom: 1 }`
+/// and the ticks' `size: 1` in `v5-app.mjs`).
 pub const HAIRLINE: f32 = 1.0;
+/// The width of the rule's zero line, between the bars behind and ahead (the origin's `width: 1` in `v5-app.mjs`).
+pub const RULE_ZERO_WIDTH: f32 = 1.0;
 /// The size of a small icon: the watched eye, the sort arrow and the pull request states (`icon(…, 14)` in
 /// `reposTable` and `pullCell`).
 pub const ICON_SMALL: f32 = 14.0;
@@ -236,7 +238,7 @@ pub const PAGE_ROWS: isize = 10;
 /// The value of [`RULE_WIDTH`].
 #[expect(clippy::cast_precision_loss, reason = "RULE_HALF is a few commits, far below what an f32 holds exactly")]
 const fn rule_width() -> f32 {
-    (2 * RULE_HALF) as f32 * RULE_UNIT + 1.0
+    (2 * RULE_HALF) as f32 * RULE_UNIT + RULE_ZERO_WIDTH
 }
 
 // Tuning, not design: how fine, how long and when the window makes and keeps its pictures. These set the work
@@ -329,7 +331,7 @@ pub fn palette(mode: Mode) -> Palette {
         Mode::Light => Palette {
             on_glass: rgb(0x00, 0x00, 0x00),
             on_dark_glass: Color32::WHITE,
-            quiet: rgb(0x00, 0x00, 0x00).gamma_multiply(QUIET_OPACITY_LIGHT),
+            quiet: rgb(0x00, 0x00, 0x00).gamma_multiply(quiet_opacity(mode)),
             selection: rgba(0, 0, 0, 0x1f),
             accent: rgb(0x0a, 0x47, 0xa3),
             field: rgba(255, 255, 255, 0x99),
@@ -343,7 +345,7 @@ pub fn palette(mode: Mode) -> Palette {
         Mode::Dark => Palette {
             on_glass: rgb(0xff, 0xff, 0xff),
             on_dark_glass: Color32::WHITE,
-            quiet: rgb(0xff, 0xff, 0xff).gamma_multiply(QUIET_OPACITY_DARK),
+            quiet: rgb(0xff, 0xff, 0xff).gamma_multiply(quiet_opacity(mode)),
             selection: rgba(255, 255, 255, 0x24),
             accent: rgb(0x2a, 0x66, 0xd6),
             field: rgba(255, 255, 255, 0x1a),
@@ -608,6 +610,7 @@ mod tests {
             ("SELECTED_OPACITY_DARK", SELECTED_OPACITY_DARK, 0.32),
             ("GROUP_ROW_GAP", GROUP_ROW_GAP, 8.0),
             ("HAIRLINE", HAIRLINE, 1.0),
+            ("RULE_ZERO_WIDTH", RULE_ZERO_WIDTH, 1.0),
             ("ICON_SMALL", ICON_SMALL, 14.0),
             ("CHECK_MARK", CHECK_MARK, 12.0),
             ("NAME_ICON_GAP", NAME_ICON_GAP, 8.0),

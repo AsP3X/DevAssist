@@ -180,13 +180,9 @@ enum Command {
 fn commands(events: &[Event]) -> Vec<Command> {
     let mut commands = Vec::new();
     for event in events {
-        if commands.contains(&Command::Filter) {
-            if let Event::Text(text) = event {
-                commands.extend(text.chars().map(Command::Type));
-            }
-            continue;
-        }
         match event {
+            // Once the filter has the focus, its keys are the field's.
+            Event::Key { .. } if commands.contains(&Command::Filter) => {}
             Event::Key { key, pressed: true, modifiers, .. } => {
                 let command = match key {
                     Key::ArrowUp => Command::Move(-1),
