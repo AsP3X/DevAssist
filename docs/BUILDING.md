@@ -2,11 +2,11 @@
 
 ## What you need
 
-- [Rust](https://rustup.rs/) 1.88 or newer (stable)
+- [Rust](https://rustup.rs/) 1.99 or newer (stable)
 - [Git](https://git-scm.com/) on your `PATH`. The app runs `git`, and so do
   the tests.
 
-Everything else comes from crates.io. One crate (`ring`, for TLS) compiles C
+Everything else comes from crates.io, apart from the window's forks (below). One crate (`ring`, for TLS) compiles C
 code, which uses the C compiler the Rust toolchain already requires: the MSVC
 build tools on Windows.
 
@@ -25,6 +25,42 @@ its own:
 
 ```
 cargo run -- --config scratch.toml
+```
+
+## The window
+
+`devassist-gui` is a second program, a window in a "liquid glass" design. It
+has no functions yet: it opens and shows its frame. It is not in the
+installers or the release downloads.
+
+```
+cargo run -p devassist-gui
+```
+
+The first build fetches the window's dependencies. They include forks from
+GitHub, one of the egui crates and one of winit, pinned by commit in the
+`[patch.crates-io]` table of the root `Cargo.toml`. The glass needs a GPU
+adapter. Without one, the window draws frosted panes instead.
+
+| Option | What it does |
+|---|---|
+| `--config PATH` | Reads the settings from this file |
+| `--screenshot OUT.png` | Saves a picture of the window and exits |
+| `--light`, `--dark` | Light or dark, whatever the settings say |
+| `--backdrop KEY` | The backdrop: `lake`, `midday`, `golden`, `dusk`, `night` or `forest` |
+| `--no-blur` | Does not blur the backdrop |
+| `--no-sidebar` | Opens with the sidebar hidden |
+
+At start the window reads `theme`, `backdrop` and `blur` from the settings
+file. It cannot change them yet. A settings file with a mistake makes the
+window print one line on standard error and open with the default look. A
+wrong option prints the usage line.
+
+To make a picture of the window, give it a file name. This opens the window
+off screen for a moment and then ends:
+
+```
+cargo run -p devassist-gui -- --screenshot window.png --dark --backdrop night
 ```
 
 ## Checks
@@ -50,6 +86,21 @@ About the tests:
 
   ```
   cargo test --workspace -- --ignored live_download
+  ```
+
+The glass has tests of its own:
+
+- The shader's tests need a GPU adapter. Without one they skip themselves.
+  Set `DEVASSIST_REQUIRE_GPU=1` to make a missing adapter a failure instead.
+- The glass compares its pictures with the ones kept in
+  `crates/devassist-glass/golden/`. After a change that should alter them,
+  run the tests once with `DEVASSIST_BLESS=1` to keep the new pictures, and
+  look at what changed before you commit.
+- One test in `devassist-gui` measures how long a bake of the glass takes. It
+  is marked `#[ignore]`, so it only runs when asked for:
+
+  ```
+  cargo test -p devassist-gui --release -- --ignored --nocapture measure_a_glass_bake
   ```
 
 ## Installers
@@ -82,10 +133,12 @@ Windows recognises a newer version of the same program: the `UpgradeCode` in
 
 ## Project layout
 
-The repository is a Cargo workspace of two packages. The root package is the
+The repository is a Cargo workspace of four packages. The root package is the
 terminal app: keys and drawing. `crates/devassist-core` holds the logic that
 does not depend on the terminal, so that another interface can use it too. It
-must not depend on `ratatui` or `crossterm`; CI checks this.
+must not depend on `ratatui` or `crossterm`; CI checks this. The other two
+packages make the window: `crates/devassist-glass` is the glass material and
+`crates/devassist-gui` is the window itself.
 
 ### The terminal app (`src/`)
 
@@ -136,6 +189,34 @@ The terminal app reaches the core through re-exports, so `crate::atoms::sys`,
 | `docker/actions.rs` | What each action runs, and what a confirmation lists |
 | `docker/logbuf.rs` | A log's lines and the reader's place in them |
 | `tests/` | Tests that drive each tool's state without a terminal |
+
+The core has a Cargo feature, `testing`, for helpers that other crates' tests
+use. The root package turns it on as a dev-dependency.
+
+### The glass (`crates/devassist-glass/`)
+
+| File | What is in it |
+|---|---|
+| `SOURCE.md` | Which files are copied from Quill, another project of the same author, and what was changed in them |
+| `src/material.rs`, `raster.rs`, `shader.rs`, `gpu.rs`, `glass.frag` | The glass material, its shader and the GPU device, copied from Quill |
+| `src/color.rs`, `sync.rs` | The two small pieces of Quill's code the others need |
+| `src/pane.rs` | Draws one rounded pane over a backdrop, as glass or frosted |
+| `golden/` | The kept pictures the tests compare with |
+
+### The window (`crates/devassist-gui/`)
+
+| File | What is in it |
+|---|---|
+| `src/main.rs` | Start-up: the command line, the settings, then the window |
+| `src/launch.rs` | The command line, and the look the window opens in |
+| `src/theme.rs` | Every colour, radius, size and duration |
+| `src/assets.rs` | The built-in fonts, icon font and backdrops |
+| `src/baker.rs` | Makes the glass panes as pictures and keeps them |
+| `src/shell.rs` | The frame: sidebar, panel and status bar |
+| `src/app.rs` | The window and its drawing loop |
+| `src/screenshot.rs` | `--screenshot`: saves a picture of the window |
+| `src/contrast.rs` | A test-only module that checks every text's contrast on all six backdrops |
+| `assets/` | The shipped fonts, icon font and backdrops, with a `README.md` on where each comes from |
 
 ### Elsewhere
 

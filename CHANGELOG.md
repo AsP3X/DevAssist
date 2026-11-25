@@ -8,6 +8,8 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
+- A window is on its way: `devassist-gui` opens and shows its frame. It has no
+  functions yet and is not part of the downloads.
 - The settings file knows `theme`, `backdrop` and `blur`, for the coming window.
 - **The forks of a repository can be cloned.** **Clone the forks** (`n`) in
   the actions menu fetches every fork of a repository on GitHub, and the forks
@@ -72,6 +74,7 @@ What changed in each version of DevAssist. The format follows
 
 ### Changed
 
+- The minimum Rust version to build DevAssist is now 1.99.
 - Saving keeps what was changed in the settings file since DevAssist read it,
   by another DevAssist or by hand, and writes only what you changed. Options
   given at start, such as `--title` or `--repo`, are no longer written to the

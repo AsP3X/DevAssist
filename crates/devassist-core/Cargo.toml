@@ -17,6 +17,7 @@ sha2 = "0.11"
 # `docker::state::testing`, `docker::model::samples`). Not part of a normal build.
 testing = []
 
+# `cargo test -p devassist-core` alone skips this test; `cargo test --workspace` runs it.
 [[test]]
 name = "headless_docker"
 required-features = ["testing"]

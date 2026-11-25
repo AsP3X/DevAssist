@@ -53,6 +53,33 @@ cargo test --workspace --locked
   `crossterm`; CI checks this.
 - A new function goes into the core as a method on the tool's state. The
   terminal app adds the key for it.
+- `crates/devassist-glass` and `crates/devassist-gui` make the window. See
+  below for their rules.
+
+### The window's crates
+
+The two crates of the window follow stricter rules than the rest of the
+repository. They apply to these two crates only; the terminal app and the
+core do not change.
+
+- Clippy runs with `pedantic` and warnings are errors. `unsafe_code` is
+  forbidden. These come from the workspace lints, which the two crates turn
+  on with `[lints] workspace = true`.
+- No `#[allow]`. Where a lint must be silenced, use a narrow `#[expect(lint,
+  reason = "...")]` on one item. Never silence `dead_code`.
+- No `unwrap`, `expect` or `panic!` outside tests.
+- Every public item has a doc comment.
+- Every dependency these crates add has an exact version pin (`=x.y.z`). The
+  egui crates and winit come from the forks named in the root `Cargo.toml`,
+  and `wgpu` stays at the version eframe uses.
+- `crates/devassist-gui/src/theme.rs` holds every colour, radius, size and
+  duration. A number that is a design decision does not belong in another
+  file.
+- Code copied from Quill keeps its text. Each copied file starts with a
+  comment that names its source and its edits, and
+  `crates/devassist-glass/SOURCE.md` lists them.
+- The two crates have their own `rustfmt.toml` (`max_width = 150`).
+- The window is written to build on macOS, but nothing has been run there.
 
 ### What a good change looks like
 

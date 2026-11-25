@@ -61,10 +61,10 @@ ratatui = "0.30"
 unicode-width = "0.2"
 devassist-core.workspace = true
 
-# Not inheriting the workspace lints on purpose (they are for the two new crates only).
 [dev-dependencies]
 devassist-core = { workspace = true, features = ["testing"] }
 
+# Not inheriting the workspace lints on purpose (they are for the two new crates only).
 [lints]
 
 [profile.release]
