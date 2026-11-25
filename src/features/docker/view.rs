@@ -11,6 +11,7 @@ use super::state::{Action, COMPOSE, CONTAINERS, Dialog, Docker, Engine, IMAGES, 
 use crate::atoms::ui::dialog::{self, centered};
 use crate::atoms::ui::hits::contains;
 use crate::atoms::ui::list::align_scroll;
+use crate::atoms::ui::log::LogView;
 use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::tabs;
@@ -28,7 +29,8 @@ pub fn draw(frame: &mut Frame, docker: &mut Docker, area: Rect) {
         return;
     }
     if let Some(log) = docker.log.as_mut() {
-        log.draw(frame, area);
+        let view = docker.log_view.get_or_insert_with(LogView::new);
+        view.draw(frame, area, log);
         return;
     }
 

@@ -17,7 +17,7 @@ use crate::atoms::task::worker::Worker;
 use crate::atoms::ui::hits::{Hits, contains};
 use crate::atoms::ui::input::{self, Alt};
 use crate::atoms::ui::list;
-use crate::atoms::ui::log::{self, LogView};
+use crate::atoms::ui::log::{self, LogBuffer, LogView};
 use crate::atoms::ui::menu;
 use crate::atoms::ui::tabs;
 
@@ -151,7 +151,9 @@ pub struct Docker {
     pub filtering: bool,
     pub dialog: Dialog,
     /// The open log view: a container's log, or an action's output.
-    pub log: Option<LogView>,
+    pub log: Option<LogBuffer>,
+    /// What the screen adds to the open log.
+    pub log_view: Option<LogView>,
     /// The number of the open log view. Lines for an older one are dropped.
     log_id: u64,
     /// Feeds a container's or project's log. Dropping it stops `docker logs`.
@@ -208,6 +210,7 @@ impl Docker {
             filtering: false,
             dialog: Dialog::None,
             log: None,
+            log_view: None,
             log_id: 0,
             log_stream: None,
             action_stream: None,
@@ -673,7 +676,8 @@ impl Docker {
 
     fn wheel(&mut self, delta: isize) {
         if let Some(log) = self.log.as_mut() {
-            log.scroll_by(delta);
+            let view = self.log_view.get_or_insert_with(LogView::new);
+            view.scroll_by(log, delta);
         } else if self.dialog == Dialog::None {
             self.move_by(delta);
         }
@@ -686,7 +690,8 @@ impl Docker {
             return;
         }
         if let Some(log) = self.log.as_mut() {
-            if log.on_key(key) == log::Outcome::Close {
+            let view = self.log_view.get_or_insert_with(LogView::new);
+            if view.on_key(log, key) == log::Outcome::Close {
                 self.close_log();
             }
             return;
@@ -1218,7 +1223,8 @@ impl Docker {
     fn new_log(&mut self, title: String) -> u64 {
         self.log_stream = None;
         self.log_id += 1;
-        self.log = Some(LogView::new(title));
+        self.log = Some(LogBuffer::new(title));
+        self.log_view = Some(LogView::new());
         self.log_id
     }
 
@@ -1253,6 +1259,7 @@ impl Docker {
     /// output was shown goes on.
     fn close_log(&mut self) {
         self.log = None;
+        self.log_view = None;
         self.log_stream = None;
     }
 
