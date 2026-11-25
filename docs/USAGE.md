@@ -489,9 +489,10 @@ behind and ahead. Above the table are a filter, the sort and, once something
 is ticked, how many are ticked, with a button that clears the ticks.
 
 You cannot change a repository from the window yet. Folding a group is saved
-to the settings file, as in the terminal app. What the program does by itself
-it also does here: it fetches when it starts, and it pulls the repositories
-you watch when their interval is over. With no repositories it says so
+to the settings file, as in the terminal app, and so are clones it takes over
+from an older place at start. What the program does by itself it also does
+here: it fetches when it starts, and it pulls the repositories you watch when
+their interval is over, as in the terminal app. With no repositories it says so
 and points to the terminal app. With a settings file that has a mistake it
 shows the mistake and loads nothing. In `--demo`, refresh does nothing.
 
