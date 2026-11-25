@@ -716,9 +716,13 @@ pub fn save(path: &Path, saved: &Saved) -> Result<(), String> {
     // The settings go to a file of their own beside the old one, which then
     // takes the old one's place, so a program reading the file meanwhile
     // gets the old settings or the new ones and never half a file.
-    let temp = temp_path(path);
+    // A settings file that is a link (dotfiles keep it elsewhere) is saved
+    // where the link points, so the link stays a link. A file that is not
+    // there yet has nothing to resolve and is written where `path` says.
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let temp = temp_path(&target);
     fs::write(&temp, render(saved))
-        .and_then(|()| fs::rename(&temp, path))
+        .and_then(|()| fs::rename(&temp, &target))
         .map_err(|err| {
             let _ = fs::remove_file(&temp);
             format!("could not save {}: {err}", path.display())
@@ -2222,6 +2226,41 @@ mod tests {
         let _ = fs::remove_dir_all(&folder);
         assert_eq!(names, vec![FILE_NAME.to_string()]);
         assert_eq!(saved_from(&saved.unwrap()), new);
+    }
+
+    /// A link at `link` to the file `real`, or an error where the
+    /// system does not let this program make links.
+    fn make_file_link(real: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(real, link);
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_file(real, link);
+    }
+
+    #[test]
+    fn a_save_through_a_link_writes_the_file_the_link_points_to() {
+        let folder = temp_folder("save-link");
+        let real = folder.join("real").join(FILE_NAME);
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, "watch_interval = 5\n").unwrap();
+        let link = folder.join(FILE_NAME);
+        if make_file_link(&real, &link).is_err() {
+            let _ = fs::remove_dir_all(&folder);
+            return; // no right to make links here
+        }
+        let new = Saved {
+            watch_interval: 30,
+            ..one_checkout()
+        };
+        let result = save(&link, &new);
+        let is_link = fs::symlink_metadata(&link).map(|meta| meta.file_type().is_symlink());
+        let text = fs::read_to_string(&real);
+        let names = names_in(real.parent().unwrap());
+        let _ = fs::remove_dir_all(&folder);
+        assert_eq!(result, Ok(()));
+        assert!(is_link.unwrap(), "the link was replaced by a file");
+        assert!(text.unwrap().contains("watch_interval = 30"));
+        assert_eq!(names, vec![FILE_NAME.to_string()]);
     }
 
     #[test]
