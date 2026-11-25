@@ -1,21 +1,28 @@
 //! What every menu and dialog shares: where it stands, the layer it is drawn on, the shield and the scrim under
 //! it, its glass pane, its buttons and how the keyboard walks them.
 //!
-//! An overlay is drawn after the screen, in [`show`]: a layer of its own above the screen's, which egui treats as
-//! modal. On it come, in this order, the [`shield`] (one area over the whole window that takes every click and
-//! wheel turn, and says whether the scrim itself was clicked), for a dialog the [`scrim`], the pane's [`glass`]
-//! (baked from the wallpaper like every pane, from [`want_dialog`] or [`want_menu`]), the [`pane`] that keeps a
-//! click on the pane's empty part off the scrim, then [`walk`] and the controls. The screen under an open overlay
-//! is told it has no keyboard (`repos_screen::show` takes `keys`), so every key is the overlay's.
+//! **[`open`] is the one way to open an overlay**, in the frame the key or press that asks for it comes, as soon
+//! as that is known (before the screen is drawn when the window can tell, else right after). It gives the focus
+//! to the control Enter should press, if any, and makes sure the key or the press that opened the overlay does
+//! nothing in it: its Enter or Space presses no button (not in that frame, not while the key is held), and the
+//! rest of its click (a double click's second click) does not land on the scrim. From the moment it is called,
+//! nothing under the overlay is hovered or turned by the wheel.
+//!
+//! Then, every frame while it is open, the overlay is drawn after the screen, in [`show`]: a layer of its own
+//! above the screen's, which egui treats as modal. On it come, in this order, the [`shield`] (one area over the
+//! whole window that takes every click and wheel turn, and says whether the scrim itself was clicked), for a
+//! dialog the [`scrim`], the pane's [`glass`] (baked from the wallpaper like every pane, from [`want_dialog`] or
+//! [`want_menu`]), the [`pane`] that keeps a click on the pane's empty part off the scrim, then [`walk`] and the
+//! controls. The screen under an open overlay ([`is_open`]) is told it has no keyboard and takes no press
+//! (`repos_screen::show` takes `keys`). It closes when it is no longer shown. Only the window's own top row stays
+//! above it ([`above`]): the window can be moved, minimised, maximised and closed under a dialog.
 //!
 //! The keyboard: only the controls in an overlay take egui's focus ([`crate::widgets::button`]). [`walk`] moves it
 //! among them on Tab and Shift-Tab, and nowhere else; Enter and Space press the one that has it, and nothing else.
-//! Whoever opens an overlay gives the focus to the control Enter should press, if any (`memory.request_focus`);
-//! with none, Enter and Space do nothing until Tab has chosen one.
+//! With no control given to [`open`], Enter and Space do nothing until Tab has chosen one.
 
 use egui::{
-    Align2, Area, AreaState, Color32, Context, Event, FocusDirection, Id, Key, LayerId, Memory, Mesh, Order, Rect, Response, Sense, Ui, Vec2, pos2,
-    vec2,
+    Align2, Area, AreaState, Color32, Context, Event, FocusDirection, Id, Key, LayerId, Memory, Mesh, Order, Rect, Sense, Ui, Vec2, pos2, vec2,
 };
 
 use crate::baker::{Drawn, Want};
@@ -100,38 +107,149 @@ pub fn buttons(room: Rect, widths: &[f32]) -> Vec<Rect> {
     places
 }
 
-/// Runs `contents` on the overlay's own layer `id`, over the whole `window` and above the screen, and gives back
-/// what it returned. The layer is modal: nothing under it gets the pointer (no hover, no click, no wheel) or the
-/// keyboard's focus. The screen is drawn before it in a frame, so that holds from the frame after the one it
-/// opens in; the keyboard the screen is told it has not (`keys`) from the first. It appears at once, whole, with
-/// no fade.
-pub fn show<R>(ctx: &Context, id: Id, window: Rect, contents: impl FnOnce(&mut Ui) -> R) -> R {
-    // egui lays a new area out unseen and untouchable in its first frame, to learn its size, and takes the focus
-    // from what it holds. The overlay's size is the window's: told so, it is there, whole, from its first frame.
-    let state =
-        AreaState { pivot_pos: Some(window.min), pivot: Align2::LEFT_TOP, size: Some(window.size()), ..AreaState::load(ctx, id).unwrap_or_default() };
-    ctx.memory_mut(|memory| memory.areas_mut().set_state(LayerId::new(Order::Foreground, id), state));
-    Area::new(id)
-        .order(Order::Foreground)
-        .fixed_pos(window.min)
-        .default_size(window.size())
+/// The keys a button takes as a press.
+const PRESS_KEYS: [Key; 2] = [Key::Enter, Key::Space];
+
+/// What the open overlay keeps from one frame to the next.
+#[derive(Clone, Debug, Default)]
+struct Opening {
+    /// The pass it was opened in.
+    pass: u64,
+    /// The last pass it was shown in.
+    shown: Option<u64>,
+    /// Enter and Space, when they were down as it opened: until they come up, their presses (the key's repeats)
+    /// are not the overlay's.
+    held: Vec<Key>,
+    /// A pointer button was pressed on the overlay after the pass it opened in: a click on the scrim from then on
+    /// is a person's, not the rest of the click that opened it.
+    pressed: bool,
+}
+
+/// Where egui keeps the [`Opening`].
+fn opening_id() -> Id {
+    Id::unique("overlay-opening")
+}
+
+/// The overlay's layer: one overlay is open at a time.
+fn layer() -> LayerId {
+    LayerId::new(Order::Foreground, Id::unique("overlay"))
+}
+
+/// The open overlay's [`Opening`], if one was opened.
+fn opening(ctx: &Context) -> Option<Opening> {
+    ctx.data(|data| data.get_temp::<Opening>(opening_id()))
+}
+
+/// Opens an overlay, the one way to: gives egui's keyboard focus to `focus` (the control Enter should press; none
+/// takes the focus from whatever held it), and keeps what opened it from acting in it. This frame's presses of
+/// Enter and Space are taken, and while either stays down its repeats are no press; a click on the scrim counts
+/// only once a button was pressed after this frame, and never as the second click of a double click. From now on
+/// nothing under the overlay's layer is hovered or turned by the wheel, also for the rest of this frame.
+pub fn open(ctx: &Context, focus: Option<Id>) {
+    let held = ctx.input_mut(|input| {
+        input.events.retain(|event| !matches!(event, Event::Key { key: Key::Enter | Key::Space, pressed: true, .. }));
+        PRESS_KEYS.into_iter().filter(|key| input.key_down(*key)).collect()
+    });
+    let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, pressed: false };
+    ctx.data_mut(|data| data.insert_temp(opening_id(), opened));
+    seed(ctx, layer(), ctx.content_rect());
+    ctx.memory_mut(|memory| match (focus, memory.focused()) {
+        (Some(id), _) => memory.request_focus(id),
+        (None, Some(other)) => memory.surrender_focus(other),
+        (None, None) => {}
+    });
+}
+
+/// Whether an overlay is open: opened this frame, or shown in the last one. The screen under it then has no
+/// keyboard and takes no press.
+#[must_use]
+pub fn is_open(ctx: &Context) -> bool {
+    let now = ctx.cumulative_pass_nr();
+    opening(ctx).is_some_and(|opening| opening.pass == now || opening.shown.is_some_and(|shown| shown + 1 >= now))
+}
+
+/// Runs `contents` on the overlay's own layer, over the whole window and above the screen, and gives back what it
+/// returned. Called every frame the overlay is open, after the screen; an overlay not shown in a frame is closed.
+/// One shown without [`open`] is opened here, with no control given the focus. The layer is modal: nothing under
+/// it gets the pointer (no hover, no click, no wheel) or the keyboard's focus. It appears at once, whole, with no
+/// fade.
+pub fn show<R>(ctx: &Context, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    if !is_open(ctx) {
+        open(ctx, None);
+    }
+    let now = ctx.cumulative_pass_nr();
+    let mut opened = opening(ctx).unwrap_or_default();
+    ctx.input_mut(|input| {
+        // A held Enter or Space repeats; its presses up to its release are the key that opened the overlay.
+        let mut held = std::mem::take(&mut opened.held);
+        input.events.retain(|event| match event {
+            Event::Key { key, pressed, .. } if held.contains(key) => {
+                if !*pressed {
+                    held.retain(|known| known != key);
+                }
+                !*pressed
+            }
+            _ => true,
+        });
+        held.retain(|key| input.key_down(*key));
+        opened.held = held;
+        if now > opened.pass && input.pointer.any_pressed() {
+            opened.pressed = true;
+        }
+    });
+    opened.shown = Some(now);
+    ctx.data_mut(|data| data.insert_temp(opening_id(), opened));
+    area(ctx, layer(), ctx.content_rect(), |ui| {
+        let layer = ui.layer_id();
+        ui.ctx().memory_mut(|memory| memory.set_modal_layer(layer));
+        contents(ui)
+    })
+}
+
+/// Runs `contents` on a small layer `id` at `rect`, above an open overlay: for the window's own top row, which
+/// moves, minimises, maximises and closes the window under a dialog as everywhere else.
+pub fn above<R>(ctx: &Context, id: Id, rect: Rect, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    area(ctx, LayerId::new(Order::Tooltip, id), rect, contents)
+}
+
+/// Tells egui the area of `layer` is at `rect`, whole and touchable. A new area is otherwise laid out unseen and
+/// untouchable in its first frame, to learn its size, and loses the focus given to what is in it.
+fn seed(ctx: &Context, layer: LayerId, rect: Rect) {
+    let state = AreaState {
+        pivot_pos: Some(rect.min),
+        pivot: Align2::LEFT_TOP,
+        size: Some(rect.size()),
+        interactable: true,
+        ..AreaState::load(ctx, layer.id).unwrap_or_default()
+    };
+    ctx.memory_mut(|memory| memory.areas_mut().set_state(layer, state));
+}
+
+/// Runs `contents` on the area of `layer` at `rect`, there from its first frame ([`seed`]), clipped to `rect`.
+fn area<R>(ctx: &Context, layer: LayerId, rect: Rect, contents: impl FnOnce(&mut Ui) -> R) -> R {
+    seed(ctx, layer, rect);
+    Area::new(layer.id)
+        .order(layer.order)
+        .fixed_pos(rect.min)
+        .default_size(rect.size())
         .constrain(false)
         .fade_in(false)
         .show(ctx, |ui| {
-            ui.set_clip_rect(window);
-            let layer = ui.layer_id();
-            ui.ctx().memory_mut(|memory| memory.set_modal_layer(layer));
+            ui.set_clip_rect(rect);
+            ui.expand_to_include_rect(rect);
             contents(ui)
         })
         .inner
 }
 
 /// The shield of the overlay in `ui` (from [`show`]): one area over the whole `window` that takes every click and
-/// wheel turn, so nothing under it gets them. Its response is clicked when the scrim itself was, and not what
-/// lies over it on the overlay ([`pane`], the controls). Added before anything else on the overlay.
-pub fn shield(ui: &mut Ui, window: Rect, id: Id) -> Response {
-    ui.expand_to_include_rect(window);
-    ui.interact(window, id, Sense::CLICK)
+/// wheel turn, so nothing under it gets them. Says whether the scrim itself was clicked: not what lies over it on
+/// the overlay ([`pane`], the controls), not the rest of the click that opened the overlay, not the second click
+/// of a double click. Added before anything else on the overlay.
+pub fn shield(ui: &mut Ui, window: Rect, id: Id) -> bool {
+    let response = ui.interact(window, id, Sense::CLICK);
+    let fresh = opening(ui.ctx()).is_some_and(|opening| opening.pressed);
+    response.clicked() && fresh && !response.double_clicked() && !response.triple_clicked()
 }
 
 /// Lays the scrim over `window`, under a dialog. A menu has none.
@@ -311,26 +429,32 @@ mod tests {
         scrim: bool,
     }
 
-    /// Runs frames of a clickable area under an overlay (without one when `shielded` is false) with these events.
-    fn under(shielded: bool, frames: Vec<Vec<Event>>) -> Vec<Heard> {
+    /// Runs frames of a clickable area under an overlay with these events. The overlay is opened in the frame at
+    /// `open_at` (never when `None`), before the area is drawn, and shown from then on, after it.
+    fn under(open_at: Option<usize>, frames: Vec<Vec<Event>>) -> Vec<Heard> {
         let ctx = context();
         let area = Rect::from_min_size(pos2(300.0, 200.0), vec2(600.0, 400.0));
         let dialog = Rect::from_min_size(pos2(500.0, 300.0), vec2(200.0, 100.0));
         frames
             .into_iter()
-            .map(|events| {
+            .enumerate()
+            .map(|(at, events)| {
                 let input = RawInput { screen_rect: Some(window()), events, ..Default::default() };
                 let mut heard = Heard::default();
+                let shown = open_at.is_some_and(|open_at| at >= open_at);
                 ctx.run_ui(input, |ui| {
+                    if open_at == Some(at) {
+                        open(ui.ctx(), None);
+                    }
                     let response = ui.interact(area, Id::unique("under"), Sense::CLICK);
                     heard.hovered = ui.rect_contains_pointer(area);
                     heard.clicked = response.clicked();
                     if heard.hovered {
                         heard.wheel = ui.input(|input| input.smooth_scroll_delta().y);
                     }
-                    if shielded {
-                        show(ui.ctx(), Id::unique("overlay"), window(), |ui| {
-                            heard.scrim = shield(ui, window(), Id::unique("shield")).clicked();
+                    if shown {
+                        show(ui.ctx(), |ui| {
+                            heard.scrim = shield(ui, window(), Id::unique("shield"));
                             pane(ui, dialog, Id::unique("pane"));
                         });
                     }
@@ -359,20 +483,75 @@ mod tests {
     fn nothing_under_a_shield_hears_a_click_or_a_wheel_turn() {
         let at = pos2(350.0, 250.0);
         // Without the shield the area hears it all: the test can tell.
-        let bare = under(false, click_at(at));
+        let bare = under(None, click_at(at));
         assert!(bare.iter().any(|heard| heard.hovered));
         assert!(bare.iter().any(|heard| heard.clicked));
         assert!(bare.iter().map(|heard| heard.wheel).sum::<f32>() != 0.0);
         // With it, nothing: no hover, no click, no wheel; the click was the scrim's.
-        let shielded = under(true, click_at(at));
+        let shielded = under(Some(0), click_at(at));
         assert!(shielded.iter().all(|heard| !heard.hovered && !heard.clicked && heard.wheel == 0.0), "{shielded:?}");
         assert_eq!(shielded.iter().filter(|heard| heard.scrim).count(), 1, "{shielded:?}");
     }
 
     #[test]
+    fn nothing_under_an_overlay_is_hovered_or_turned_in_the_frame_it_opens() {
+        let at = pos2(350.0, 250.0);
+        let wheel = Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, -40.0),
+            phase: TouchPhase::Move,
+            source: MouseWheelSource::Wheel,
+            modifiers: Modifiers::NONE,
+        };
+        let frames = vec![Vec::new(), vec![Event::PointerMoved(at)], Vec::new(), vec![wheel]];
+        let heard = under(Some(3), frames);
+        assert!(heard[2].hovered, "the pointer is over the area before the overlay opens: {heard:?}");
+        assert!(!heard[3].hovered && heard[3].wheel == 0.0, "in the frame it opens: {:?}", heard[3]);
+    }
+
+    #[test]
     fn a_click_on_the_pane_is_not_a_click_on_the_scrim() {
-        let heard = under(true, click_at(pos2(600.0, 350.0)));
+        let heard = under(Some(0), click_at(pos2(600.0, 350.0)));
         assert!(heard.iter().all(|heard| !heard.scrim && !heard.clicked), "{heard:?}");
+    }
+
+    #[test]
+    fn the_second_click_of_a_double_click_that_opened_it_does_not_close_it() {
+        let ctx = context();
+        let at = pos2(350.0, 250.0);
+        let target = Rect::from_center_size(at, vec2(40.0, 40.0));
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        // (seconds, events): a double click on the opener, then a single click on the scrim much later.
+        let frames = [
+            (0.0, vec![Event::PointerMoved(at)]),
+            (0.05, vec![button(true)]),
+            (0.1, vec![button(false)]),
+            (0.15, vec![button(true)]),
+            (0.2, vec![button(false)]),
+            (0.25, Vec::new()),
+            (1.5, vec![button(true)]),
+            (1.6, vec![button(false)]),
+        ];
+        let mut opened = false;
+        let mut said = Vec::new();
+        for (time, events) in frames {
+            let input = RawInput { screen_rect: Some(window()), time: Some(time), events, ..Default::default() };
+            let mut scrim = false;
+            ctx.run_ui(input, |ui| {
+                if ui.interact(target, Id::unique("opener"), Sense::CLICK).clicked() && !opened {
+                    open(ui.ctx(), None);
+                    opened = true;
+                }
+                if opened {
+                    show(ui.ctx(), |ui| scrim = shield(ui, window(), Id::unique("shield")));
+                }
+            })
+            .drop_without_applying_deltas();
+            said.push((opened, scrim));
+        }
+        assert!(said[2].0, "the first click opened it: {said:?}");
+        assert!(said[..7].iter().all(|(_, scrim)| !scrim), "the double click's second click closed it: {said:?}");
+        assert!(said[7].1, "a click of its own on the scrim is one: {said:?}");
     }
 
     #[test]
@@ -417,7 +596,7 @@ mod tests {
                 .run_ui(input, |ui| {
                     ui.put(Rect::from_min_size(pos2(20.0, 20.0), vec2(200.0, 30.0)), TextEdit::singleline(text).id(Walked::field()));
                     if overlay {
-                        show(ui.ctx(), Id::unique("overlay"), window(), |ui| {
+                        show(ui.ctx(), |ui| {
                             shield(ui, window(), Id::unique("shield"));
                             walk(ui, &ids);
                             let places = buttons(Rect::from_min_size(pos2(500.0, 300.0), vec2(400.0, 100.0)), &[100.0; 3]);
@@ -439,14 +618,37 @@ mod tests {
     }
 
     #[test]
-    fn the_focus_given_as_an_overlay_opens_is_there_in_its_first_frame() {
-        let mut walked = Walked::new();
-        walked.frame(Vec::new(), false);
-        let go = walked.ids[2];
-        walked.ctx.memory_mut(|memory| memory.request_focus(go));
-        // Enter in the overlay's very first frame presses the button it was opened with.
-        assert_eq!(walked.frame(vec![key(Key::Enter, Modifiers::NONE)], true), [2]);
-        assert_eq!(walked.focused(), Some(go));
+    fn the_enter_that_opens_an_overlay_does_not_press_its_main_button() {
+        let ctx = context();
+        let main = Id::unique("main");
+        let mut opened = false;
+        let mut frame = |events: Vec<Event>| {
+            let input = RawInput { screen_rect: Some(window()), events, ..Default::default() };
+            let mut pressed = false;
+            ctx.run_ui(input, |ui| {
+                // The screen under it: Enter asks for the dialog.
+                if !opened && ui.input(|input| input.key_pressed(Key::Enter)) {
+                    open(ui.ctx(), Some(main));
+                    opened = true;
+                }
+                if opened {
+                    show(ui.ctx(), |ui| {
+                        shield(ui, window(), Id::unique("shield"));
+                        walk(ui, &[main]);
+                        let place = Rect::from_min_size(pos2(600.0, 400.0), vec2(100.0, 36.0));
+                        pressed = widgets::button(ui, place, "Go", Kind::Main, theme::palette(Mode::Light), main).clicked();
+                    });
+                }
+            })
+            .drop_without_applying_deltas();
+            (pressed, ctx.memory(Memory::focused))
+        };
+        let enter = |pressed, repeat| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat, modifiers: Modifiers::NONE };
+        assert_eq!(frame(vec![enter(true, false)]), (false, Some(main)), "the Enter that opened it pressed its button");
+        assert_eq!(frame(Vec::new()), (false, Some(main)), "the next frame, the key still down");
+        assert_eq!(frame(vec![enter(true, true)]), (false, Some(main)), "the key's repeat");
+        assert_eq!(frame(vec![enter(false, false)]), (false, Some(main)), "its release");
+        assert_eq!(frame(vec![enter(true, false)]), (true, Some(main)), "a second Enter presses it");
     }
 
     #[test]
@@ -518,7 +720,7 @@ mod tests {
         let scene = Scene { size: WINDOW, pixels_per_point: 1.0, mode, backdrop: "lake".to_owned(), blur: true };
         let (wall, mut bitmap) = picture::wallpaper_window(&scene);
         let ctx = context();
-        let mut session = Session::Demo(Box::new(demo::repos()));
+        let mut session = Session::demo(demo::repos());
         let layout = shell::layout(size, true, true);
         let input = || RawInput { screen_rect: Some(window()), ..Default::default() };
         let mut plan = None;
@@ -547,13 +749,15 @@ mod tests {
         let mut textures = HashMap::from([(sheet.texture, panel.bitmap.image()), (TextureId::User(2), glass_picture.image())]);
 
         let ids = BUTTONS.map(|(words, _)| Id::unique(("test-dialog", words)));
-        ctx.memory_mut(|memory| memory.request_focus(ids[2]));
         let mut screen = Screen::default();
         let mut main = Rect::NOTHING;
         let mut shapes = Vec::new();
-        // The first frames lay the faces out and size the overlay's layer; the last is the one painted.
-        for _ in 0..3 {
+        // The first frames lay the faces out; the last is the one painted.
+        for frame in 0..3 {
             let mut output = ctx.run_ui(input(), |ui| {
+                if dialog && frame == 0 {
+                    open(ui.ctx(), Some(ids[2]));
+                }
                 let status = repos_screen::status(&session);
                 let shown = Shown { mode, waiting: 0, status: status.as_ref() };
                 shell::draw(ui, &layout, &mut true, &mut Page::Repositories, shown);
@@ -561,7 +765,7 @@ mod tests {
                 if !dialog {
                     return;
                 }
-                show(ui.ctx(), Id::unique("test-overlay"), window(), |ui| {
+                show(ui.ctx(), |ui| {
                     shield(ui, window(), Id::unique("test-shield"));
                     scrim(ui, window(), palette);
                     glass(ui, &drawn);

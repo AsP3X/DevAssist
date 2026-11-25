@@ -203,8 +203,9 @@ impl eframe::App for App {
             let shown = Shown { mode, waiting, status: status.as_ref() };
             shell::draw(ui, &layout, &mut self.sidebar_shown, &mut self.page, shown);
             if on_repositories {
-                // No overlay is opened yet, so the screen has the keyboard.
-                repos_screen::show(ui, &layout, plan.as_ref(), &mut self.session, sheet.as_ref(), mode, &mut self.screen, true);
+                // Under an open overlay the screen has no keyboard and takes no press.
+                let keys = !overlay::is_open(&ctx);
+                repos_screen::show(ui, &layout, plan.as_ref(), &mut self.session, sheet.as_ref(), mode, &mut self.screen, keys);
             } else {
                 shell::placeholder(ui, layout.panel, sheet.as_ref(), theme::palette(mode));
             }

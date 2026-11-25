@@ -1,5 +1,6 @@
 //! What the window has loaded: the repositories, live, kept current by taking in what the core's workers send.
 
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use devassist_core::config::Settings;
@@ -15,9 +16,36 @@ pub enum Session {
     Broken(String),
     /// The repositories, live.
     Live(Box<Repos>),
-    /// The drawing's repositories (`--demo`), from [`demo::repos`]: they are on no disk, so all their work is held
-    /// in the core from the start, and nothing a person asks of them is run, fetched, opened or written.
-    Demo(Box<Repos>),
+    /// The drawing's repositories (`--demo`): they are on no disk, so all their work is held in the core from the
+    /// start ([`Held`]), and nothing a person asks of them is run, fetched, opened or written.
+    Demo(Held),
+}
+
+/// Repositories whose work the core holds (`Repos::hold_work`): made only by [`Held::new`], which holds it, so a
+/// [`Session::Demo`] can never be unheld, whoever builds it.
+pub struct Held(Box<Repos>);
+
+impl Held {
+    /// `repos`, with all their work held from now on.
+    #[must_use]
+    pub fn new(mut repos: Repos) -> Held {
+        repos.hold_work();
+        Held(Box::new(repos))
+    }
+}
+
+impl Deref for Held {
+    type Target = Repos;
+
+    fn deref(&self) -> &Repos {
+        &self.0
+    }
+}
+
+impl DerefMut for Held {
+    fn deref_mut(&mut self) -> &mut Repos {
+        &mut self.0
+    }
 }
 
 impl Session {
@@ -30,7 +58,7 @@ impl Session {
     #[must_use]
     pub fn start(settings: Result<Settings, String>, launch: &Launch) -> Session {
         if launch.demo {
-            return Session::Demo(Box::new(demo::repos()));
+            return Session::demo(demo::repos());
         }
         match settings {
             Err(message) => Session::Broken(message),
@@ -42,12 +70,18 @@ impl Session {
         }
     }
 
+    /// A demo of `repos` (the drawing's, from [`demo::repos`]), its work held.
+    #[must_use]
+    pub fn demo(repos: Repos) -> Session {
+        Session::Demo(Held::new(repos))
+    }
+
     /// Takes in what the core's workers sent. Returns how long the window may sleep before the next call: a short
     /// while when the core waits for something, a longer one otherwise (the core's own timers still run then).
     pub fn tick(&mut self) -> Duration {
-        match self {
-            Session::Broken(_) => theme::TICK_IDLE,
-            Session::Live(repos) | Session::Demo(repos) => {
+        match self.repos_mut() {
+            None => theme::TICK_IDLE,
+            Some(repos) => {
                 repos.drain();
                 if repos.waiting() { theme::TICK_BUSY } else { theme::TICK_IDLE }
             }
@@ -56,9 +90,8 @@ impl Session {
 
     /// Stops what runs, for closing the window.
     pub fn close(&mut self) {
-        match self {
-            Session::Live(repos) | Session::Demo(repos) => repos.quit(),
-            Session::Broken(_) => {}
+        if let Some(repos) = self.repos_mut() {
+            repos.quit();
         }
     }
 
@@ -80,7 +113,8 @@ impl Session {
     #[must_use]
     pub fn repos(&self) -> Option<&Repos> {
         match self {
-            Session::Live(repos) | Session::Demo(repos) => Some(repos),
+            Session::Live(repos) => Some(repos),
+            Session::Demo(repos) => Some(repos),
             Session::Broken(_) => None,
         }
     }
@@ -89,7 +123,8 @@ impl Session {
     #[must_use]
     pub fn repos_mut(&mut self) -> Option<&mut Repos> {
         match self {
-            Session::Live(repos) | Session::Demo(repos) => Some(repos),
+            Session::Live(repos) => Some(repos),
+            Session::Demo(repos) => Some(repos),
             Session::Broken(_) => None,
         }
     }
@@ -136,6 +171,13 @@ mod tests {
         assert_eq!(repos.status, devassist_core::repos::state::HELD);
         assert!(!repos.waiting() && !repos.fetching && !repos.busy && repos.queue.is_empty());
         session.close();
+
+        // The session holds its demo itself, whatever repositories it is built from.
+        let unheld = Repos::offline(devassist_core::repos::state::testing::test_settings());
+        assert!(!unheld.work_held());
+        let session = Session::demo(unheld);
+        assert!(session.is_demo() && session.repos().unwrap().work_held());
+        assert!(Held::new(Repos::offline(devassist_core::repos::state::testing::test_settings())).work_held());
     }
 
     #[test]

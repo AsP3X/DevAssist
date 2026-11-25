@@ -5,11 +5,12 @@
 //! on it, or by [`placeholder`]; [`draw`] puts the text, icons and buttons of the frame over them all.
 
 use devassist_core::update::VERSION;
-use egui::{Align2, Color32, FontFamily, Painter, Pos2, Rect, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2};
+use egui::{Align2, Color32, FontFamily, Id, Painter, Pos2, Rect, Response, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::{Sheet, Want};
 use crate::frost;
+use crate::overlay;
 use crate::repos_view::Status;
 use crate::theme::{
     self, BADGE_HEIGHT, BADGE_INSET, BADGE_PAD, BAR_GAP, BAR_HEIGHT, CAPTION_BUTTON, GROUP_GAP, HOVER_OPACITY, ICON, ICON_GAP, INSET, LABEL_GAP,
@@ -228,17 +229,12 @@ pub struct Shown<'a> {
 /// the next frame on. The panel is the screen's to draw.
 pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut Page, shown: Shown<'_>) {
     let palette = theme::palette(shown.mode);
-    let window = ui.ctx().content_rect();
-
-    // The empty part of the top row moves the window, as the title bar it replaces did; drawn first, so the
-    // buttons over it take their own presses.
-    let bar = Rect::from_min_max(pos2(layout.toggle.left(), window.top()), pos2(window.right(), layout.toggle.bottom() + INSET));
-    let drag = ui.interact(bar, ui.scope_id().with("window-drag"), Sense::CLICK | Sense::DRAG);
+    let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+    let (drag, captions) = top_row(ui, layout, maximized);
     if drag.drag_started() {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
     if drag.double_clicked() {
-        let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
         ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized));
     }
 
@@ -264,11 +260,63 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
         font(TEXT_TITLE, assets::medium_family()),
         palette.on_glass,
     );
-    if !cfg!(target_os = "macos") {
-        caption_buttons(ui, layout.captions, palette);
+    for (icon, command, rect, response) in captions {
+        let (fill, mark) = match (response.hovered(), icon == Icon::X) {
+            (true, true) => (palette.danger, palette.on_dark_glass),
+            (true, false) => (palette.selection, palette.on_glass),
+            (false, _) => (Color32::TRANSPARENT, palette.on_glass),
+        };
+        ui.painter().rect_filled(rect, RADIUS_ROW, fill);
+        draw_icon(ui.painter(), rect.center(), icon, ICON, mark);
+        if response.clicked() {
+            ui.ctx().send_viewport_cmd(command);
+        }
     }
 
     draw_status(ui, layout.status, shown.status, palette);
+}
+
+/// One of the window's own buttons: its icon, what it asks of the window, where it is and what it heard.
+type Caption = (Icon, ViewportCommand, Rect, Response);
+
+/// What the top row heard: its empty part, which moves the window (and maximises it on a double click), and the
+/// window's own buttons in `layout.captions`, from the right (close, maximise or restore, minimise; none on macOS,
+/// where the system draws them). The buttons are placed after the empty part, so they take their own presses.
+///
+/// While an overlay is open they are placed on a small layer above it ([`overlay::above`]), across the row's own
+/// height only: the window can be moved, minimised, maximised and closed under a dialog, and nothing else under
+/// the overlay is reached (the sidebar button and the title lie in the empty part, which only moves the window).
+/// They are still painted with the shell, under the scrim, so they look like the rest of the row there.
+fn top_row(ui: &mut Ui, layout: &Layout, maximized: bool) -> (Response, Vec<Caption>) {
+    let window = ui.ctx().content_rect();
+    let above = overlay::is_open(ui.ctx());
+    // Without an overlay the empty part reaches down to the panes' gap, as the title bar it replaces did.
+    let bottom = if above { layout.toggle.bottom() } else { layout.toggle.bottom() + INSET };
+    let bar = Rect::from_min_max(pos2(layout.toggle.left(), window.top()), pos2(window.right(), bottom));
+    let buttons = if cfg!(target_os = "macos") {
+        Vec::new()
+    } else {
+        vec![
+            (Icon::X, "Close", ViewportCommand::Close),
+            (Icon::Square, if maximized { "Restore" } else { "Maximise" }, ViewportCommand::Maximized(!maximized)),
+            (Icon::Minus, "Minimise", ViewportCommand::Minimized(true)),
+        ]
+    };
+    let place = |ui: &mut Ui| {
+        let drag = ui.interact(bar, Id::unique("window-drag"), Sense::CLICK | Sense::DRAG);
+        let mut right = layout.captions.right();
+        let captions = buttons
+            .into_iter()
+            .map(|(icon, hint, command)| {
+                let rect = Rect::from_min_max(pos2(right - CAPTION_BUTTON, layout.captions.top()), pos2(right, layout.captions.bottom()));
+                right = rect.left();
+                let response = ui.interact(rect, Id::unique(("window-caption", icon.name())), Sense::CLICK).on_hover_text(hint);
+                (icon, command, rect, response)
+            })
+            .collect();
+        (drag, captions)
+    };
+    if above { overlay::above(ui.ctx(), Id::unique("window-top-row"), bar, place) } else { place(ui) }
 }
 
 /// Paints the frosted panel at `panel` from `sheet` with the sentence of a screen that is not built yet.
@@ -440,38 +488,102 @@ fn draw_badge(painter: &Painter, row: Rect, count: String, palette: Palette) {
     painter.galley(badge.center() - galley.size() / 2.0, galley, palette.on_glass);
 }
 
-/// The window's own three buttons in `captions`, from its right end (close, maximise or restore, minimise), where
-/// the window has no system frame.
-fn caption_buttons(ui: &Ui, captions: Rect, palette: Palette) {
-    let ctx = ui.ctx().clone();
-    let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-    let buttons = [
-        (Icon::X, "Close", ViewportCommand::Close),
-        (Icon::Square, if maximized { "Restore" } else { "Maximise" }, ViewportCommand::Maximized(!maximized)),
-        (Icon::Minus, "Minimise", ViewportCommand::Minimized(true)),
-    ];
-    let mut right = captions.right();
-    for (icon, hint, command) in buttons {
-        let rect = Rect::from_min_max(pos2(right - CAPTION_BUTTON, captions.top()), pos2(right, captions.bottom()));
-        right = rect.left();
-        let response = ui.interact(rect, ui.scope_id().with(hint), Sense::CLICK).on_hover_text(hint);
-        let close = icon == Icon::X;
-        let (fill, mark) = match (response.hovered(), close) {
-            (true, true) => (palette.danger, palette.on_dark_glass),
-            (true, false) => (palette.selection, palette.on_glass),
-            (false, _) => (Color32::TRANSPARENT, palette.on_glass),
-        };
-        ui.painter().rect_filled(rect, RADIUS_ROW, fill);
-        draw_icon(ui.painter(), rect.center(), icon, ICON, mark);
-        if response.clicked() {
-            ctx.send_viewport_cmd(command);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use egui::{Event, Modifiers, PointerButton, RawInput};
+
     use super::*;
+    use crate::overlay;
+
+    /// What the window was asked to do over frames of the shell at 1440 by 900, under an open dialog when
+    /// `dialog`; and whether the sidebar is shown and which page is chosen after them. Each frame is its time in
+    /// seconds and its events.
+    fn asked(dialog: bool, frames: Vec<(f64, Vec<Event>)>) -> (Vec<ViewportCommand>, bool, Page) {
+        let ctx = crate::widgets::tests::context();
+        let layout = layout(egui::vec2(1440.0, 900.0), true, false);
+        let (mut shown, mut page) = (true, Page::Repositories);
+        let mut commands = Vec::new();
+        for (time, events) in frames {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1440.0, 900.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                draw(ui, &layout, &mut shown, &mut page, Shown { mode: Mode::Light, waiting: 0, status: None });
+                if dialog {
+                    overlay::show(ui.ctx(), |ui| {
+                        let window = ui.ctx().content_rect();
+                        overlay::shield(ui, window, Id::unique("test-shield"));
+                        overlay::scrim(ui, window, theme::palette(Mode::Light));
+                    });
+                }
+            });
+            commands.extend(output.viewport_output.values().flat_map(|viewport| viewport.commands.iter().cloned()));
+            output.drop_without_applying_deltas();
+        }
+        (commands, shown, page)
+    }
+
+    /// A click at `at`, starting at `time`: the pointer comes, presses and lets go.
+    fn click(at: Pos2, time: f64) -> Vec<(f64, Vec<Event>)> {
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        vec![(time, vec![Event::PointerMoved(at)]), (time + 0.02, vec![button(true)]), (time + 0.04, vec![button(false)])]
+    }
+
+    #[test]
+    fn the_window_is_closed_minimised_and_maximised_under_a_dialog() {
+        if cfg!(target_os = "macos") {
+            return; // The system draws the window's buttons there.
+        }
+        let captions = layout(egui::vec2(1440.0, 900.0), true, false).captions;
+        let button = |index: f32| pos2(captions.right() - CAPTION_BUTTON * (index + 0.5), captions.center().y);
+        for dialog in [false, true] {
+            let at = |index: f32| [vec![(0.0, Vec::new())], click(button(index), 0.1)].concat();
+            let (commands, ..) = asked(dialog, at(0.0));
+            assert!(commands.iter().any(|command| matches!(command, ViewportCommand::Close)), "close, dialog {dialog}: {commands:?}");
+            let (commands, ..) = asked(dialog, at(1.0));
+            assert!(commands.iter().any(|command| matches!(command, ViewportCommand::Maximized(true))), "maximise, dialog {dialog}: {commands:?}");
+            let (commands, ..) = asked(dialog, at(2.0));
+            assert!(commands.iter().any(|command| matches!(command, ViewportCommand::Minimized(true))), "minimise, dialog {dialog}: {commands:?}");
+        }
+    }
+
+    #[test]
+    fn the_window_is_moved_and_maximised_by_its_top_row_under_a_dialog() {
+        let at = pos2(700.0, 30.0);
+        let button = |pressed, at| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let drag = vec![
+            (0.0, Vec::new()),
+            (0.1, vec![Event::PointerMoved(at)]),
+            (0.12, vec![button(true, at)]),
+            (0.2, vec![Event::PointerMoved(at + egui::vec2(40.0, 0.0))]),
+            (0.3, vec![Event::PointerMoved(at + egui::vec2(80.0, 0.0))]),
+        ];
+        let double = [vec![(0.0, Vec::new())], click(at, 0.1), click(at, 0.2)].concat();
+        for dialog in [false, true] {
+            let (commands, ..) = asked(dialog, drag.clone());
+            assert!(commands.iter().any(|command| matches!(command, ViewportCommand::StartDrag)), "drag, dialog {dialog}: {commands:?}");
+            let (commands, ..) = asked(dialog, double.clone());
+            assert!(
+                commands.iter().any(|command| matches!(command, ViewportCommand::Maximized(true))),
+                "double click, dialog {dialog}: {commands:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_else_of_the_shell_is_reached_under_a_dialog() {
+        let l = layout(egui::vec2(1440.0, 900.0), true, false);
+        let docker = page_rows(l.sidebar).into_iter().find(|(page, _)| *page == Page::Docker).map(|(_, rect)| rect.center()).unwrap();
+        let frames = [vec![(0.0, Vec::new())], click(l.toggle.center(), 0.1), click(docker, 1.0)].concat();
+        let (_, shown, page) = asked(false, frames.clone());
+        assert_eq!((shown, page), (false, Page::Docker), "without a dialog the clicks reach them");
+        let (commands, shown, page) = asked(true, frames);
+        assert_eq!((shown, page), (true, Page::Repositories), "under a dialog they do not");
+        assert!(commands.iter().all(|command| !matches!(command, ViewportCommand::Maximized(_) | ViewportCommand::StartDrag)), "{commands:?}");
+    }
 
     #[test]
     fn the_layout_is_the_designs_at_1440_by_900() {

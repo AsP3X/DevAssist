@@ -137,7 +137,7 @@ pub fn status(session: &Session) -> Option<Status> {
 pub fn state_text(session: &Session) -> Option<(String, Vec<String>)> {
     let repos = match session {
         Session::Broken(message) => return Some((BROKEN.to_owned(), vec![message.clone(), CORRECT_THE_FILE.to_owned()])),
-        Session::Live(repos) | Session::Demo(repos) => repos,
+        Session::Live(_) | Session::Demo(_) => session.repos()?,
     };
     if repos.installed.is_empty() {
         // While the folders are still being read, the status bar says so and the panel waits.
@@ -247,8 +247,9 @@ fn filter_id() -> Id {
 /// that stands for it on the panel, with `sheet` its frosted sheet. The keys and presses change `session`'s
 /// repositories through their methods; `screen` keeps the scroll and the focus between frames.
 ///
-/// Without `keys` (an overlay is open over the screen and takes them all) the screen handles no key, and its
-/// filter neither keeps nor takes the keyboard's focus. The overlay's shield keeps the pointer from it.
+/// Without `keys` (an overlay is open over the screen: `overlay::is_open`) the screen handles no key and acts on no
+/// press, and its filter neither keeps nor takes the keyboard's focus; the overlay's layer keeps the pointer's
+/// hover and the wheel from it.
 #[expect(clippy::too_many_arguments, reason = "the screen's one entry: what it draws, on what, and whether it has the keyboard")]
 pub fn show(
     ui: &mut Ui,
@@ -289,11 +290,12 @@ pub fn show(
         let mut text = repos.list_filter.clone();
         widgets::field(ui, plan.field, &mut text, FILTER_HINT, Icon::Search, palette, filter_id());
         repos.set_list_filter(&text);
-        if widgets::capsule(ui, plan.view, &view_items(plan.sort), palette).is_some() {
+        if widgets::capsule(ui, plan.view, &view_items(plan.sort), palette).is_some() && keys {
             repos.toggle_sort();
         }
         if let Some((rect, count)) = &plan.selection
             && widgets::capsule(ui, *rect, &selection_items(count), palette) == Some(1)
+            && keys
         {
             repos.clear_marks();
         }
@@ -335,7 +337,8 @@ pub fn show(
             screen.scroll = follow(&heights, index, screen.scroll, table::body_rect(layout.panel).height());
         }
     }
-    match table::show(ui, layout.panel, &lines, sheet, palette, mode, &mut screen.scroll) {
+    let did = table::show(ui, layout.panel, &lines, sheet, palette, mode, &mut screen.scroll);
+    match if keys { did } else { Did::None } {
         Did::Picked(key) => repos.pick(&key),
         Did::Ticked(key) => repos.toggle_mark_of(&key),
         Did::Folded(key) => {
@@ -473,7 +476,7 @@ mod tests {
     #[test]
     fn without_the_keyboard_the_screen_hears_no_key_and_its_filter_takes_no_focus() {
         let ctx = context();
-        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
         let rows = keys(&session);
@@ -538,7 +541,7 @@ mod tests {
     #[test]
     fn keys_do_what_the_terminal_app_does() {
         let ctx = context();
-        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
         let rows = keys(&session);
@@ -591,7 +594,7 @@ mod tests {
     fn the_arrows_fold_and_unfold_the_highlighted_group() {
         let ctx = context();
         // Folding saves through the core, which writes nothing for the held demo.
-        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         session.repos_mut().unwrap().pick("group::home");
         frame(&ctx, &mut session, &mut screen, vec![press(Key::ArrowLeft)]);
@@ -608,7 +611,7 @@ mod tests {
     #[test]
     fn a_click_on_a_groups_header_highlights_it_then_folds_it() {
         let ctx = context();
-        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         session.repos_mut().unwrap().pick("dotfiles");
         // The demo starts with the header of home, right under the table's head.
@@ -661,7 +664,7 @@ mod tests {
             state_text(&none),
             Some(("No repositories yet".to_owned(), vec!["Add them in the terminal app for now: adding from the window comes next.".to_owned()]))
         );
-        let mut demo = Session::Demo(Box::new(crate::demo::repos()));
+        let mut demo = Session::demo(crate::demo::repos());
         assert_eq!(state_text(&demo), None);
         demo.repos_mut().unwrap().set_list_filter("zzz");
         assert_eq!(state_text(&demo), Some(("Nothing matches zzz".to_owned(), vec!["Esc clears the filter.".to_owned()])));
@@ -693,7 +696,7 @@ mod tests {
     #[test]
     fn the_plan_bakes_the_toolbars_glass_and_counts_the_ticks() {
         let ctx = context();
-        let session = Session::Demo(Box::new(crate::demo::repos()));
+        let session = Session::demo(crate::demo::repos());
         let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, true);
         let mut planned = None;
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
@@ -722,7 +725,7 @@ mod tests {
 
     #[test]
     fn the_status_is_the_cores() {
-        let demo = Session::Demo(Box::new(crate::demo::repos()));
+        let demo = Session::demo(crate::demo::repos());
         assert_eq!(status(&demo).map(|status| status.text), Some("12 installed. 2 are behind. 1 has new commits on other branches.".to_owned()));
         assert_eq!(status(&Session::Broken(String::new())), None);
     }
@@ -735,7 +738,7 @@ mod tests {
     #[test]
     fn the_arrows_in_the_filter_move_the_highlight_and_the_focus_stays_there() {
         let ctx = context();
-        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
         let rows = keys(&session);
@@ -775,7 +778,7 @@ mod tests {
     #[test]
     fn esc_clears_a_filter_that_lets_nothing_through_even_without_the_focus() {
         let ctx = context();
-        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
         frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
@@ -792,7 +795,7 @@ mod tests {
     #[test]
     fn text_in_the_frame_the_focus_moves_goes_where_the_focus_is() {
         let ctx = context();
-        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
         // "/po" typed so fast that it comes in one frame: the "po" is the filter's.
