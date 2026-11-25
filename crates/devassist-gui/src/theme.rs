@@ -265,6 +265,28 @@ mod tests {
     }
 
     #[test]
+    fn each_surface_names_its_material_words_exactly() {
+        use material::{Appearance, Depth, Kind, Thickness, Variant};
+        let glass = Kind::Glass(Variant::Regular);
+        let want = [
+            (Surface::Sidebar, glass, Some(Depth::Panel)),
+            (Surface::Capsule, glass, None),
+            (Surface::StatusBar, glass, Some(Depth::Bar)),
+            (Surface::Panel, Kind::Frosted(Thickness::Thick), None),
+        ];
+        for (surface, kind, depth) in want {
+            for (mode, appearance) in [(Mode::Light, Appearance::Light), (Mode::Dark, Appearance::Dark)] {
+                let Some(read) = Material::read(&material_value(surface, mode)) else {
+                    panic!("{surface:?} {mode:?} does not read");
+                };
+                assert_eq!(read.kind, kind, "{surface:?} {mode:?}");
+                assert_eq!(read.depth, depth, "{surface:?} {mode:?}");
+                assert_eq!(read.appearance, appearance, "{surface:?} {mode:?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_mode_follows_the_theme_setting_or_the_system() {
         assert_eq!(Mode::of(Theme::Light, true), Mode::Light);
         assert_eq!(Mode::of(Theme::Dark, false), Mode::Dark);
