@@ -70,6 +70,11 @@ What changed in each version of DevAssist. The format follows
   reports how many there were. It works whether **Pull requests** is on in
   the settings or not, and like every fetch it removes nothing.
 
+### Changed
+
+- Internal: the logic is a crate of its own, `devassist-core`, as the base for
+  a window. Nothing changes in use.
+
 ## [0.6.0] - 2026-11-24
 
 Watched repositories pull themselves on a timer, and pull requests can be

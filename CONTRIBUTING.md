@@ -39,10 +39,20 @@ cargo run -- --config scratch.toml
 Before you open a pull request, these must pass. CI runs the same three:
 
 ```
-cargo fmt --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
+
+### Where the code is
+
+- The terminal app is the root package, in `src/`. It holds the keys and the
+  drawing.
+- `crates/devassist-core` holds git, GitHub, Docker, the settings file, the
+  update and the state of each tool. It must not depend on `ratatui` or
+  `crossterm`; CI checks this.
+- A new function goes into the core as a method on the tool's state. The
+  terminal app adds the key for it.
 
 ### What a good change looks like
 
@@ -53,7 +63,7 @@ cargo test --locked
   `src/features/repos/ui.rs` and `src/features/docker/view.rs`: those draw
   into an in-memory terminal and check the text. Git behaviour is tested
   against a real throwaway repository; see the tests at the end of
-  `src/features/repos/gitops.rs`.
+  `crates/devassist-core/src/repos/gitops.rs`.
 - **Tests stay local.** No test may call GitHub, run `docker`, open a
   browser, change the clipboard, or write outside the system's temporary
   folder. A test that needs the network or a Docker engine is marked
