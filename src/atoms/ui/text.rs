@@ -49,35 +49,7 @@ pub fn fit_end(text: &str, width: usize) -> String {
     format!("…{kept}")
 }
 
-/// `text` in exactly `width` cells: padded with spaces, or cut with "…".
-pub fn fit(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let current = UnicodeWidthStr::width(text);
-    if current <= width {
-        return format!("{text}{}", " ".repeat(width - current));
-    }
-    if width == 1 {
-        return "…".to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + ch_width > width - 1 {
-            break;
-        }
-        out.push(ch);
-        used += ch_width;
-    }
-    out.push('…');
-    let used = UnicodeWidthStr::width(out.as_str());
-    if used < width {
-        out.push_str(&" ".repeat(width - used));
-    }
-    out
-}
+pub use devassist_core::text::fit;
 
 #[cfg(test)]
 mod tests {

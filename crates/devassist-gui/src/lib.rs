@@ -8,6 +8,7 @@ pub mod demo;
 pub mod frost;
 pub mod launch;
 pub mod logger;
+pub mod repos_view;
 pub mod screenshot;
 pub mod session;
 pub mod shell;

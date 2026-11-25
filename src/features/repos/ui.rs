@@ -21,6 +21,7 @@ use crate::features::repos::state::{
     Action, ForksView, MenuItem, MigrateItem, Mode, Purpose, RemoteState, Row, clone_target,
     group_key,
 };
+use devassist_core::text::short_path;
 
 /// Draws the overview and its open dialog into `area`.
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -2393,44 +2394,6 @@ fn pulls_cell(
         .map(|(text, _)| text)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// A path cut to `width` characters by leaving out its middle: the drive
-/// or root stays, and as many of the last folders as fit, such as
-/// `C:\…\work\api`. The end says the most, so that is what is kept.
-fn short_path(path: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(path) <= width {
-        return path.to_string();
-    }
-    let separator = |ch: char| ch == '\\' || ch == '/';
-    // The root: "C:\", "/" or nothing for a relative path.
-    let root: String = match path.find(separator) {
-        Some(at) if at <= 2 => path[..=at].to_string(),
-        _ => String::new(),
-    };
-    let room = width.saturating_sub(UnicodeWidthStr::width(root.as_str()) + 1);
-    // The longest end that fits.
-    let mut tail = String::new();
-    let mut used = 0;
-    for ch in path.chars().rev() {
-        let wide = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + wide > room {
-            break;
-        }
-        used += wide;
-        tail.insert(0, ch);
-    }
-    // Start it at a folder, unless that would throw most of it away.
-    if !tail.starts_with(separator)
-        && let Some(at) = tail.find(separator)
-        && at * 2 <= tail.len()
-    {
-        tail = tail[at..].to_string();
-    }
-    if tail.is_empty() {
-        return fit(path, width).trim_end().to_string();
-    }
-    format!("{root}…{tail}")
 }
 
 /// How wide the longest entry of each column is. A column takes no more
