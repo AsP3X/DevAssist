@@ -4,9 +4,10 @@
 
 use std::process::ExitCode;
 
-use devassist_gui::{app, assets, launch};
+use devassist_gui::{app, assets, launch, logger};
 
 fn main() -> ExitCode {
+    logger::install();
     let launch = match launch::parse(std::env::args().skip(1)) {
         Ok(launch) => launch,
         Err(message) => {

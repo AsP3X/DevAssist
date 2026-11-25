@@ -5,6 +5,7 @@ pub mod app;
 pub mod assets;
 pub mod baker;
 pub mod launch;
+pub mod logger;
 pub mod screenshot;
 pub mod shell;
 pub mod theme;
