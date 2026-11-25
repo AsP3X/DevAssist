@@ -30,8 +30,11 @@ cargo run -- --config scratch.toml
 ## The window
 
 `devassist-gui` is a second program, a window in a "liquid glass" design. It
-shows your repositories and changes nothing yet. It is not in the installers
-or the release downloads.
+shows your repositories. You cannot change anything from it yet, but what the
+program does by itself it also does here: it fetches every repository when it
+starts, and it pulls the repositories you watch when their interval is over,
+as the terminal app does (see the window in [USAGE.md](USAGE.md)). It is not
+in the installers or the release downloads.
 
 ```
 cargo run -p devassist-gui
@@ -47,12 +50,12 @@ frosted instead.
 | Option | What it does |
 |---|---|
 | `--config PATH` | Reads the settings from this file |
-| `--screenshot OUT.png` | Saves a picture of the window and exits |
+| `--screenshot OUT.png` | Saves a picture of the window and exits. It only reads your repositories: it fetches nothing, pulls nothing and writes no settings |
 | `--light`, `--dark` | Light or dark, whatever the settings say |
 | `--backdrop KEY` | The backdrop: `lake`, `midday`, `golden`, `dusk`, `night` or `forest` |
 | `--no-blur` | Does not blur the backdrop |
 | `--no-sidebar` | Opens with the sidebar hidden |
-| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder and asks no network, so it suits screenshots. Refresh does nothing in it. Folding a group writes only to a settings file of its own under the system's temporary folder |
+| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder, no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. Refresh does nothing in it. Folding a group writes only to a settings file of its own in a folder under the system's temporary folder, which is removed when the window closes |
 
 At start the window reads `theme`, `backdrop` and `blur` from the settings
 file. It cannot change them yet. A settings file with a mistake makes the
@@ -76,6 +79,19 @@ off screen for a moment and then ends:
 
 ```
 cargo run -p devassist-gui -- --screenshot window.png --dark --backdrop night
+```
+
+A picture run reads your repositories as they are on disk: it does not fetch
+them, does not pull the watched ones and writes no settings, so the picture
+shows what the last fetch found. Add `--demo` for a picture that does not
+depend on your repositories at all.
+
+A release build on Windows has no console, so the shell does not wait for it
+to end. To take a picture with the release executable and wait for it, start
+it with `Start-Process -Wait` in PowerShell:
+
+```
+Start-Process -Wait target\release\devassist-gui.exe -ArgumentList '--demo','--screenshot','window.png'
 ```
 
 ## Checks

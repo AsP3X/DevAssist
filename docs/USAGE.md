@@ -481,7 +481,8 @@ cargo run -p devassist-gui
 ```
 
 It reads the same settings file as the terminal app. `--config PATH` reads
-another one. `--demo` shows twelve made-up repositories instead of yours.
+another one. `--demo` shows twelve made-up repositories instead of yours and
+reads no settings file.
 
 The window shows the repositories in their groups. Each row has its name,
 branch, changes (`Clean` or `Uncommitted`), pull requests, and how far it is
@@ -509,12 +510,14 @@ shows the mistake and loads nothing. In `--demo`, refresh does nothing.
 | `r`, `F5` | Fetch and read again |
 | `Esc` | Clear the filter when it lets nothing through, otherwise clear the ticks |
 
-A click on a row highlights it, on its box ticks it, on a group's header folds
-it, and on the box in the head ticks every row shown.
+A click on a row highlights it, on its box ticks it, on a group's header
+highlights and folds it, and on the box in the head ticks every row shown.
 
 While the filter has the keyboard, `↑` `↓` and `PgUp` `PgDn` still move the
 highlight. `Home` and `End` belong to the text. `Tab` keeps the keyboard in the
-filter. `Esc` clears the filter.
+filter. `Esc` clears the filter. The other keys of the table, such as `r` and
+`F5`, act only when the filter does not have the keyboard: there `r` is typed
+into the filter and `F5` does nothing.
 
 Everything else, such as adding, updating, moving and removing, is still done
 in the terminal app.
