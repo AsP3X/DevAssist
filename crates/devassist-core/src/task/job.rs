@@ -2,7 +2,10 @@
 //! through, what was printed for each, and how the run ended.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::{Duration, Instant};
+
+use crate::repos::gitprogress::split_progress;
 
 const OUTPUT_LIMIT: usize = 500;
 
@@ -140,6 +143,29 @@ pub fn percent_reader(line: &str, progress: bool, before: Option<f64>) -> Option
         Some(f64::from(percent) / 100.0)
     } else {
         before
+    }
+}
+
+/// A run's one-line state, in the parts the terminal styles apart. As text
+/// it reads as the terminal shows it: "2 of 3  portal", "Receiving
+/// objects", "✓ Cloned 3.".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Summary {
+    /// Which one of how many is running, "2 of 3", while a run of several
+    /// runs and is not being cancelled. None otherwise.
+    pub position: Option<String>,
+    /// What is happening, or how the run ended: the running repository's
+    /// name in a run of several, what git is doing in a run of one,
+    /// "■ Cancelling…", or the result after "✓", "✗" or "■ Cancelled.".
+    pub words: String,
+}
+
+impl fmt::Display for Summary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.position {
+            Some(position) => write!(f, "{position}  {}", self.words),
+            None => f.write_str(&self.words),
+        }
     }
 }
 
@@ -340,6 +366,38 @@ impl Job {
             .duration_since(self.started)
     }
 
+    /// The one-line state of the run: what is happening now, or how it
+    /// ended. These are the words of the terminal's progress headline; the
+    /// spinner it draws in front of a running one is not part of them.
+    pub fn summary(&self) -> Summary {
+        let total = self.items.len();
+        let current = self.current();
+        let (position, words) = match &self.result {
+            None if self.cancelling => (None, "■ Cancelling…".to_string()),
+            None if total > 1 => (
+                Some(format!("{} of {total}", (self.settled() + 1).min(total))),
+                current
+                    .map_or("Starting", |item| item.name.as_str())
+                    .to_string(),
+            ),
+            None => {
+                let phase = current
+                    .map(|item| split_progress(&item.progress).0)
+                    .unwrap_or_default();
+                let doing = if phase.is_empty() {
+                    "Working".to_string()
+                } else {
+                    phase
+                };
+                (None, doing)
+            }
+            Some(Ok(message)) => (None, format!("✓ {message}")),
+            Some(Err(_)) if self.cancelled => (None, "■ Cancelled.".to_string()),
+            Some(Err(message)) => (None, format!("✗ {message}")),
+        };
+        Summary { position, words }
+    }
+
     /// Scrolls the shown repository's output.
     pub fn scroll_by(&mut self, delta: isize) {
         let lines = self
@@ -385,6 +443,67 @@ mod tests {
             names.iter().map(|name| (*name).to_string()).collect(),
             0,
         )
+    }
+
+    #[test]
+    fn a_runs_summary_reads_as_the_terminal_showed_it() {
+        let summary = |job: &Job| {
+            (
+                job.summary().position,
+                job.summary().words,
+                job.summary().to_string(),
+            )
+        };
+        let part = |position: Option<&str>, words: &str, whole: &str| {
+            (
+                position.map(String::from),
+                words.to_string(),
+                whole.to_string(),
+            )
+        };
+        // Running, several: which one of how many, and its name.
+        let mut run = job(&["api", "portal", "docs"]);
+        assert_eq!(
+            summary(&run),
+            part(Some("1 of 3"), "Starting", "1 of 3  Starting")
+        );
+        run.on(JobEvent::Start(0));
+        run.on(JobEvent::Done(0, "cloned".into()));
+        run.on(JobEvent::Start(1));
+        assert_eq!(
+            summary(&run),
+            part(Some("2 of 3"), "portal", "2 of 3  portal")
+        );
+        // Running, one: what git is doing.
+        let mut one = job(&["artcraft"]);
+        one.on(JobEvent::Start(0));
+        assert_eq!(summary(&one), part(None, "Working", "Working"));
+        one.on(JobEvent::Line(
+            "Receiving objects:  45% (120/266), 1.20 MiB | 2.00 MiB/s".into(),
+            true,
+        ));
+        assert_eq!(
+            summary(&one),
+            part(None, "Receiving objects", "Receiving objects")
+        );
+        run.cancelling = true;
+        assert_eq!(summary(&run), part(None, "■ Cancelling…", "■ Cancelling…"));
+        // Done, cancelled, failed: how it ended.
+        let mut done = job(&["api"]);
+        done.finish(Ok("Cloned api.".into()), false);
+        assert_eq!(summary(&done), part(None, "✓ Cloned api.", "✓ Cloned api."));
+        run.finish(Err("cancelled".into()), true);
+        assert_eq!(summary(&run), part(None, "■ Cancelled.", "■ Cancelled."));
+        let mut failed = job(&["api", "portal"]);
+        failed.finish(Err("Cloned 1, 1 failed: portal".into()), false);
+        assert_eq!(
+            summary(&failed),
+            part(
+                None,
+                "✗ Cloned 1, 1 failed: portal",
+                "✗ Cloned 1, 1 failed: portal"
+            )
+        );
     }
 
     #[test]

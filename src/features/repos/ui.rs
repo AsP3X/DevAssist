@@ -1000,25 +1000,12 @@ fn draw_add(frame: &mut Frame, app: &mut App, screen: Rect) {
 
 fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
     const LISTED: usize = 8;
-    let folders = match &app.mode {
-        Mode::ConfirmRemove { folders } => folders.clone(),
-        _ => return,
-    };
-    // Name, path, and whether it has uncommitted changes.
-    let repos: Vec<(String, String, bool)> = folders
-        .iter()
-        .map(|folder| {
-            let repo = app.installed.iter().find(|repo| &repo.folder == folder);
-            (
-                folder.clone(),
-                repo.map(|repo| repo.path.display().to_string())
-                    .unwrap_or_default(),
-                repo.is_some_and(|repo| repo.dirty),
-            )
-        })
-        .collect();
+    if !matches!(app.mode, Mode::ConfirmRemove { .. }) {
+        return;
+    }
+    let repos = app.remove_lines();
     let many = repos.len() > 1;
-    let dirty = repos.iter().filter(|(_, _, dirty)| *dirty).count();
+    let dirty = repos.iter().filter(|line| line.dirty).count();
     let listed = if repos.len() > LISTED {
         LISTED - 1
     } else {
@@ -1063,9 +1050,9 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
         .add_modifier(Modifier::BOLD);
     let mut body: Vec<Line> = Vec::new();
     if many {
-        for (folder, _, dirty) in repos.iter().take(listed) {
-            let mut spans = vec![Span::styled(folder.clone(), name_style)];
-            if *dirty {
+        for line in repos.iter().take(listed) {
+            let mut spans = vec![Span::styled(line.name.clone(), name_style)];
+            if line.dirty {
                 spans.push(Span::styled(
                     "  uncommitted changes",
                     Style::default().fg(Color::Yellow),
@@ -1079,10 +1066,10 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
                 Style::default().fg(Color::DarkGray),
             )));
         }
-    } else if let Some((folder, path, _)) = repos.first() {
-        body.push(Line::from(Span::styled(folder.clone(), name_style)));
+    } else if let Some(line) = repos.first() {
+        body.push(Line::from(Span::styled(line.name.clone(), name_style)));
         body.push(Line::from(Span::styled(
-            fit(path, inner.width as usize),
+            fit(&line.path.display().to_string(), inner.width as usize),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -1903,46 +1890,33 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
     let current = job.current();
 
     // Headline: what is happening now, or how it ended. Time on the right.
-    let (phase, numbers) = current
-        .map(|item| split_progress(&item.progress))
+    let numbers = current
+        .map(|item| split_progress(&item.progress).1)
         .unwrap_or_default();
     let bold = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let summary = job.summary();
     let headline = match &job.result {
         None if job.cancelling => vec![Span::styled(
-            "■ Cancelling…",
+            summary.words,
             Style::default().fg(Color::Yellow),
         )],
         None => {
-            let name = current.map(|item| item.name.as_str()).unwrap_or("Starting");
             let mut spans = vec![Span::styled(
                 format!("{} ", progress::spinner(tick)),
                 Style::default().fg(Color::Cyan),
             )];
-            if many {
-                spans.push(Span::styled(
-                    format!("{} of {total}  ", (job.settled() + 1).min(total)),
-                    gray,
-                ));
-                spans.push(Span::styled(
-                    name.to_string(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                let doing = if phase.is_empty() { "Working" } else { &phase };
-                spans.push(Span::styled(
-                    doing.to_string(),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ));
+            if let Some(position) = summary.position {
+                spans.push(Span::styled(format!("{position}  "), gray));
             }
+            spans.push(Span::styled(
+                summary.words,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans
         }
-        Some(Ok(message)) => vec![Span::styled(format!("✓ {message}"), bold)],
-        Some(Err(_)) if job.cancelled => vec![Span::styled("■ Cancelled.", bold)],
-        Some(Err(message)) => vec![Span::styled(format!("✗ {message}"), bold)],
+        Some(_) => vec![Span::styled(summary.words, bold)],
     };
     let time = clock(job.elapsed());
     frame.render_widget(Paragraph::new(Line::from(headline)), row(header_y));
@@ -2106,7 +2080,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
 
     // Right pane: the shown repository's own progress and git's output.
-    job.view = 0;
+    let mut view = 0;
     if let (Some(area), Some(item)) = (detail, job.items.get(shown)) {
         let back = if job.scroll > 0 {
             format!(" · {} lines back", job.scroll)
@@ -2240,8 +2214,9 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
             lines.push(Line::from(Span::styled(empty, dim)));
         }
         frame.render_widget(Paragraph::new(lines), text);
-        job.view = out_rows;
+        view = out_rows;
     }
+    app.set_job_view(view);
 
     // Button labels carry their own leading space: start one column early
     // so the words line up with the header.
@@ -3300,6 +3275,173 @@ mod tests {
         let screen = render(&mut app, 48, 12);
         assert!(screen.contains("five"));
         assert!(screen.contains("Cancel"));
+    }
+
+    /// What one row of a dialog says, between its borders: the first row
+    /// that holds `needle`.
+    fn dialog_row(screen: &str, needle: &str) -> String {
+        let line = screen
+            .lines()
+            .find(|line| line.contains('│') && line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} is not in a dialog on\n{screen}"));
+        let start = line.find('│').map_or(0, |at| at + '│'.len_utf8());
+        let end = line
+            .rfind('│')
+            .filter(|end| *end >= start)
+            .unwrap_or(line.len());
+        line[start..end].trim().to_string()
+    }
+
+    #[test]
+    fn the_remove_dialog_says_which_checkouts_have_uncommitted_changes() {
+        let mut app = app(false);
+        let mut installed = vec![
+            local("api", false),
+            local("docs", true),
+            local("portal", false),
+            local("web", true),
+        ];
+        for index in 0..8 {
+            installed.push(local(&format!("extra{index}"), index == 2));
+        }
+        app.installed = installed;
+        let mut ask = |folders: &[&str]| {
+            app.mode = Mode::ConfirmRemove {
+                folders: folders.iter().map(|folder| (*folder).to_string()).collect(),
+            };
+            render(&mut app, 120, 30)
+        };
+
+        let screen = ask(&["portal"]);
+        assert!(screen.contains("╭ Remove repository ─"), "{screen}");
+        let path = PathBuf::from("development").join("portal");
+        assert_eq!(
+            dialog_row(&screen, &path.display().to_string()),
+            path.display().to_string()
+        );
+        assert_eq!(
+            dialog_row(&screen, "The local folder"),
+            "The local folder will be deleted. The GitHub repository stays"
+        );
+
+        let screen = ask(&["docs"]);
+        assert_eq!(
+            dialog_row(&screen, "This checkout"),
+            "This checkout has uncommitted changes. The folder and those"
+        );
+        assert_eq!(
+            dialog_row(&screen, "changes will"),
+            "changes will be deleted."
+        );
+
+        // A folder that is not on the list counts as clean and has no path.
+        let screen = ask(&["gone"]);
+        assert_eq!(
+            dialog_row(&screen, "The local folder"),
+            "The local folder will be deleted. The GitHub repository stays"
+        );
+
+        let screen = ask(&["api", "portal"]);
+        assert_eq!(
+            dialog_row(&screen, "The local folders"),
+            "The local folders will be deleted. The GitHub repositories stay"
+        );
+
+        let screen = ask(&["api", "docs"]);
+        assert_eq!(
+            dialog_row(&screen, "1 of them"),
+            "1 of them has uncommitted changes. The folders and those changes"
+        );
+
+        let screen = ask(&[
+            "api", "docs", "portal", "web", "extra0", "extra1", "extra2", "extra3", "extra4",
+            "gone",
+        ]);
+        let top = screen
+            .lines()
+            .position(|line| line.contains("╭ Remove 10 repositories"))
+            .unwrap();
+        let rows: Vec<String> = screen
+            .lines()
+            .skip(top + 1)
+            .take(13)
+            .map(|line| dialog_row(line, ""))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "api",
+                "docs  uncommitted changes",
+                "portal",
+                "web  uncommitted changes",
+                "extra0",
+                "extra1",
+                "extra2  uncommitted changes",
+                "and 3 more",
+                "",
+                "3 of them have uncommitted changes. The folders and those changes",
+                "will be deleted.",
+                "",
+                "Enter deletes them from disk. f only takes them off the list. Esc",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_progress_headline_says_how_the_run_stands() {
+        use crate::atoms::task::job::JobEvent;
+        // The row under the title, without the clock at its end.
+        let headline = |run: crate::atoms::task::job::Job| {
+            let title = format!("╭ {} ", run.title);
+            let mut app = app_progress(run);
+            let screen = render(&mut app, 120, 36);
+            let top = screen
+                .lines()
+                .position(|line| line.contains(&title))
+                .unwrap_or_else(|| panic!("{title} is not on\n{screen}"));
+            let row = dialog_row(screen.lines().nth(top + 2).unwrap(), "");
+            let (words, clock) = row.rsplit_once(' ').unwrap();
+            assert!(clock.ends_with('s'), "{row}");
+            words.trim_end().to_string()
+        };
+        // The first frame draws the spinner's first dot.
+        assert_eq!(headline(batch()), "⠋ 2 of 3  AsP3X/portal");
+        assert_eq!(headline(job(&["a", "b"], 0)), "⠋ 1 of 2  Starting");
+        let one = || {
+            let mut run = crate::features::repos::gitprogress::job(
+                "Updating artcraft",
+                vec!["artcraft".into()],
+                0,
+            );
+            run.on(JobEvent::Start(0));
+            run
+        };
+        assert_eq!(headline(one()), "⠋ Working");
+        let mut one = one();
+        one.on(JobEvent::Line(
+            "Receiving objects:  45% (120/266), 1.20 MiB | 2.00 MiB/s".into(),
+            true,
+        ));
+        assert_eq!(headline(one), "⠋ Receiving objects");
+        let mut cancelling = batch();
+        cancelling.cancelling = true;
+        assert_eq!(headline(cancelling), "■ Cancelling…");
+        let mut done = batch();
+        done.finish(Ok("Cloned 3.".into()), false);
+        assert_eq!(headline(done), "✓ Cloned 3.");
+        let mut cancelled = batch();
+        cancelled.finish(Err("cancelled".into()), true);
+        assert_eq!(headline(cancelled), "■ Cancelled.");
+        let mut failed = batch();
+        failed.finish(Err("Cloned 1, 1 failed: AsP3X/portal".into()), false);
+        assert_eq!(headline(failed), "✗ Cloned 1, 1 failed: AsP3X/portal");
+    }
+
+    fn app_progress(run: crate::atoms::task::job::Job) -> App {
+        let mut app = app(false);
+        app.job = Some(run);
+        app.mode = Mode::Progress;
+        app
     }
 
     #[test]

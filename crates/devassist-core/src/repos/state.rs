@@ -73,6 +73,18 @@ pub enum Mode {
     Progress,
 }
 
+/// One folder the remove dialog asks about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoveLine {
+    /// The folder's name on the list.
+    pub name: String,
+    /// Where it is on disk. Empty when it is no longer on the list.
+    pub path: PathBuf,
+    /// It has uncommitted changes. False while its state is not read yet,
+    /// and for a folder that is no longer on the list.
+    pub dirty: bool,
+}
+
 /// The line under the Add search box.
 pub struct AddStatus {
     pub text: String,
@@ -2146,6 +2158,15 @@ impl Repos {
         }
     }
 
+    /// How many output lines of the shown repository the front end draws,
+    /// so scrolling back stops at the first line. Does nothing without a
+    /// run.
+    pub fn set_job_view(&mut self, lines: usize) {
+        if let Some(job) = self.job.as_mut() {
+            job.view = lines;
+        }
+    }
+
     /// Closes the progress dialog. A run that is still going carries on.
     pub fn hide_job(&mut self) {
         self.job_close_at = None;
@@ -3210,6 +3231,33 @@ impl Repos {
             return;
         }
         self.mode = Mode::ConfirmRemove { folders };
+    }
+
+    /// The folders the remove dialog asks about, in its order. Empty when
+    /// the dialog is not open.
+    pub fn remove_lines(&self) -> Vec<RemoveLine> {
+        let Mode::ConfirmRemove { folders } = &self.mode else {
+            return Vec::new();
+        };
+        folders
+            .iter()
+            .map(|folder| {
+                let repo = self.installed.iter().find(|repo| &repo.folder == folder);
+                RemoveLine {
+                    name: folder.clone(),
+                    path: repo.map(|repo| repo.path.clone()).unwrap_or_default(),
+                    dirty: repo.is_some_and(|repo| repo.dirty),
+                }
+            })
+            .collect()
+    }
+
+    /// Closes the remove dialog and goes back to the list. Nothing is
+    /// removed and the ticks stay.
+    pub fn cancel_remove(&mut self) {
+        if matches!(self.mode, Mode::ConfirmRemove { .. }) {
+            self.mode = Mode::List;
+        }
     }
 
     pub fn confirm_remove(&mut self) {
@@ -5055,6 +5103,94 @@ mod tests {
         app.selected = Some("tool".into());
         app.hold_work();
         (app, root)
+    }
+
+    #[test]
+    fn remove_lines_name_each_folder_and_whether_it_is_clean() {
+        let mut app = grouped_app();
+        app.installed[1].dirty = true;
+        // Its state is not read yet: it counts as clean, as it always did.
+        app.installed[3].ready = false;
+        assert!(app.remove_lines().is_empty(), "no dialog, no lines");
+        app.marked = vec!["api".into(), "docs".into(), "web".into()];
+        app.begin_remove();
+        let lines = app.remove_lines();
+        let line = |name: &str, dirty: bool| RemoveLine {
+            name: name.into(),
+            path: PathBuf::from("/srv/code").join(name),
+            dirty,
+        };
+        assert_eq!(
+            lines,
+            [line("api", false), line("docs", true), line("web", false)]
+        );
+        // A folder that left the list meanwhile has no path and is clean.
+        app.mode = Mode::ConfirmRemove {
+            folders: vec!["gone".into()],
+        };
+        assert_eq!(
+            app.remove_lines(),
+            [RemoveLine {
+                name: "gone".into(),
+                path: PathBuf::new(),
+                dirty: false,
+            }]
+        );
+        // Held, it reads the same.
+        app.hold_work();
+        app.mode = Mode::ConfirmRemove {
+            folders: vec!["docs".into()],
+        };
+        assert_eq!(app.remove_lines(), [line("docs", true)]);
+        app.mode = Mode::List;
+        assert!(app.remove_lines().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_removal_goes_back_to_the_list_and_removes_nothing() {
+        for held in [false, true] {
+            let (mut app, root) = held_app(if held { "cancel-held" } else { "cancel" });
+            if !held {
+                app.work_held = false;
+            }
+            app.marked = vec!["tool".into()];
+            app.begin_remove();
+            assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
+            app.notice("before", false);
+            app.cancel_remove();
+            assert!(app.mode == Mode::List, "held {held}");
+            assert_eq!(app.marked, ["tool"], "the tick stays");
+            assert_eq!(app.installed.len(), 1, "still on the list");
+            assert_eq!(app.checkouts.len(), 1);
+            assert!(app.installed[0].path.exists(), "the folder is still there");
+            assert!(app.job.is_none() && app.queue.is_empty() && !app.busy);
+            assert_eq!(app.status, "before", "nothing to say");
+            // Outside the dialog it does nothing.
+            app.mode = Mode::Menu;
+            app.cancel_remove();
+            assert!(app.mode == Mode::Menu);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn the_front_end_says_how_many_output_lines_it_shows() {
+        let mut app = Repos::empty(test_settings());
+        app.hold_work();
+        // No run: nothing to set, and nothing breaks.
+        app.set_job_view(7);
+        assert!(app.job.is_none());
+        let mut job = Job::new("Updating", vec!["api".into()], 0);
+        job.on(JobEvent::Start(0));
+        for index in 0..10 {
+            job.on(JobEvent::Line(format!("line {index}"), false));
+        }
+        app.job = Some(job);
+        app.set_job_view(4);
+        assert_eq!(app.job.as_ref().unwrap().view, 4);
+        // Scrolling stops where the shown lines reach the first one.
+        app.job.as_mut().unwrap().scroll_by(100);
+        assert_eq!(app.job.as_ref().unwrap().scroll, 6);
     }
 
     #[test]

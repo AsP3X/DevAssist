@@ -284,7 +284,7 @@ impl App {
 
     fn on_confirm_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => self.mode = Mode::List,
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => self.cancel_remove(),
             KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_remove(),
             KeyCode::Char('f') | KeyCode::Char('F') => self.forget_chosen(),
             _ => {}
