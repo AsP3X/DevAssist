@@ -366,9 +366,6 @@ version = "0.6.0"
 dependencies = [
  "devassist-core",
  "ratatui",
- "serde",
- "serde_json",
- "sha2 0.11.1",
  "unicode-width",
 ]
 
@@ -378,6 +375,7 @@ version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "ureq",
 ]
 

@@ -75,3 +75,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_core_has_the_programs_version() {
+        assert_eq!(devassist_core::update::VERSION, env!("CARGO_PKG_VERSION"));
+    }
+}

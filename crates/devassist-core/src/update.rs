@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::atoms::sys::http::{self, Profile};
+use crate::sys::http::{self, Profile};
 
 /// The repository whose releases are the updates.
 pub const REPOSITORY: &str = "AsP3X/DevAssist";
@@ -335,7 +335,7 @@ mod tests {
         if !cfg!(all(windows, target_arch = "x86_64")) {
             return;
         }
-        let token = crate::features::repos::github::token();
+        let token = crate::repos::github::token();
         let token = token.as_deref();
         let url = format!("https://api.github.com/repos/{REPOSITORY}/releases/latest");
         let body = succeeded(get(&url, token, "application/vnd.github+json").unwrap())

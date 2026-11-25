@@ -11,7 +11,7 @@ pub mod keys;
 mod select;
 mod terminal;
 mod tools;
-pub mod update;
+pub use devassist_core::update;
 mod updater;
 
 use std::time::Duration;
