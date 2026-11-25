@@ -1,6 +1,7 @@
 // Copied from Quill (pencraft) app/src/gpu.rs at 6c6a0cc.
 // Imports: `crate::app::lock` is `crate::sync::lock`.
 // Renamed: `install_for_tests` is `install_own_device`, public and in every build (no longer `#[cfg(test)]`).
+// Its doc text is Quill's, written when it was test-only.
 
 //! Runs a compiled shader on the GPU and reads the picture it drew back into memory.
 //!

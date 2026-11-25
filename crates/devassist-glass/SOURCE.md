@@ -12,7 +12,7 @@ To compare with Quill later: diff each file against the same path at that commit
 | --- | --- | --- |
 | `src/material.rs` | `src/material.rs` | `pen_doc::color::Rgba` is `crate::color::Rgba`; `pen_doc::value::narrow` is `crate::color::narrow`. |
 | `src/raster.rs` | `src/raster.rs` | None. |
-| `src/shader.rs` | `src/shader.rs` | `pen_doc::color::Rgba` is `crate::color::Rgba`; `pen_doc::value::narrow` is `crate::color::narrow`. Removed: `load` (reads a shader file from disk by path and again when it changed), its `STORE`, the type `Loaded` only it used, and the imports only it used (`Path`, `PathBuf`, `Arc`, `Mutex`, `OnceLock`, `SystemTime`). Added: `#[expect]` on `Type::len` (`clippy::len_without_is_empty`) and on `declarations` and `uniform` (`clippy::map_unwrap_or`), lints this workspace's clippy raises on Quill's unchanged code. |
+| `src/shader.rs` | `src/shader.rs` | `pen_doc::color::Rgba` is `crate::color::Rgba`; `pen_doc::value::narrow` is `crate::color::narrow`. Removed: `load` (reads a shader file from disk by path and again when it changed), its `STORE`, the type `Loaded` only it used, and the imports only it used (`Path`, `PathBuf`, `Arc`, `Mutex`, `OnceLock`, `SystemTime`). Added: `#[expect]` on `Type::len` (`clippy::len_without_is_empty`) and on `declarations` and `uniform` (`clippy::map_unwrap_or`), lints this workspace's clippy raises on Quill's unchanged code. Built and checked with rustc 1.100.0 and clippy 0.1.100 (0ef1bc3860 2026-11-09); a clippy that doesn't raise these lints fails the build on the unfulfilled `#[expect]`s, which are then removed. |
 | `src/gpu.rs` | `src/gpu.rs` | `crate::app::lock` is `crate::sync::lock` (rustfmt moved the import below `crate::shader`). `install_for_tests` is `install_own_device`, public and no longer `#[cfg(test)]`, so the window and its `--screenshot` run can make a device of their own. |
 | `src/glass.frag` | `src/render/glass.frag` | None (a header comment above `#version`, which GLSL allows). |
 | `src/color.rs` | `crates/pen-doc/src/color.rs`, `crates/pen-doc/src/value.rs` | Only `Rgba` with `BLACK`, `WHITE` and `parse`, and `narrow`. |
@@ -31,7 +31,7 @@ New: draws one rounded pane over the window's backdrop. Copied into it unchanged
   `frosted_pixel`, `program`; the tests `the_glass_shader_compiles_and_has_every_uniform_the_renderer_sets`
   (with its eight outlines written out, as `MOST_SHAPES` is not copied) and
   `the_colour_curves_undo_each_other_and_keep_the_alpha`;
-- from `src/render/bake.rs`: `sigma`, `length` and `pixels_up`.
+- from `src/render/bake.rs`: `REACH`, `sigma`, `length` and `pixels_up`.
 
 Rewritten for one pane that is a single rounded box and never turned:
 
@@ -41,7 +41,10 @@ Rewritten for one pane that is a single rounded box and never turned:
   each sampler's map from an offset from that centre in points to a place on its backdrop picture. The other
   uniforms are filled as Quill fills them.
 - `frosted` is Quill's `frosted` with its `form` branch only.
-- `prepare` is the part of Quill's `Builder::pane` that takes the backdrop to linear light and blurs it.
+- `prepare` is the part of Quill's `Builder::pane` that takes the backdrop to linear light and blurs it. Quill
+  paints the backdrop a blur's reach (`REACH` standard deviations) beyond the pane; here the window's picture is
+  grown by as much with its own edge mirrored (as the GPU sampler's `MirrorRepeat`), blurred and cut back, so
+  it stays opaque up to the window's edge.
 - The test `the_rim_bends_what_is_behind_it_and_the_middle_does_not` follows Quill's test of that name
   (`src/render/glass/drawn.rs`), over the photo instead of a checkerboard; `matches_golden` and `shader_runs`
   follow the functions of those names there, with this crate's environment variables (`DEVASSIST_BLESS`,

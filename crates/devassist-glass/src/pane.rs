@@ -1,7 +1,7 @@
 // Copied unchanged from Quill (pencraft) app/src/render/glass.rs at 6c6a0cc: `SHADER`, `BACKDROP`, `RIM`,
 // `HAIRLINE`, `Shape` with `distance`, `CURVE_STEPS`, `Curve`, `to_linear`, `to_gamma`, `recode`, `linear`,
 // `toward_light`, `frosted_pixel` and `program`; `RIM_BLUR` is made public. From app/src/render/bake.rs at
-// 6c6a0cc: `sigma`, `length` and `pixels_up`. `outward` is `Form::outward` for one shape that is not turned;
+// 6c6a0cc: `REACH`, `sigma`, `length` and `pixels_up`. `outward` is `Form::outward` for one shape that is not turned;
 // `draw`'s glass part is `Builder::glass`, `frosted` is Quill's `frosted` with its `form` branch only.
 
 //! One pane of glass or frost over a backdrop picture.
@@ -204,6 +204,10 @@ fn pixels_up(length: f32) -> Option<usize> {
     (rounded.is_finite() && (1.0..=100_000.0).contains(&rounded)).then_some(rounded as usize)
 }
 
+/// How far a blur reaches, in standard deviations: how far the backdrop is grown before it is blurred.
+// Quill's `REACH` in app/src/render/bake.rs.
+const REACH: f32 = 3.0;
+
 /// Whether a failure of the glass shader has been logged already; it is said once, not at every frame.
 static WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -303,9 +307,35 @@ pub fn frosted(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
 
 /// The backdrop for `Behind`: `picture` (display colours) taken to linear light and blurred by `radius` points.
 #[must_use]
+// The blur sees nothing beyond a picture's edge, which would thin the backdrop there; so the picture is first
+// grown by the blur's reach on every side, filled with its own edge mirrored (as the GPU's sampler mirrors past
+// it), blurred, and cut back to its size.
 pub fn prepare(picture: &Bitmap, radius: f32, scale: f32) -> Bitmap {
-    let mut bitmap = Bitmap { w: picture.w, h: picture.h, px: picture.px.iter().map(|pixel| recode(*pixel, to_linear)).collect() };
-    bitmap.blur(sigma(radius) * scale);
+    let (w, h) = (picture.w, picture.h);
+    if w == 0 || h == 0 || picture.px.len() != w * h {
+        return Bitmap::new(w, h);
+    }
+    let blur = sigma(radius) * scale;
+    let pad = pixels_up(REACH * blur).unwrap_or(0);
+    // Where a place `at` of the grown picture comes from in a row of `count` pixels: mirrored past either end, and
+    // the nearest end where the picture has fewer pixels than the mirror needs.
+    let mirrored = |at: usize, count: usize| match at.checked_sub(pad) {
+        None => (pad - at - 1).min(count - 1),
+        Some(inside) if inside < count => inside,
+        Some(inside) => (2 * count).saturating_sub(inside + 1),
+    };
+    let (grown_w, grown_h) = (w + 2 * pad, h + 2 * pad);
+    let mut grown = Bitmap::new(grown_w, grown_h);
+    for (at, pixel) in grown.px.iter_mut().enumerate() {
+        let (x, y) = (mirrored(at % grown_w, w), mirrored(at / grown_w, h));
+        *pixel = recode(picture.px[y * w + x], to_linear);
+    }
+    grown.blur(blur);
+    let mut bitmap = Bitmap::new(w, h);
+    for (row, line) in bitmap.px.chunks_mut(w).enumerate() {
+        let start = (row + pad) * grown_w + pad;
+        line.copy_from_slice(&grown.px[start..start + w]);
+    }
     bitmap
 }
 
@@ -383,6 +413,30 @@ mod tests {
         let mut picture = Bitmap::new(w, h);
         picture.fill([0.5, 0.5, 0.5, 1.0]);
         Backdrop { soft: prepare(&picture, 8.0, 1.0), rim: prepare(&picture, 8.0 * RIM_BLUR, 1.0), scale: 1.0 }
+    }
+
+    #[test]
+    fn a_prepared_opaque_picture_stays_opaque_up_to_its_corners() {
+        let mut picture = Bitmap::new(40, 30);
+        picture.fill([0.5, 0.5, 0.5, 1.0]);
+        // A blur far wider than the picture, at two scales: the padding is mirrored as far as there are pixels.
+        for (radius, scale) in [(24.0, 1.0), (60.0, 2.0)] {
+            let prepared = prepare(&picture, radius, scale);
+            assert_eq!((prepared.w, prepared.h), (40, 30));
+            for (x, y) in [(0, 0), (39, 0), (0, 29), (39, 29), (20, 0), (20, 15)] {
+                let pixel = prepared.px[y * prepared.w + x];
+                assert!((pixel[3] - 1.0).abs() < 1e-3, "alpha {} at {x}, {y} after a blur of {radius}", pixel[3]);
+                assert!((pixel[0] - to_linear(0.5)).abs() < 1e-3, "colour {} at {x}, {y}", pixel[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_without_pixels_is_prepared_empty() {
+        for (w, h) in [(0, 0), (0, 5), (5, 0)] {
+            let prepared = prepare(&Bitmap::new(w, h), 24.0, 1.0);
+            assert_eq!((prepared.w, prepared.h, prepared.px.len()), (w, h, 0));
+        }
     }
 
     /// A pane of material `kind` (`frosted` or `liquid_glass`) in `appearance`, resolved with no variables.
