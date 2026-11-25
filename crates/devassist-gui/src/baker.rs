@@ -100,6 +100,17 @@ fn same_size(a: [f32; 2], b: [f32; 2]) -> bool {
     a.map(f32::to_bits) == b.map(f32::to_bits)
 }
 
+/// `scale` (pixels per point) lowered as far as a picture of `size` points needs to have at most `limit` pixels
+/// on each side: a texture larger than the device takes cannot be drawn.
+fn fitting_scale(scale: f32, size: [f32; 2], limit: usize) -> f32 {
+    let longest = size[0].max(size[1]);
+    if !(longest.is_finite() && longest > 0.0) {
+        return scale;
+    }
+    // Half a pixel short of the limit, so that rounding the picture's size up stays within it.
+    scale.min((length(limit) - 0.5) / longest)
+}
+
 /// The key of a backdrop that has a photo: `key` itself, or the default one.
 fn known_backdrop(key: &str) -> &str {
     if assets::backdrop(key).is_some() { key } else { DEFAULT_BACKDROP }
@@ -235,10 +246,10 @@ pub fn wallpaper_scale(scene: &Scene) -> f32 {
     if scene.blur { coarse_scale(finest, sigma(BACKDROP_BLUR), scene.size) } else { finest }
 }
 
-/// The wallpaper of `scene` from its decoded `photo`.
-fn wallpaper_from(photo: &RgbaImage, scene: &Scene) -> Option<Wallpaper> {
+/// The wallpaper of `scene` from its decoded `photo`, at most `limit` pixels a side.
+fn wallpaper_from(photo: &RgbaImage, scene: &Scene, limit: usize) -> Option<Wallpaper> {
     scene.pixels()?;
-    let scale = wallpaper_scale(scene);
+    let scale = fitting_scale(wallpaper_scale(scene), scene.size, limit);
     let covered = cover(photo, whole_pixels(scene.size[0] * scale)?, whole_pixels(scene.size[1] * scale)?)?;
     // `prepare` grows the picture by its own mirrored edge before it blurs, so the window's edges don't fade.
     let mut bitmap = if scene.blur { pane::to_display(&pane::prepare(&covered, BACKDROP_BLUR, scale)) } else { covered };
@@ -253,7 +264,7 @@ fn wallpaper_from(photo: &RgbaImage, scene: &Scene) -> Option<Wallpaper> {
 #[must_use]
 pub fn wallpaper(scene: &Scene) -> Option<Wallpaper> {
     scene.pixels()?;
-    wallpaper_from(&decode(&scene.backdrop)?, scene)
+    wallpaper_from(&decode(&scene.backdrop)?, scene, usize::MAX)
 }
 
 /// The wallpaper made ready for panes of one blur, each copy as coarse as what it shows allows: blurred in linear
@@ -280,8 +291,9 @@ fn prepare_coarse(wallpaper: &Wallpaper, scene: &Scene, radius: f32) -> (Bitmap,
     }
 }
 
-/// The wallpaper as panes drawn with `params` see it, from the ones `prepared` already, or prepared now and kept.
-fn behind<'a>(prepared: &'a mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene: &Scene, params: &Params) -> Behind<'a> {
+/// The wallpaper as panes drawn with `params` at `picture_scale` pixels per point see it, from the ones
+/// `prepared` already, or prepared now and kept.
+fn behind<'a>(prepared: &'a mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene: &Scene, params: &Params, picture_scale: f32) -> Behind<'a> {
     let kept = prepared.entry(params.blur.to_bits()).or_insert_with(|| {
         let (soft, scale) = prepare_coarse(wallpaper, scene, params.blur);
         Prepared { soft, scale, rim: None }
@@ -291,7 +303,7 @@ fn behind<'a>(prepared: &'a mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, s
     }
     // A frosted pane shows no rim; it is lent the body's picture, which it doesn't read.
     let (rim, rim_scale) = kept.rim.as_ref().map_or((&kept.soft, kept.scale), |(rim, scale)| (rim, *scale));
-    Behind { soft: &kept.soft, rim, scale: kept.scale, rim_scale, picture_scale: scene.pixels_per_point }
+    Behind { soft: &kept.soft, rim, scale: kept.scale, rim_scale, picture_scale }
 }
 
 /// What `pane` draws `want` as in `scene`, or `None` for one without area.
@@ -304,9 +316,10 @@ fn pane_of(scene: &Scene, want: &Want) -> Option<Pane> {
     Some(Pane { rect: [want.rect.min.x, want.rect.min.y, size.x, size.y], radius: want.radius, params })
 }
 
-/// One pane drawn over `wallpaper`, with the prepared copies of it kept in `prepared`.
-fn draw_pane(prepared: &mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene: &Scene, pane: &Pane) -> Option<Bitmap> {
-    pane::draw(&behind(prepared, wallpaper, scene, &pane.params), pane)
+/// One pane drawn over `wallpaper` at `picture_scale` pixels per point, with the prepared copies of it kept in
+/// `prepared`.
+fn draw_pane(prepared: &mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene: &Scene, pane: &Pane, picture_scale: f32) -> Option<Bitmap> {
+    pane::draw(&behind(prepared, wallpaper, scene, &pane.params, picture_scale), pane)
 }
 
 /// The picture of the pane `want` over `wallpaper` (from [`wallpaper`] for the same `scene`), in display
@@ -314,7 +327,7 @@ fn draw_pane(prepared: &mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene
 #[must_use]
 pub fn pane_picture(wallpaper: &Wallpaper, scene: &Scene, want: &Want) -> Option<Bitmap> {
     scene.pixels()?;
-    draw_pane(&mut HashMap::new(), wallpaper, scene, &pane_of(scene, want)?)
+    draw_pane(&mut HashMap::new(), wallpaper, scene, &pane_of(scene, want)?, scene.pixels_per_point)
 }
 
 /// The picture of the pane `want` as [`pane_picture`] makes it, but always frosted on the CPU, as a window draws
@@ -323,7 +336,7 @@ pub fn pane_picture(wallpaper: &Wallpaper, scene: &Scene, want: &Want) -> Option
 pub fn frosted_pane_picture(wallpaper: &Wallpaper, scene: &Scene, want: &Want) -> Option<Bitmap> {
     scene.pixels()?;
     let pane = pane_of(scene, want)?;
-    pane::frosted(&behind(&mut HashMap::new(), wallpaper, scene, &pane.params), &pane)
+    pane::frosted(&behind(&mut HashMap::new(), wallpaper, scene, &pane.params, scene.pixels_per_point), &pane)
 }
 
 /// What a pane's picture shows besides the scene: its rectangle in whole pixels, its radius and its surface.
@@ -423,14 +436,16 @@ impl Baker {
     }
 
     /// Makes the wallpaper of `scene` when it is not the settled one, and the picture of every wanted pane
-    /// there is none of; drops the pictures no frame wanted for [`PICTURE_KEEP_FRAMES`].
+    /// there is none of; drops the pictures no frame wanted for [`PICTURE_KEEP_FRAMES`]. A picture that would be
+    /// larger than the device's textures is made at fewer pixels per point, and drawn stretched.
     fn bake(&mut self, ctx: &Context, scene: &Scene, wants: &[Want]) {
         let start = Instant::now();
+        let limit = ctx.input(|i| i.max_texture_side);
         let fresh = self.settled.as_ref().is_none_or(|settled| settled.scene != *scene);
         if fresh {
             let key = known_backdrop(&scene.backdrop);
             let photo = self.photos.entry(key.to_owned()).or_insert_with(|| decode(key));
-            let Some(wallpaper) = photo.as_ref().and_then(|photo| wallpaper_from(photo, scene)) else { return };
+            let Some(wallpaper) = photo.as_ref().and_then(|photo| wallpaper_from(photo, scene, limit)) else { return };
             let texture = ctx.load_texture("glass-wallpaper", wallpaper.bitmap.image(), TextureOptions::LINEAR);
             let uv = uv_of(wallpaper.bitmap.w, wallpaper.bitmap.h, scene.size[0] * wallpaper.scale, scene.size[1] * wallpaper.scale);
             self.settled = Some(Settled { scene: scene.clone(), wallpaper, texture, uv, prepared: HashMap::new() });
@@ -449,9 +464,11 @@ impl Baker {
             let key = PaneKey::of(want, scale);
             if let Some(kept) = self.panes.get_mut(&key) {
                 kept.wanted = self.frame;
-            } else if let Some(picture) = draw_pane(&mut settled.prepared, &settled.wallpaper, scene, &pane) {
+            } else if let picture_scale = fitting_scale(scale, [pane.rect[2], pane.rect[3]], limit)
+                && let Some(picture) = draw_pane(&mut settled.prepared, &settled.wallpaper, scene, &pane, picture_scale)
+            {
                 let texture = ctx.load_texture(format!("glass-{}", want.id), picture.image(), TextureOptions::LINEAR);
-                let uv = uv_of(picture.w, picture.h, pane.rect[2] * scale, pane.rect[3] * scale);
+                let uv = uv_of(picture.w, picture.h, pane.rect[2] * picture_scale, pane.rect[3] * picture_scale);
                 self.panes.insert(key, Kept { texture, uv, wanted: self.frame });
                 self.counts.0 += 1;
                 made += 1;
@@ -816,7 +833,7 @@ mod tests {
         let mut prepared = HashMap::new();
         for want in shell_wants() {
             let pane = pane_of(&scene, &want).unwrap();
-            let behind = behind(&mut prepared, &blurred, &scene, &pane.params);
+            let behind = behind(&mut prepared, &blurred, &scene, &pane.params, scene.pixels_per_point);
             assert_eq!(behind.picture_scale, 2.0, "the pane's picture stays sharp");
             assert!(behind.scale <= blurred.scale && behind.rim_scale <= blurred.scale, "{}", want.id);
             // The body copy is as fine as its blur on top of the wallpaper's shows, and no finer.
@@ -865,11 +882,12 @@ mod tests {
             let mut prepared = HashMap::new();
             let start = Instant::now();
             for pane in &panes {
-                behind(&mut prepared, &whole, &scene, &pane.params);
+                behind(&mut prepared, &whole, &scene, &pane.params, scene.pixels_per_point);
             }
             let preparing = ms(start);
             let start = Instant::now();
-            let pictures: Vec<Bitmap> = panes.iter().map(|pane| draw_pane(&mut prepared, &whole, &scene, pane).unwrap()).collect();
+            let pictures: Vec<Bitmap> =
+                panes.iter().map(|pane| draw_pane(&mut prepared, &whole, &scene, pane, scene.pixels_per_point).unwrap()).collect();
             let drawing = ms(start);
             let ctx = egui::Context::default();
             let start = Instant::now();
@@ -915,6 +933,37 @@ mod tests {
         } else {
             println!("no GPU adapter: glass not measured");
         }
+    }
+
+    #[test]
+    fn every_picture_fits_the_largest_texture_the_device_takes() {
+        // The least egui takes: its font atlas needs 1024 pixels a side.
+        const LIMIT: usize = 1024;
+        let (ctx, mut baker) = (egui::Context::default(), Baker::new());
+        let mut scene = scene(SIZE);
+        // Unblurred at two pixels per point the wallpaper would be 1600 by 1200 pixels, the sidebar 512 by 1152.
+        (scene.blur, scene.pixels_per_point) = (false, 2.0);
+        let wants = shell_wants();
+        let mut drawn = Vec::new();
+        let input = egui::RawInput { max_texture_side: Some(LIMIT), ..Default::default() };
+        let mut output = ctx.run_pass(input, |ctx| drawn = baker.frame(ctx, &scene, &wants, at(0)));
+        // No renderer takes the textures here.
+        output.textures_delta.clear();
+        assert_eq!(drawn.len(), wants.len() + 1, "every picture is made");
+        let Some(settled) = &baker.settled else { panic!("no wallpaper") };
+        let fits = |[w, h]: [usize; 2]| w <= LIMIT && h <= LIMIT;
+        assert!(fits(settled.texture.size()), "the wallpaper is {:?}", settled.texture.size());
+        assert_eq!(baker.panes.len(), wants.len());
+        for kept in baker.panes.values() {
+            assert!(fits(kept.texture.size()), "a pane's picture is {:?}", kept.texture.size());
+        }
+        // Each picture still shows all of what it is drawn over, only at fewer pixels.
+        for drawn in &drawn {
+            assert!(drawn.uv.max.x > 0.98 && drawn.uv.max.y > 0.98 && drawn.uv.max.x <= 1.0 && drawn.uv.max.y <= 1.0, "{:?}", drawn.uv);
+        }
+        // A pane that fits keeps the window's own pixels: the sidebar toggle is 36 points a side.
+        let toggle = baker.by_id.get("sidebar-toggle").and_then(|key| baker.panes.get(key)).map(|kept| kept.texture.size());
+        assert_eq!(toggle, Some([72, 72]));
     }
 
     #[test]
