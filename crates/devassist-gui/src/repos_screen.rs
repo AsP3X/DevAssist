@@ -12,10 +12,7 @@ use crate::repos_view::{self, Line, Status};
 use crate::session::Session;
 use crate::shell::{Layout, Wants};
 use crate::table::{self, Did};
-use crate::theme::{
-    self, FIELD_WIDTH, GROUP_HEIGHT, HEAD_HEIGHT, Mode, PAGE_ROWS, PANEL_TEXT_INSET, RADIUS_PANEL, ROW_HEIGHT, STATE_GAP, TEXT, TEXT_TITLE,
-    TOOLBAR_GAP,
-};
+use crate::theme::{self, FIELD_WIDTH, Mode, PAGE_ROWS, PANEL_TEXT_INSET, RADIUS_PANEL, STATE_GAP, TEXT, TEXT_TITLE, TOOLBAR_GAP};
 use crate::widgets::{self, Item, font};
 
 /// The filter field's glass pane.
@@ -311,16 +308,19 @@ pub fn show(ui: &mut Ui, layout: &Layout, plan: Option<&Plan>, session: &mut Ses
     let (Some(repos), Some(sheet)) = (session.repos_mut(), sheet) else { return };
     let lines = repos_view::lines(repos);
     if moved {
-        let heights: Vec<f32> = lines.iter().map(line_height).collect();
+        let heights: Vec<f32> = lines.iter().map(table::height).collect();
         if let Some(index) = lines.iter().position(is_chosen) {
-            screen.scroll = follow(&heights, index, screen.scroll, layout.panel.height() - HEAD_HEIGHT);
+            screen.scroll = follow(&heights, index, screen.scroll, table::body_rect(layout.panel).height());
         }
     }
     match table::show(ui, layout.panel, &lines, sheet, palette, mode, &mut screen.scroll) {
         Did::Picked(key) => repos.pick(&key),
         Did::Ticked(key) => repos.toggle_mark_of(&key),
         Did::Folded(key) => {
+            // As in the terminal app: the header is highlighted, then folded, so the highlight never stays on a row
+            // the fold hides.
             if let Some(group) = key.strip_prefix(GROUP_KEY) {
+                repos.pick(&key);
                 repos.toggle_group(group);
             }
         }
@@ -371,14 +371,6 @@ fn has_repositories(repos: &Repos) -> bool {
     !repos.installed.is_empty()
 }
 
-/// The height of a line in the table.
-fn line_height(line: &Line) -> f32 {
-    match line {
-        Line::Group(_) => GROUP_HEIGHT,
-        Line::Repo(_) => ROW_HEIGHT,
-    }
-}
-
 /// Whether a line is the highlighted one.
 fn is_chosen(line: &Line) -> bool {
     match line {
@@ -416,6 +408,7 @@ mod tests {
 
     use super::*;
     use crate::shell;
+    use crate::theme::GROUP_HEIGHT;
     use crate::widgets::tests::context;
 
     /// The design's window.
@@ -545,9 +538,31 @@ mod tests {
         frame(&ctx, &mut session, &mut screen, vec![press(Key::ArrowLeft)]);
         assert_eq!(repos(&session).collapsed, ["home"]);
         assert!(!keys(&session).contains(&"dotfiles".to_owned()));
+        // The fold was saved, and the save kept the watch on homelab.
+        assert_eq!(repos(&session).watched_count(), 1);
         frame(&ctx, &mut session, &mut screen, vec![press(Key::ArrowRight)]);
         assert_eq!(repos(&session).collapsed, Vec::<String>::new());
+        assert_eq!(repos(&session).watched_count(), 1);
         let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn a_click_on_a_groups_header_highlights_it_then_folds_it() {
+        let ctx = context();
+        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut screen = Screen::default();
+        session.repos_mut().unwrap().pick("dotfiles");
+        // The demo starts with the header of home, right under the table's head.
+        let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, true);
+        let body = table::body_rect(layout.panel);
+        let at = pos2(body.center().x, body.top() + GROUP_HEIGHT / 2.0);
+        let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        for events in [Vec::new(), vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)]] {
+            frame(&ctx, &mut session, &mut screen, events);
+        }
+        assert_eq!(repos(&session).collapsed, ["home"]);
+        assert_eq!(repos(&session).selected.as_deref(), Some("group::home"), "the highlight is on the header, not on a hidden row");
+        crate::demo::remove_settings(repos(&session));
     }
 
     #[test]

@@ -166,7 +166,8 @@ pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Pal
 }
 
 /// The height of a line.
-fn height(line: &Line) -> f32 {
+#[must_use]
+pub fn height(line: &Line) -> f32 {
     match line {
         Line::Group(_) => GROUP_HEIGHT,
         Line::Repo(_) => ROW_HEIGHT,
@@ -178,8 +179,10 @@ fn head_rect(rect: Rect) -> Rect {
     Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + HEAD_HEIGHT.min(rect.height())))
 }
 
-/// Where the lines are, in the table at `rect`: all of it below the head row.
-fn body_rect(rect: Rect) -> Rect {
+/// Where the lines are, in the table at `rect`: all of it below the head row. Its height is the room the lines
+/// have.
+#[must_use]
+pub fn body_rect(rect: Rect) -> Rect {
     Rect::from_min_max(pos2(rect.left(), head_rect(rect).bottom()), rect.max)
 }
 

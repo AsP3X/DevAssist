@@ -6,6 +6,7 @@ use devassist_core::config::Settings;
 use devassist_core::repos::state::Repos;
 
 use crate::demo;
+use crate::launch::Launch;
 use crate::theme;
 
 /// What the window has loaded.
@@ -20,17 +21,20 @@ pub enum Session {
 }
 
 impl Session {
-    /// Loads the repositories of `settings`, or the drawing's twelve when `demo` (whatever `settings` is).
+    /// Loads the repositories of `settings`, or the drawing's twelve when `launch` asks for the demo (whatever
+    /// `settings` is).
     ///
     /// The window does not set `DevAssist` up: the settings' first-run mark is cleared, so the core opens no
-    /// settings dialog and looks up no account.
+    /// settings dialog and looks up no account. A run that only takes a picture reads the repositories as they are
+    /// on disk and changes none: no fetch, no pull of the watched ones, no write of the settings file.
     #[must_use]
-    pub fn start(settings: Result<Settings, String>, demo: bool) -> Session {
-        if demo {
+    pub fn start(settings: Result<Settings, String>, launch: &Launch) -> Session {
+        if launch.demo {
             return Session::Demo(Box::new(demo::repos()));
         }
         match settings {
             Err(message) => Session::Broken(message),
+            Ok(settings) if launch.screenshot.is_some() => Session::Live(Box::new(Repos::reading(settings))),
             Ok(mut settings) => {
                 settings.first_run = false;
                 Session::Live(Box::new(Repos::new(settings)))
@@ -50,10 +54,15 @@ impl Session {
         }
     }
 
-    /// Stops what runs, for closing the window.
+    /// Stops what runs, for closing the window; a demo's own settings folder is removed.
     pub fn close(&mut self) {
-        if let Session::Live(repos) | Session::Demo(repos) = self {
-            repos.quit();
+        match self {
+            Session::Live(repos) => repos.quit(),
+            Session::Demo(repos) => {
+                repos.quit();
+                demo::remove_settings(repos);
+            }
+            Session::Broken(_) => {}
         }
     }
 
@@ -110,9 +119,71 @@ mod tests {
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
 
+    fn demo() -> Launch {
+        Launch { demo: true, ..Launch::default() }
+    }
+
+    #[test]
+    fn a_demo_leaves_no_settings_folder_behind() {
+        let mut session = Session::start(Err("ignored in a demo".into()), &demo());
+        let path = session.repos().unwrap().config_path.clone();
+        session.repos_mut().unwrap().toggle_group("home");
+        assert!(path.exists(), "the fold was saved to the demo's own file");
+        session.close();
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists(), "the demo's folder is gone");
+    }
+
+    #[test]
+    fn a_picture_run_reads_the_repositories_and_fetches_and_pulls_nothing() {
+        let root = std::env::temp_dir().join(format!("devassist-gui-picture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let origin = root.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("one"), "one").unwrap();
+        git(&origin, &["add", "one"]);
+        git(&origin, &["commit", "-q", "-m", "one"]);
+        git(&root, &["clone", "-q", origin.to_str().unwrap(), "tool"]);
+        let clone = root.join("tool");
+        // The origin moves on: a fetch or the watch's pull would bring "two".
+        std::fs::write(origin.join("two"), "two").unwrap();
+        git(&origin, &["add", "two"]);
+        git(&origin, &["commit", "-q", "-m", "two"]);
+        let settings = Settings {
+            owners_explicit: true,
+            update_check: false,
+            update_check_now: false,
+            watched: vec![clone.clone()],
+            ..Settings::for_folder(vec![clone.clone()], root.join("devassist.toml"))
+        };
+        let picture = Launch { screenshot: Some(root.join("shot.png")), ..Launch::default() };
+
+        let mut session = Session::start(Ok(settings), &picture);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while session.repos().is_some_and(Repos::waiting) {
+            assert!(!session.repos().unwrap().fetching, "a picture run fetches nothing");
+            assert!(Instant::now() < deadline, "the core was still waiting after 20 seconds");
+            session.tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for _ in 0..10 {
+            session.tick();
+            let repos = session.repos().unwrap();
+            assert!(!repos.fetching && !repos.busy, "nothing starts after the read");
+        }
+        assert_eq!(session.repos().unwrap().installed.len(), 1);
+        assert!(!clone.join("two").exists(), "the watched repository was not pulled");
+        let fetched = Command::new("git").arg("-C").arg(&clone).args(["rev-list", "--count", "origin/main"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&fetched.stdout).trim(), "1", "origin/main was not fetched");
+        session.close();
+        drop(session);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_broken_settings_file_loads_nothing() {
-        let mut session = Session::start(Err("line 1: theme is light, dark or system".into()), false);
+        let mut session = Session::start(Err("line 1: theme is light, dark or system".into()), &Launch::default());
         assert!(matches!(&session, Session::Broken(text) if text.contains("line 1")));
         assert!(session.repos().is_none());
         assert!(session.repos_mut().is_none());
@@ -124,7 +195,7 @@ mod tests {
 
     #[test]
     fn a_demo_is_never_refreshed() {
-        let mut session = Session::start(Err("ignored in a demo".into()), true);
+        let mut session = Session::start(Err("ignored in a demo".into()), &demo());
         assert!(session.is_demo());
         session.refresh();
         session.tick();
@@ -136,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_demo_is_live_and_waits_for_nothing() {
-        let mut session = Session::start(Err("ignored in a demo".into()), true);
+        let mut session = Session::start(Err("ignored in a demo".into()), &demo());
         let repos = session.repos().unwrap();
         assert_eq!(repos.installed.len(), 12);
         assert_eq!(repos.groups(), ["home", "Tools", "Work"]); // as the core orders them; three more are in no group
@@ -166,7 +237,7 @@ mod tests {
             ..Settings::for_folder(vec![checkout], root.join("devassist.toml"))
         };
 
-        let mut session = Session::start(Ok(settings), false);
+        let mut session = Session::start(Ok(settings), &Launch::default());
         assert!(session.repos().is_some_and(Repos::waiting), "the read of the checkout is pending at the start");
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut ticks = Vec::new();

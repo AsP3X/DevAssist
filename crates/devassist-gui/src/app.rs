@@ -8,6 +8,7 @@ use egui::{Color32, LayerId, Mesh};
 
 use crate::assets;
 use crate::baker::{Baker, Scene};
+use crate::demo;
 use crate::launch::{self, Launch};
 use crate::repos_screen::{self, Screen};
 use crate::repos_view::Status;
@@ -21,12 +22,16 @@ const TITLE: &str = "DevAssist";
 /// The app's id to the system (Wayland and the like).
 const APP_ID: &str = "dev.devassist.desktop";
 
-/// The settings the window opens with: the file `--config` names, else the ones a start of the terminal app
-/// without options reads (taking over settings from older versions).
+/// The settings the window opens with: the demo's own for `--demo`, which reads no file (so the default look);
+/// else the file `--config` names, else the ones a start of the terminal app without options reads (taking over
+/// settings from older versions).
 ///
 /// # Errors
 /// A sentence saying why the settings file could not be read.
 pub fn load_settings(launch: &Launch) -> Result<Settings, String> {
+    if launch.demo {
+        return Ok(demo::settings());
+    }
     match &launch.config {
         Some(path) => config::load(path),
         None => config::load_default(),
@@ -121,7 +126,7 @@ impl App {
             visuals: None,
             shot: launch.screenshot.clone().map(screenshot::Job::new),
             start: Instant::now(),
-            session: Session::start(settings, launch.demo),
+            session: Session::start(settings, launch),
             page: Page::default(),
             screen: Screen::default(),
             notice,
@@ -279,6 +284,19 @@ mod tests {
             Some("The settings could not be read, so the window opens in the default look: line 1: theme is light, dark or system")
         );
         assert_eq!(window_warning(&read), None);
+    }
+
+    #[test]
+    fn a_demo_reads_no_settings_file() {
+        let path = std::env::temp_dir().join(format!("devassist-gui-broken-{}.toml", std::process::id()));
+        std::fs::write(&path, "theme = 5\n[[[").unwrap();
+        let named = Launch { config: Some(path.clone()), ..Launch::default() };
+        assert!(load_settings(&named).is_err(), "the file has a mistake");
+        // The demo does not read it: no warning, and the default look.
+        let settings = load_settings(&Launch { demo: true, ..named });
+        assert_eq!(window_warning(&settings), None);
+        assert_eq!(settings.map(|settings| settings.look), Ok(devassist_core::config::Look::default()));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
