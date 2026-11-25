@@ -1,6 +1,11 @@
-//! The Repositories screen in the shell: the toolbar above the panel (the filter, the sort, and what is ticked),
-//! the table on the panel or the sentence that says why there is none, the status bar's words, and the keys of
-//! the terminal app. Every change goes through a method of the core's `Repos`.
+//! The Repositories screen in the shell: "Update all" in the top row, the toolbar above the panel (the filter, the
+//! sort, and the selection bar with what can be done to the ticked rows), the table on the panel or the sentence
+//! that says why there is none, the status bar's words, and the keys of the terminal app. Every change goes
+//! through a method of the core's `Repos`; what it says comes back through the status bar.
+//!
+//! Where the terminal app and the window differ: a double click on a row does not update it, Esc does not cancel a
+//! run (the progress dialog's button does), and `d` on a group's header with nothing ticked does not dissolve the
+//! group (the core would, without asking): the status line asks for repositories instead.
 
 use devassist_core::repos::state::{GROUP_KEY, Mode as CoreMode, Repos, SortMode};
 use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Sense, Ui, pos2};
@@ -10,9 +15,9 @@ use crate::baker::Sheet;
 use crate::frost;
 use crate::repos_view::{self, Line, Status};
 use crate::session::Session;
-use crate::shell::{Layout, Wants};
+use crate::shell::{self, Layout, Page, Wants};
 use crate::table::{self, Did};
-use crate::theme::{self, FIELD_WIDTH, Mode, PAGE_ROWS, PANEL_TEXT_INSET, RADIUS_PANEL, STATE_GAP, TEXT, TEXT_TITLE, TOOLBAR_GAP};
+use crate::theme::{self, FIELD_MIN_WIDTH, FIELD_WIDTH, Mode, PAGE_ROWS, PANEL_TEXT_INSET, RADIUS_PANEL, STATE_GAP, TEXT, TEXT_TITLE, TOOLBAR_GAP};
 use crate::widgets::{self, Item, font};
 
 /// The filter field's glass pane.
@@ -21,6 +26,28 @@ const FILTER: &str = "filter";
 const VIEW: &str = "view";
 /// The selection capsule's glass pane.
 const SELECTION: &str = "selection";
+/// The glass pane of the top row's actions.
+const ACTIONS: &str = "actions";
+/// The top row's action: update every repository.
+const UPDATE_ALL: &str = "Update all";
+/// The selection bar's actions on what is ticked, as the drawing words them.
+const UPDATE: &str = "Update";
+/// Move what is ticked into a group.
+const MOVE_TO_GROUP: &str = "Move to group";
+/// Open the folders of what is ticked.
+const OPEN_FOLDER: &str = "Open folder";
+/// Remove what is ticked.
+const REMOVE: &str = "Remove";
+/// The places of the selection bar's buttons among its items ([`selection_items`]).
+const BAR_UPDATE: usize = 2;
+/// Move to group.
+const BAR_GROUP: usize = 3;
+/// Open folder.
+const BAR_OPEN: usize = 4;
+/// Remove.
+const BAR_REMOVE: usize = 5;
+/// The button that clears the ticks.
+const BAR_CLEAR: usize = 6;
 /// What the filter field says while it is empty.
 const FILTER_HINT: &str = "Filter repositories";
 /// The sort by name.
@@ -85,7 +112,16 @@ pub fn open_menu(repos: &mut Repos, key: &str) {
     repos.enter_row();
 }
 
-/// Where the toolbar's controls are this frame, and what they say: decided before the bake, so their glass is
+/// How a capsule of actions shows them: with their words, or with their icons only when the room is too narrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fit {
+    /// Icons and words.
+    Full,
+    /// Icons only; each word is its button's name and hover text.
+    Compact,
+}
+
+/// Where the screen's controls are this frame, and what they say: decided before the bake, so their glass is
 /// baked where they are drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
@@ -95,17 +131,22 @@ pub struct Plan {
     view: Rect,
     /// The words of the sort.
     sort: &'static str,
-    /// The selection capsule and its count, when something is ticked.
-    selection: Option<(Rect, String)>,
+    /// The selection capsule, its count and how it fits, when something is ticked.
+    selection: Option<(Rect, String, Fit)>,
+    /// The top row's capsule with "Update all" and how it fits, when there is room for it.
+    update_all: Option<(Rect, Fit)>,
 }
 
 impl Plan {
-    /// Adds the glass of the toolbar's controls to the panes baked this frame.
+    /// Adds the glass of the screen's controls to the panes baked this frame.
     pub fn add_wants(&self, wants: &mut Wants) {
         widgets::add_glass(wants, FILTER, self.field);
         widgets::add_glass(wants, VIEW, self.view);
-        if let Some((rect, _)) = &self.selection {
+        if let Some((rect, ..)) = &self.selection {
             widgets::add_glass(wants, SELECTION, *rect);
+        }
+        if let Some((rect, _)) = &self.update_all {
+            widgets::add_glass(wants, ACTIONS, *rect);
         }
     }
 }
@@ -116,7 +157,8 @@ pub fn has_toolbar(session: &Session) -> bool {
     session.repos().is_some_and(|repos| !repos.installed.is_empty())
 }
 
-/// The toolbar's controls in `layout`, measured with `painter`'s faces; `None` when the screen has no toolbar.
+/// The screen's controls in `layout`, measured with `painter`'s faces; `None` when the screen has no toolbar (no
+/// repositories: nothing to filter, tick or update).
 #[must_use]
 pub fn plan(painter: &Painter, layout: &Layout, session: &Session) -> Option<Plan> {
     let repos = session.repos().filter(|_| has_toolbar(session))?;
@@ -124,33 +166,75 @@ pub fn plan(painter: &Painter, layout: &Layout, session: &Session) -> Option<Pla
     let view_width = widgets::capsule_width(painter, &view_items(sort));
     let count = repos.marked.len();
     let words = selected(count);
-    let selection_width = (count > 0).then(|| widgets::capsule_width(painter, &selection_items(&words)));
-    let (field, view, selection) = places(layout.toolbar, view_width, selection_width);
-    Some(Plan { field, view, sort, selection: selection.map(|rect| (rect, words)) })
+    let fits = [Fit::Full, Fit::Compact];
+    let selection_widths = (count > 0).then(|| fits.map(|fit| widgets::capsule_width(painter, &selection_items(&words, fit))));
+    let (field, view, selection) = places(layout.toolbar, view_width, selection_widths);
+    let title_width = widgets::width(painter, Page::Repositories.name(), &shell::title_font());
+    let update_all = top_place(shell::action_room(layout, title_width), fits.map(|fit| widgets::capsule_width(painter, &top_items(fit))));
+    Some(Plan { field, view, sort, selection: selection.map(|(rect, fit)| (rect, words, fit)), update_all })
 }
 
 /// The view capsule's items: the sort, whose words say which it is (no fill, as the design draws it).
 fn view_items(sort: &str) -> [Item<'_>; 1] {
-    [Item::Action { icon: Icon::ArrowUpDown, words: sort, on: false }]
+    [Item::action(Icon::ArrowUpDown, sort)]
 }
 
-/// The selection capsule's items: how many are ticked, and the button that clears the ticks.
-fn selection_items(count: &str) -> [Item<'_>; 2] {
-    [Item::Label(count), Item::Action { icon: Icon::X, words: "", on: false }]
+/// The top row's capsule: "Update all".
+fn top_items(fit: Fit) -> [Item<'static>; 1] {
+    [Item::Action { icon: Icon::ArrowDownToLine, words: UPDATE_ALL, on: false, danger: false, compact: fit == Fit::Compact }]
 }
 
-/// The places of the filter field, the view capsule and the selection capsule in the toolbar row at `toolbar`: the
-/// field and the view from the left, the selection at the right end when it has a width, never over the view.
-fn places(toolbar: Rect, view_width: f32, selection_width: Option<f32>) -> (Rect, Rect, Option<Rect>) {
+/// The selection capsule's items, in the drawing's order: how many are ticked, a divider, what can be done to them
+/// (Remove in the danger colour), and the button that clears the ticks. Their places are `BAR_UPDATE` and on.
+fn selection_items(count: &str, fit: Fit) -> [Item<'_>; 7] {
+    let compact = fit == Fit::Compact;
+    let action = |icon, words, danger| Item::Action { icon, words, on: false, danger, compact };
+    [
+        Item::Label(count),
+        Item::Divider,
+        action(Icon::ArrowDownToLine, UPDATE, false),
+        action(Icon::Group, MOVE_TO_GROUP, false),
+        action(Icon::FolderOpen, OPEN_FOLDER, false),
+        action(Icon::Trash2, REMOVE, true),
+        Item::action(Icon::X, ""),
+    ]
+}
+
+/// The places of the filter field, the view capsule and the selection capsule in the toolbar row at `toolbar`, the
+/// selection `widths` wide with its words and without them when something is ticked: the field and the view from
+/// the left, the selection at the right end. The selection keeps its words while they fit beside a field of
+/// [`FIELD_WIDTH`]; else it shows its icons only, and when even those do not fit, the field narrows for them, to no
+/// less than [`FIELD_MIN_WIDTH`]. The selection never lies over the view.
+fn places(toolbar: Rect, view_width: f32, widths: Option<[f32; 2]>) -> (Rect, Rect, Option<(Rect, Fit)>) {
     let (top, bottom) = (toolbar.top(), toolbar.bottom());
-    let field = Rect::from_min_max(pos2(toolbar.left(), top), pos2((toolbar.left() + FIELD_WIDTH).min(toolbar.right()), bottom));
+    // What is left for the selection beside a field `field` wide.
+    let room = |field: f32| toolbar.width() - field - TOOLBAR_GAP - view_width - TOOLBAR_GAP;
+    let chosen = widths.map(|[full, compact]| if full <= room(FIELD_WIDTH) { (full, Fit::Full) } else { (compact, Fit::Compact) });
+    let field_width = match chosen {
+        Some((width, _)) if width > room(FIELD_WIDTH) => (FIELD_WIDTH - (width - room(FIELD_WIDTH))).max(FIELD_MIN_WIDTH),
+        _ => FIELD_WIDTH,
+    };
+    let field = Rect::from_min_max(pos2(toolbar.left(), top), pos2((toolbar.left() + field_width).min(toolbar.right()), bottom));
     let view_left = (field.right() + TOOLBAR_GAP).min(toolbar.right());
     let view = Rect::from_min_max(pos2(view_left, top), pos2((view_left + view_width).min(toolbar.right()), bottom));
-    let selection = selection_width.map(|width| {
+    let selection = chosen.map(|(width, fit)| {
         let left = (toolbar.right() - width).max(view.right() + TOOLBAR_GAP).min(toolbar.right());
-        Rect::from_min_max(pos2(left, top), pos2(toolbar.right(), bottom))
+        (Rect::from_min_max(pos2(left, top), pos2(toolbar.right(), bottom)), fit)
     });
     (field, view, selection)
+}
+
+/// The place of the top row's capsule, `widths` wide with its words and without them, at the right end of `room`
+/// ([`shell::action_room`]): with its words when they fit, else its icon only; `None` when not even that fits.
+fn top_place(room: Rect, [full, compact]: [f32; 2]) -> Option<(Rect, Fit)> {
+    let (width, fit) = if full <= room.width() {
+        (full, Fit::Full)
+    } else if compact <= room.width() {
+        (compact, Fit::Compact)
+    } else {
+        return None;
+    };
+    Some((Rect::from_min_max(pos2(room.right() - width, room.top()), room.max), fit))
 }
 
 /// What the status bar says for the screen; `None` when nothing is loaded.
@@ -204,14 +288,32 @@ enum Command {
     ShowRun,
     /// Open the menu of the highlighted row, or fold the highlighted group.
     Enter,
+    /// Update the ticked rows, or the highlighted one (`u`).
+    UpdateChosen,
+    /// Update every repository (`U`).
+    UpdateAll,
+    /// Start or stop the automatic pull of the ticked rows, or the highlighted one (`w`).
+    Watch,
+    /// Open the folders of the ticked rows, or the highlighted one's (`o`).
+    Open,
+    /// Ask which group the ticked rows, or the highlighted one, go into (`m`).
+    Group,
+    /// Ask before removing the ticked rows, or the highlighted one (`d`, Delete).
+    Remove,
 }
 
 /// What the keys among `events` ask, in order, as the terminal app reads them. Letters are read from the typed
-/// text, so they follow the keyboard's layout. Once `/` has asked for the filter, the rest of the frame's text is
-/// typed into it and its other keys are the field's.
+/// text, so they follow the keyboard's layout; text typed with Ctrl, Alt or Cmd held (as the last key said) is no
+/// key here, as Ctrl-A is told from `a`. Once `/` has asked for the filter, the rest of the frame's text is typed
+/// into it and its other keys are the field's.
 fn commands(events: &[Event]) -> Vec<Command> {
     let mut commands = Vec::new();
+    // The modifiers held with the last key: the text a key types comes after it.
+    let mut held = Modifiers::NONE;
     for event in events {
+        if let Event::Key { modifiers, .. } = event {
+            held = *modifiers;
+        }
         match event {
             // Once the filter has the focus, its keys are the field's.
             Event::Key { .. } if commands.contains(&Command::Filter) => {}
@@ -230,6 +332,7 @@ fn commands(events: &[Event]) -> Vec<Command> {
                     Key::ArrowLeft => Command::Fold(true),
                     Key::ArrowRight => Command::Fold(false),
                     Key::Enter if !modifiers.any() => Command::Enter,
+                    Key::Delete if !modifiers.any() => Command::Remove,
                     _ => continue,
                 };
                 commands.push(command);
@@ -240,15 +343,25 @@ fn commands(events: &[Event]) -> Vec<Command> {
                         commands.push(Command::Type(typed));
                         continue;
                     }
-                    match typed {
-                        'j' => commands.push(Command::Move(1)),
-                        'k' => commands.push(Command::Move(-1)),
-                        's' | 'S' => commands.push(Command::Sort),
-                        'r' => commands.push(Command::Refresh),
-                        '/' => commands.push(Command::Filter),
-                        'l' | 'L' => commands.push(Command::ShowRun),
-                        _ => {}
+                    if held.ctrl || held.alt || held.command || held.mac_cmd {
+                        continue;
                     }
+                    let command = match typed {
+                        'j' => Command::Move(1),
+                        'k' => Command::Move(-1),
+                        's' | 'S' => Command::Sort,
+                        'r' => Command::Refresh,
+                        '/' => Command::Filter,
+                        'l' | 'L' => Command::ShowRun,
+                        'u' => Command::UpdateChosen,
+                        'U' => Command::UpdateAll,
+                        'w' | 'W' => Command::Watch,
+                        'o' | 'O' => Command::Open,
+                        'm' | 'M' => Command::Group,
+                        'd' => Command::Remove,
+                        _ => continue,
+                    };
+                    commands.push(command);
                 }
             }
             _ => {}
@@ -321,18 +434,7 @@ pub fn show(
                 }
             }
         }
-        let mut text = repos.list_filter.clone();
-        widgets::field(ui, plan.field, &mut text, FILTER_HINT, Icon::Search, palette, filter_id());
-        repos.set_list_filter(&text);
-        if widgets::capsule(ui, plan.view, &view_items(plan.sort), palette).is_some() && keys {
-            repos.toggle_sort();
-        }
-        if let Some((rect, count)) = &plan.selection
-            && widgets::capsule(ui, *rect, &selection_items(count), palette) == Some(1)
-            && keys
-        {
-            repos.clear_marks();
-        }
+        controls(ui, plan, repos, palette, keys);
     }
 
     let events = if keys { ui.input(|input| input.events.clone()) } else { Vec::new() };
@@ -406,6 +508,36 @@ pub fn show(
     keep_menu(repos, layout.panel, screen);
 }
 
+/// Draws the controls of `plan` (the filter, the sort, the selection bar and "Update all") and, with `keys`, does
+/// what a press on them asks of `repos`.
+fn controls(ui: &mut Ui, plan: &Plan, repos: &mut Repos, palette: theme::Palette, keys: bool) {
+    let mut text = repos.list_filter.clone();
+    widgets::field(ui, plan.field, &mut text, FILTER_HINT, Icon::Search, palette, filter_id());
+    repos.set_list_filter(&text);
+    if widgets::capsule(ui, plan.view, &view_items(plan.sort), palette).is_some() && keys {
+        repos.toggle_sort();
+    }
+    if let Some((rect, count, fit)) = &plan.selection
+        && let Some(pressed) = widgets::capsule(ui, *rect, &selection_items(count, *fit), palette)
+        && keys
+    {
+        match pressed {
+            BAR_UPDATE => repos.update_chosen(),
+            BAR_GROUP => repos.open_group_prompt(),
+            BAR_OPEN => repos.open_selected(),
+            BAR_REMOVE => remove(repos),
+            BAR_CLEAR => repos.clear_marks(),
+            _ => {}
+        }
+    }
+    if let Some((rect, fit)) = plan.update_all
+        && widgets::capsule(ui, rect, &top_items(fit), palette).is_some()
+        && keys
+    {
+        repos.update_all();
+    }
+}
+
 /// Keeps the open menu under its row's button: the row it was opened on (the highlighted one when the screen did
 /// not open it: Enter, `--show menu`), placed again each frame. When that row is no longer shown (filtered out,
 /// removed, the list read again without it) the menu closes. No menu, no row.
@@ -454,9 +586,25 @@ fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
             return false;
         }
         Command::Enter => repos.enter_row(),
+        Command::UpdateChosen => repos.update_chosen(),
+        Command::UpdateAll => repos.update_all(),
+        Command::Watch => repos.toggle_watch(),
+        Command::Open => repos.open_selected(),
+        Command::Group => repos.open_group_prompt(),
+        Command::Remove => remove(repos),
         Command::Refresh => {}
     }
     true
+}
+
+/// Asks before removing the ticked rows, or the highlighted one (`Repos::begin_remove`). On a group's header with
+/// nothing ticked the core would dissolve the group without asking; the window asks for repositories instead.
+fn remove(repos: &mut Repos) {
+    if repos.marked.is_empty() && repos.selected_group().is_some() {
+        repos.ask_for_repositories_to_remove();
+    } else {
+        repos.begin_remove();
+    }
 }
 
 /// Whether a filter is set and lets no row through.
@@ -505,7 +653,6 @@ mod tests {
     use egui::{Context, RawInput, Stroke, TextureId, vec2};
 
     use super::*;
-    use crate::shell;
     use crate::theme::GROUP_HEIGHT;
     use crate::widgets::tests::context;
 
@@ -716,9 +863,389 @@ mod tests {
         // Ctrl with A ticks all; A alone types an "a", which is no key here.
         assert_eq!(read(vec![key(Key::A, Modifiers::COMMAND)]), [Command::TickAll]);
         assert_eq!(read(typed(Key::A, "a")), []);
+        // The actions, with the terminal app's letters: u and U are two commands, d and Delete one.
+        assert_eq!(read(typed(Key::U, "u")), [Command::UpdateChosen]);
+        assert_eq!(read(typed(Key::U, "U")), [Command::UpdateAll]);
+        for letter in ["w", "W"] {
+            assert_eq!(read(typed(Key::W, letter)), [Command::Watch]);
+        }
+        for letter in ["o", "O"] {
+            assert_eq!(read(typed(Key::O, letter)), [Command::Open]);
+        }
+        for letter in ["m", "M"] {
+            assert_eq!(read(typed(Key::M, letter)), [Command::Group]);
+        }
+        assert_eq!(read(typed(Key::D, "d")), [Command::Remove]);
+        assert_eq!(read(vec![press(Key::Delete)]), [Command::Remove]);
+        // As in the terminal app, a capital D is no key.
+        assert_eq!(read(typed(Key::D, "D")), []);
+        // With Ctrl, Alt or Cmd held, a letter is no key here, even where the system sends its text.
+        for held in [Modifiers::CTRL, Modifiers::ALT, Modifiers::COMMAND, Modifiers::MAC_CMD] {
+            for (code, letter) in [(Key::U, "u"), (Key::D, "d"), (Key::W, "w"), (Key::O, "o"), (Key::M, "m"), (Key::U, "U")] {
+                assert_eq!(read(vec![key(code, held), Event::Text(letter.to_owned())]), [], "{held:?} {letter}");
+            }
+            assert_eq!(read(vec![key(Key::Delete, held)]), [], "{held:?} Delete");
+        }
+        // Shift is how a capital is typed: it does not stop the letter.
+        assert_eq!(read(vec![key(Key::U, Modifiers::SHIFT), Event::Text("U".to_owned())]), [Command::UpdateAll]);
         // A released key is nothing.
         let released = Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
         assert_eq!(read(vec![released]), []);
+    }
+
+    /// A held demo, laid out, after `events` in one frame and an empty one.
+    fn demo_after(events: Vec<Event>) -> Session {
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        frame(&ctx, &mut session, &mut screen, events);
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session
+    }
+
+    /// A live session without repositories (it runs nothing: there is nothing to run on), after `events`.
+    fn empty_after(events: Vec<Event>) -> Session {
+        let ctx = context();
+        let mut session = Session::Live(Box::new(Repos::offline(test_settings())));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, events);
+        session
+    }
+
+    fn removing(session: &Session) -> Option<Vec<String>> {
+        match &repos(session).mode {
+            CoreMode::ConfirmRemove { folders } => Some(folders.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn each_key_calls_what_the_terminal_app_calls() {
+        use devassist_core::repos::state::HELD;
+        // The demo ticks api and web and holds its work: what would run says so, and nothing changes.
+        for letter in ["u", "U", "w", "o"] {
+            let session = demo_after(typed(Key::U, letter));
+            assert_eq!(repos(&session).status, HELD, "{letter}");
+            assert_eq!(ticked(&session), ["api", "web"], "{letter}: the ticks stay");
+            assert!(repos(&session).mode == CoreMode::List, "{letter}");
+            assert_eq!(repos(&session).watched_count(), 1, "{letter}: the watch is as it was");
+        }
+        // Without repositories, u and U each say what the core says for them.
+        assert_eq!(repos(&empty_after(typed(Key::U, "u"))).status, "Select a repository first.");
+        assert_eq!(repos(&empty_after(typed(Key::U, "U"))).status, "There are no repositories to update.");
+        // m asks for the group of the ticked ones; d and Delete ask before removing them; Enter opens the menu.
+        assert!(repos(&demo_after(typed(Key::M, "m"))).mode == CoreMode::Group);
+        let ticks = Some(vec!["api".to_owned(), "web".to_owned()]);
+        assert_eq!(removing(&demo_after(typed(Key::D, "d"))), ticks);
+        assert_eq!(removing(&demo_after(vec![press(Key::Delete)])), ticks);
+        // Enter on a row (the demo starts on a group's header, which has no "…" for the menu to stand under).
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session.repos_mut().unwrap().pick("api");
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Enter)]);
+        assert!(repos(&session).mode == CoreMode::Menu);
+        // Not with Ctrl, Alt or Cmd held.
+        for held in [Modifiers::CTRL, Modifiers::ALT, Modifiers::COMMAND] {
+            for (code, letter) in [(Key::D, "d"), (Key::M, "m"), (Key::U, "u"), (Key::W, "w"), (Key::O, "o")] {
+                let session = demo_after(vec![key(code, held), Event::Text(letter.to_owned())]);
+                assert!(repos(&session).mode == CoreMode::List, "{held:?} {letter}");
+                assert_eq!(repos(&session).status, crate::demo::repos().status, "{held:?} {letter}");
+            }
+            assert_eq!(removing(&demo_after(vec![key(Key::Delete, held)])), None);
+        }
+        // Not while the filter has the keyboard: there they are words.
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
+        for (code, letter) in [(Key::D, "d"), (Key::U, "u"), (Key::M, "m"), (Key::W, "w"), (Key::O, "o")] {
+            frame(&ctx, &mut session, &mut screen, typed(code, letter));
+        }
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Delete)]);
+        assert_eq!(repos(&session).list_filter, "dumwo", "and Delete at the end of the field deletes nothing");
+        assert!(repos(&session).mode == CoreMode::List);
+        assert_eq!(repos(&session).status, crate::demo::repos().status);
+    }
+
+    #[test]
+    fn d_on_a_header_asks_for_repositories_and_dissolves_nothing() {
+        for remove in [typed(Key::D, "d"), vec![press(Key::Delete)]] {
+            let ctx = context();
+            let mut session = Session::demo(crate::demo::repos());
+            let mut screen = Screen::default();
+            frame(&ctx, &mut session, &mut screen, Vec::new());
+            let repos_mut = session.repos_mut().unwrap();
+            repos_mut.clear_marks();
+            repos_mut.pick("group::home");
+            let (groups, rows) = (repos(&session).groups(), keys(&session));
+            frame(&ctx, &mut session, &mut screen, remove.clone());
+            assert_eq!(repos(&session).status, "Pick repositories to remove.");
+            assert!(repos(&session).status_error);
+            assert!(repos(&session).mode == CoreMode::List);
+            assert_eq!((repos(&session).groups(), keys(&session)), (groups, rows), "the group is still there");
+
+            // With rows ticked, d on a header asks about the ticked rows, as the core does.
+            session.repos_mut().unwrap().toggle_mark_of("api");
+            frame(&ctx, &mut session, &mut screen, remove);
+            assert_eq!(removing(&session), Some(vec!["api".to_owned()]));
+        }
+    }
+
+    #[test]
+    fn an_error_status_is_drawn_in_the_danger_colour() {
+        // Nothing to remove: the core says so as an error.
+        let session = empty_after(typed(Key::D, "d"));
+        assert_eq!(status(&session).map(|status| (status.text, status.error)), Some(("Select a repository to remove.".to_owned(), true)));
+        let demo = Session::demo(crate::demo::repos());
+        for mode in [Mode::Light, Mode::Dark] {
+            let palette = theme::palette(mode);
+            assert_eq!(status_colour(&session, mode), Some(palette.danger), "{mode:?}");
+            assert_eq!(status_colour(&demo, mode), Some(palette.quiet), "{mode:?}: a plain status is quiet");
+        }
+    }
+
+    /// The colour the shell draws `session`'s status in, in `mode`.
+    fn status_colour(session: &Session, mode: Mode) -> Option<egui::Color32> {
+        let ctx = context();
+        let shown_status = status(session)?;
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, true);
+        let output = ctx.run_ui(input, |ui| {
+            let (mut sidebar, mut page) = (true, shell::Page::Repositories);
+            shell::draw(ui, &layout, &mut sidebar, &mut page, shell::Shown { mode, waiting: 0, status: Some(&shown_status) });
+        });
+        let colour = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text() == shown_status.text => Some(text.fallback_color),
+            _ => None,
+        });
+        output.drop_without_applying_deltas();
+        colour
+    }
+
+    /// The toolbar's plan for `session` in a window of `size`, with the sidebar when `sidebar`, on `ctx`.
+    fn planned(ctx: &Context, session: &Session, size: egui::Vec2, sidebar: bool) -> (shell::Layout, Plan) {
+        let layout = shell::layout(size, sidebar, has_toolbar(session));
+        let mut out = None;
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), ..Default::default() };
+        ctx.run_ui(input, |ui| out = plan(ui.painter(), &layout, session)).drop_without_applying_deltas();
+        (layout, out.unwrap())
+    }
+
+    #[test]
+    fn the_selection_bar_drops_its_words_before_it_overlaps() {
+        let ctx = context();
+        let two = Session::demo(crate::demo::repos());
+        let mut compact_seen = false;
+        for every in [false, true] {
+            for sort in [SortMode::Name, SortMode::NeedsUpdate] {
+                let mut session = Session::demo(crate::demo::repos());
+                if every {
+                    session.repos_mut().unwrap().mark_all_visible();
+                }
+                if repos(&session).sort != sort {
+                    session.repos_mut().unwrap().toggle_sort();
+                }
+                for width in (960..=2000).step_by(8) {
+                    for sidebar in [true, false] {
+                        #[expect(clippy::cast_precision_loss, reason = "window widths of a few thousand points")]
+                        let size = vec2(width as f32, 900.0);
+                        let (layout, planned) = planned(&ctx, &session, size, sidebar);
+                        let (bar, _, fit) = planned.selection.clone().unwrap();
+                        let at = format!("{width} sidebar {sidebar} {:?} {fit:?}", repos(&session).marked.len());
+                        assert!(layout.toolbar.contains_rect(bar) && layout.toolbar.contains_rect(planned.field), "{at}");
+                        assert!(planned.field.right() + TOOLBAR_GAP <= planned.view.left() + 1e-3, "{at}");
+                        assert!(planned.view.right() + TOOLBAR_GAP <= bar.left() + 1e-3, "{at}: {bar:?} over {:?}", planned.view);
+                        assert!(planned.field.width() >= FIELD_MIN_WIDTH, "{at}");
+                        // The words go only when they would not fit beside the field at its full width.
+                        let full = widths(&ctx, &session)[0];
+                        let room = layout.toolbar.width() - FIELD_WIDTH - 2.0 * TOOLBAR_GAP - planned.view.width();
+                        assert_eq!(fit == Fit::Full, full <= room, "{at}");
+                        compact_seen |= fit == Fit::Compact;
+                    }
+                }
+            }
+        }
+        assert!(compact_seen, "the narrow windows drop the words");
+        // The design's window shows every word, the drawing's order.
+        let (_, planned) = planned(&ctx, &two, vec2(WINDOW[0], WINDOW[1]), true);
+        assert_eq!(planned.selection.as_ref().map(|(_, count, fit)| (count.as_str(), *fit)), Some(("2 selected", Fit::Full)));
+        let names: Vec<&str> = selection_items("2 selected", Fit::Full)
+            .iter()
+            .filter_map(|item| match item {
+                Item::Action { words, .. } => Some(*words),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["Update", "Move to group", "Open folder", "Remove", ""]);
+        assert!(matches!(selection_items("2 selected", Fit::Full)[BAR_REMOVE], Item::Action { danger: true, .. }));
+    }
+
+    /// The selection bar's width with its words and without them, for `session` on `ctx`.
+    fn widths(ctx: &Context, session: &Session) -> [f32; 2] {
+        let mut out = [0.0; 2];
+        let count = selected(repos(session).marked.len());
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        ctx.run_ui(input, |ui| {
+            out = [Fit::Full, Fit::Compact].map(|fit| widgets::capsule_width(ui.painter(), &selection_items(&count, fit)));
+        })
+        .drop_without_applying_deltas();
+        out
+    }
+
+    #[test]
+    fn the_places_keep_the_bar_off_the_field_and_the_view() {
+        let toolbar = Rect::from_min_size(pos2(280.0, 60.0), vec2(1148.0, 36.0));
+        // Room for the words: the field keeps the design's width.
+        let (field, view, bar) = places(toolbar, 252.0, Some([548.0, 260.0]));
+        assert_eq!(field.width(), FIELD_WIDTH);
+        assert_eq!(bar, Some((Rect::from_min_size(pos2(880.0, 60.0), vec2(548.0, 36.0)), Fit::Full)));
+        assert!(view.right() + TOOLBAR_GAP <= 880.0);
+        // Room for the icons only.
+        let (_, _, bar) = places(toolbar, 252.0, Some([610.0, 260.0]));
+        assert_eq!(bar, Some((Rect::from_min_size(pos2(1168.0, 60.0), vec2(260.0, 36.0)), Fit::Compact)));
+        // Not even for those: the field gives up what it must, no less than its least width.
+        let narrow = Rect::from_min_size(pos2(280.0, 60.0), vec2(668.0, 36.0));
+        let (field, view, bar) = places(narrow, 188.0, Some([548.0, 260.0]));
+        let (bar, fit) = bar.unwrap();
+        assert_eq!(fit, Fit::Compact);
+        assert_eq!(field.width(), 668.0 - 2.0 * TOOLBAR_GAP - 188.0 - 260.0);
+        assert!(view.right() + TOOLBAR_GAP <= bar.left() + 1e-3 && (bar.right() - narrow.right()).abs() < 1e-3);
+        // Nothing ticked: no bar, and the field keeps its width.
+        let (field, _, bar) = places(narrow, 188.0, None);
+        assert_eq!((field.width(), bar), (FIELD_WIDTH, None));
+    }
+
+    #[test]
+    fn the_top_row_holds_update_all_and_drops_its_words_before_the_title() {
+        let ctx = context();
+        let demo = Session::demo(crate::demo::repos());
+        let title = {
+            let mut width = 0.0;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+            ctx.run_ui(input, |ui| width = widgets::width(ui.painter(), shell::Page::Repositories.name(), &shell::title_font()))
+                .drop_without_applying_deltas();
+            width
+        };
+        for width in (960..=2000).step_by(8) {
+            for sidebar in [true, false] {
+                #[expect(clippy::cast_precision_loss, reason = "window widths of a few thousand points")]
+                let size = vec2(width as f32, 900.0);
+                let (layout, planned) = planned(&ctx, &demo, size, sidebar);
+                let (rect, fit) = planned.update_all.unwrap();
+                assert!(rect.left() >= layout.title.left() + title + theme::BAR_GAP, "{width} {sidebar}: over the title");
+                assert!(rect.right() <= layout.captions.left() - theme::BAR_GAP + 1e-3, "{width} {sidebar}");
+                assert_eq!((rect.top(), rect.bottom()), (layout.toggle.top(), layout.toggle.bottom()));
+                assert_eq!(fit, Fit::Full, "{width} {sidebar}: there is room for the words");
+            }
+        }
+        // A room too narrow for the words keeps the icon; one too narrow for that holds nothing.
+        let room = Rect::from_min_size(pos2(400.0, 12.0), vec2(80.0, 36.0));
+        assert_eq!(top_place(room, [108.0, 36.0]), Some((Rect::from_min_size(pos2(444.0, 12.0), vec2(36.0, 36.0)), Fit::Compact)));
+        assert_eq!(top_place(room, [80.0, 36.0]), Some((room, Fit::Full)));
+        assert_eq!(top_place(Rect::from_min_size(pos2(400.0, 12.0), vec2(20.0, 36.0)), [108.0, 36.0]), None);
+        // No repositories, no update.
+        let none = Session::Live(Box::new(Repos::offline(test_settings())));
+        let mut planned_none = Some(());
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, false);
+        ctx.run_ui(input, |ui| planned_none = plan(ui.painter(), &layout, &none).map(|_| ())).drop_without_applying_deltas();
+        assert_eq!(planned_none, None);
+    }
+
+    /// A click at `at` on the screen of `session`, over four frames.
+    fn click(ctx: &Context, session: &mut Session, screen: &mut Screen, at: Pos2) {
+        let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], Vec::new()] {
+            frame(ctx, session, screen, events);
+        }
+    }
+
+    /// Where the selection bar's item `index` is, at the design's size, for `session`.
+    fn bar_item(session: &Session, index: usize) -> Rect {
+        let ctx = context();
+        let (_, planned) = planned(&ctx, session, vec2(WINDOW[0], WINDOW[1]), true);
+        let (rect, count, fit) = planned.selection.unwrap();
+        let mut place = Rect::NOTHING;
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        ctx.run_ui(input, |ui| place = widgets::item_rects(ui.painter(), rect, &selection_items(&count, fit))[index]).drop_without_applying_deltas();
+        place
+    }
+
+    #[test]
+    fn the_selection_bar_and_the_top_row_call_the_cores_methods() {
+        use devassist_core::repos::state::HELD;
+        let pressed = |index: usize| {
+            let ctx = context();
+            let mut session = Session::demo(crate::demo::repos());
+            let mut screen = Screen::default();
+            frame(&ctx, &mut session, &mut screen, Vec::new());
+            let at = bar_item(&session, index).center();
+            click(&ctx, &mut session, &mut screen, at);
+            session
+        };
+        let update = pressed(BAR_UPDATE);
+        assert_eq!((repos(&update).status.as_str(), ticked(&update)), (HELD, vec!["api".to_owned(), "web".to_owned()]));
+        assert!(repos(&pressed(BAR_GROUP)).mode == CoreMode::Group);
+        assert_eq!(repos(&pressed(BAR_OPEN)).status, HELD);
+        assert_eq!(removing(&pressed(BAR_REMOVE)), Some(vec!["api".to_owned(), "web".to_owned()]));
+        assert_eq!(ticked(&pressed(BAR_CLEAR)), Vec::<String>::new());
+        // The count takes no press. (The divider is a point wide: a press on it is egui's to give to the nearest
+        // button, as for any press beside a button.)
+        let session = pressed(0);
+        assert_eq!((repos(&session).status.as_str(), ticked(&session).len()), (crate::demo::repos().status.as_str(), 2));
+
+        // Update all, in the top row.
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        let (rect, _) = planned(&context(), &session, vec2(WINDOW[0], WINDOW[1]), true).1.update_all.unwrap();
+        session.repos_mut().unwrap().clear_marks();
+        click(&ctx, &mut session, &mut screen, rect.center());
+        assert_eq!(repos(&session).status, HELD);
+    }
+
+    #[test]
+    fn without_the_keyboard_the_bar_and_the_top_row_take_no_press() {
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        let before = repos(&session).status.clone();
+        let (_, planned) = planned(&context(), &session, vec2(WINDOW[0], WINDOW[1]), true);
+        for at in [bar_item(&session, BAR_REMOVE).center(), bar_item(&session, BAR_CLEAR).center(), planned.update_all.unwrap().0.center()] {
+            let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], Vec::new()] {
+                frame_with(&ctx, &mut session, &mut screen, events, false);
+            }
+        }
+        assert!(repos(&session).mode == CoreMode::List);
+        assert_eq!((repos(&session).status.clone(), ticked(&session)), (before, vec!["api".to_owned(), "web".to_owned()]));
+    }
+
+    #[test]
+    fn the_selection_bars_update_updates_both_ticked_checkouts_for_real() {
+        use crate::dialogs::Which;
+        use crate::dialogs::testing::{Window, behind, live, until};
+        let _live = crate::session::tests::live_git();
+        let (root, settings) = behind("bar-update", &["api", "web"]);
+        let mut window = live(settings, 2);
+        for folder in ["api", "web"] {
+            window.session.repos_mut().unwrap().toggle_mark_of(folder);
+        }
+        window.frame(Vec::new());
+        let at = bar_item(&window.session, BAR_UPDATE).center();
+        window.click(at);
+        until(&mut window, "open", |window| window.shows(Which::Progress));
+        let names: Vec<String> = window.job().items.iter().map(|item| item.name.clone()).collect();
+        assert_eq!(names, ["api", "web"], "the progress dialog shows the two tasks");
+        until(&mut window, "ended", |window: &Window| !window.job().running());
+        assert!(matches!(window.job().result, Some(Ok(_))), "{:?}", window.job().result);
+        assert!(root.0.join("api").join("two").exists() && root.0.join("web").join("two").exists(), "both were updated");
+        window.session.close();
     }
 
     #[test]
@@ -753,15 +1280,15 @@ mod tests {
     #[test]
     fn the_toolbar_is_the_designs() {
         let toolbar = Rect::from_min_size(pos2(280.0, 60.0), vec2(1148.0, 36.0));
-        let (field, view, selection) = places(toolbar, 252.0, Some(548.0));
+        let (field, view, selection) = places(toolbar, 252.0, Some([548.0, 260.0]));
         assert_eq!(field, Rect::from_min_size(pos2(280.0, 60.0), vec2(280.0, 36.0)));
         assert_eq!(view, Rect::from_min_size(pos2(568.0, 60.0), vec2(252.0, 36.0)));
-        assert_eq!(selection, Some(Rect::from_min_size(pos2(880.0, 60.0), vec2(548.0, 36.0))));
+        assert_eq!(selection, Some((Rect::from_min_size(pos2(880.0, 60.0), vec2(548.0, 36.0)), Fit::Full)));
         assert_eq!(places(toolbar, 252.0, None).2, None);
         // In a narrow toolbar the selection keeps off the view, and nothing leaves the row.
         let narrow = Rect::from_min_size(pos2(12.0, 60.0), vec2(600.0, 36.0));
-        let (field, view, selection) = places(narrow, 252.0, Some(200.0));
-        let selection = selection.unwrap();
+        let (field, view, selection) = places(narrow, 252.0, Some([300.0, 200.0]));
+        let (selection, _) = selection.unwrap();
         assert!(selection.left() >= view.right() + TOOLBAR_GAP || selection.width() == 0.0, "{selection:?} {view:?}");
         for rect in [field, view, selection] {
             assert!(narrow.contains_rect(rect), "{rect:?}");
@@ -778,13 +1305,15 @@ mod tests {
         ctx.run_ui(input, |ui| planned = plan(ui.painter(), &layout, &session)).drop_without_applying_deltas();
         let planned = planned.unwrap();
         assert_eq!(planned.sort, "By name");
-        let (rect, count) = planned.selection.clone().unwrap();
+        let (rect, count, _) = planned.selection.clone().unwrap();
         assert_eq!(count, "2 selected");
         assert_eq!(rect.right(), layout.toolbar.right());
+        let (actions, _) = planned.update_all.unwrap();
+        assert_eq!(actions.right(), layout.actions.right());
         let mut wants = Wants::default();
         planned.add_wants(&mut wants);
         let ids: Vec<&str> = wants.as_slice().iter().map(|want| want.id).collect();
-        assert_eq!(ids, ["filter", "view", "selection"]);
+        assert_eq!(ids, ["filter", "view", "selection", "actions"]);
         assert!(wants.as_slice().iter().all(|want| want.surface == theme::Surface::Capsule && (want.radius - 18.0).abs() < f32::EPSILON));
         assert_eq!(plan(&ctx.layer_painter(egui::LayerId::background()), &layout, &Session::Broken(String::new())), None);
     }

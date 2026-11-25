@@ -16,8 +16,8 @@ use crate::repos_view::shorten_path;
 use crate::shell::Wants;
 use crate::theme::{
     ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, BUTTON_OFF_OPACITY, BUTTON_PAD, BUTTON_RADIUS, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX,
-    CHECKBOX_STROKE_OPACITY, FIELD_PAD, FOCUS_GAP, FOCUS_RING, HAIRLINE, HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD, Palette, RADIUS_SMALL, Surface,
-    TEXT,
+    CHECKBOX_STROKE_OPACITY, DIVIDER_HEIGHT, DIVIDER_OPACITY, DIVIDER_WIDTH, FIELD_PAD, FOCUS_GAP, FOCUS_RING, HAIRLINE, HOVER_OPACITY, ICON,
+    ICON_GAP, LABEL_PAD, Palette, RADIUS_SMALL, Surface, TEXT,
 };
 
 /// The mark that ends a text cut short.
@@ -117,7 +117,10 @@ pub fn width(painter: &Painter, text: &str, font: &FontId) -> f32 {
 pub enum Item<'a> {
     /// Words that say something and take no press.
     Label(&'a str),
-    /// A button: its icon, its words (none for an icon alone), and whether it is on.
+    /// The thin upright line between a label and the actions after it; it takes no press.
+    Divider,
+    /// A button: its icon, its words (none for an icon alone, in the quiet colour), whether it is on, whether it is
+    /// drawn in the danger colour, and whether it shows its icon only.
     Action {
         /// Its icon.
         icon: Icon,
@@ -125,7 +128,19 @@ pub enum Item<'a> {
         words: &'a str,
         /// It is on, and drawn on the selection's fill.
         on: bool,
+        /// Its icon and words are in the danger colour.
+        danger: bool,
+        /// Only its icon is drawn, in a round button; its words are its name to a screen reader and its hover text.
+        compact: bool,
     },
+}
+
+impl<'a> Item<'a> {
+    /// A button with `icon` and `words`, neither on, nor in the danger colour, nor compact.
+    #[must_use]
+    pub const fn action(icon: Icon, words: &'a str) -> Item<'a> {
+        Item::Action { icon, words, on: false, danger: false, compact: false }
+    }
 }
 
 /// Adds the glass pane of a capsule or a field at `rect` to the panes baked this frame, its ends round.
@@ -138,7 +153,8 @@ fn item_width(painter: &Painter, item: &Item<'_>) -> f32 {
     let medium = font(TEXT, assets::medium_family());
     match item {
         Item::Label(words) => LABEL_PAD[0] + width(painter, words, &medium) + LABEL_PAD[1],
-        Item::Action { words: "", .. } => ACTION_HEIGHT,
+        Item::Divider => DIVIDER_WIDTH,
+        Item::Action { words: "", .. } | Item::Action { compact: true, .. } => ACTION_HEIGHT,
         Item::Action { words, .. } => ACTION_PAD[0] + ICON + ACTION_GAP + width(painter, words, &medium) + ACTION_PAD[1],
     }
 }
@@ -151,7 +167,7 @@ pub fn capsule_width(painter: &Painter, items: &[Item<'_>]) -> f32 {
 }
 
 /// The places of `items` in a capsule at `rect`, each [`ACTION_HEIGHT`] high and centred on its height.
-fn item_rects(painter: &Painter, rect: Rect, items: &[Item<'_>]) -> Vec<Rect> {
+pub(crate) fn item_rects(painter: &Painter, rect: Rect, items: &[Item<'_>]) -> Vec<Rect> {
     let mut left = rect.left() + CAPSULE_PAD;
     items
         .iter()
@@ -174,10 +190,18 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
             Item::Label(words) => {
                 painter.text(pos2(place.left() + LABEL_PAD[0], place.center().y), Align2::LEFT_CENTER, words, medium.clone(), palette.on_glass);
             }
-            Item::Action { icon, words, on } => {
-                let response = ui.interact(place, ui.scope_id().with(("capsule", rect.min.x.to_bits(), index)), Sense::CLICK);
+            Item::Divider => {
+                let line = Rect::from_center_size(place.center(), vec2(DIVIDER_WIDTH, DIVIDER_HEIGHT));
+                painter.rect_filled(line, 0.0, palette.on_glass.gamma_multiply(DIVIDER_OPACITY));
+            }
+            Item::Action { icon, words, on, danger, compact } => {
+                let mut response = ui.interact(place, ui.scope_id().with(("capsule", rect.min.x.to_bits(), index)), Sense::CLICK);
                 let name = if words.is_empty() { icon.name() } else { words };
                 response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, name));
+                if compact && !words.is_empty() {
+                    response = response.on_hover_text(words);
+                }
+                let ink = if danger { palette.danger } else { palette.on_glass };
                 let fill = if on {
                     palette.selection
                 } else if response.hovered() {
@@ -188,10 +212,12 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
                 painter.rect_filled(place, ACTION_HEIGHT / 2.0, fill);
                 if words.is_empty() {
                     draw_icon(&painter, place.center(), icon, ICON, palette.quiet);
+                } else if compact {
+                    draw_icon(&painter, place.center(), icon, ICON, ink);
                 } else {
-                    draw_icon(&painter, pos2(place.left() + ACTION_PAD[0] + ICON / 2.0, place.center().y), icon, ICON, palette.on_glass);
+                    draw_icon(&painter, pos2(place.left() + ACTION_PAD[0] + ICON / 2.0, place.center().y), icon, ICON, ink);
                     let x = place.left() + ACTION_PAD[0] + ICON + ACTION_GAP;
-                    painter.text(pos2(x, place.center().y), Align2::LEFT_CENTER, words, medium.clone(), palette.on_glass);
+                    painter.text(pos2(x, place.center().y), Align2::LEFT_CENTER, words, medium.clone(), ink);
                 }
                 if response.clicked() {
                     pressed = Some(index);
@@ -373,7 +399,7 @@ pub(crate) mod tests {
     #[test]
     fn a_capsule_is_as_wide_as_its_items_and_only_its_actions_take_a_press() {
         let palette = theme::palette(Mode::Light);
-        let items = [Item::Label("2 selected"), Item::Action { icon: Icon::X, words: "", on: false }];
+        let items = [Item::Label("2 selected"), Item::action(Icon::X, "")];
         let width = with_ui(|ui| capsule_width(ui.painter(), &items));
         let words = with_ui(|ui| self::width(ui.painter(), "2 selected", &font(TEXT, assets::medium_family())));
         // The design's padding, the label's padding and words, a gap, and the round clear button.
@@ -392,6 +418,24 @@ pub(crate) mod tests {
         };
         assert_eq!(press(pos2(rect.right() - CAPSULE_PAD - ACTION_HEIGHT / 2.0, rect.center().y)), [1]);
         assert_eq!(press(pos2(rect.left() + CAPSULE_PAD + LABEL_PAD[0] + 4.0, rect.center().y)), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_compact_action_is_a_round_button_and_a_divider_its_line() {
+        let full = [Item::Label("2"), Item::Divider, Item::action(Icon::Trash2, "Remove")];
+        let compact = [Item::Label("2"), Item::Divider, Item::Action { icon: Icon::Trash2, words: "Remove", on: false, danger: true, compact: true }];
+        let (full, compact, words, label) = with_ui(|ui| {
+            let medium = font(TEXT, assets::medium_family());
+            (
+                capsule_width(ui.painter(), &full),
+                capsule_width(ui.painter(), &compact),
+                width(ui.painter(), "Remove", &medium),
+                width(ui.painter(), "2", &medium),
+            )
+        });
+        let start = 2.0 * CAPSULE_PAD + LABEL_PAD[0] + label + LABEL_PAD[1] + 2.0 * CAPSULE_GAP + DIVIDER_WIDTH;
+        assert!((compact - (start + ACTION_HEIGHT)).abs() < 1e-3, "{compact}");
+        assert!((full - (start + ACTION_PAD[0] + ICON + ACTION_GAP + words + ACTION_PAD[1])).abs() < 1e-3, "{full}");
     }
 
     #[test]

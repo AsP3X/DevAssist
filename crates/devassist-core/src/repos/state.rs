@@ -3261,6 +3261,14 @@ impl Repos {
         self.mode = Mode::ConfirmRemove { folders };
     }
 
+    /// Says that repositories must be picked before anything is removed,
+    /// and changes nothing else. The window calls it for `d` on a group's
+    /// header with nothing ticked, where [`Repos::begin_remove`] would
+    /// dissolve the group without asking.
+    pub fn ask_for_repositories_to_remove(&mut self) {
+        self.notice("Pick repositories to remove.", true);
+    }
+
     /// The folders the remove dialog asks about, in its order. Empty when
     /// the dialog is not open.
     pub fn remove_lines(&self) -> Vec<RemoveLine> {
@@ -5131,6 +5139,22 @@ mod tests {
         app.selected = Some("tool".into());
         app.hold_work();
         (app, root)
+    }
+
+    #[test]
+    fn asking_for_repositories_to_remove_says_so_and_changes_nothing_else() {
+        let mut app = grouped_app();
+        app.pick("api");
+        app.status = "Sorted by name.".into();
+        let (mode, marked, selected) = (app.mode.clone(), app.marked.clone(), app.selected.clone());
+        app.ask_for_repositories_to_remove();
+        assert_eq!(app.status, "Pick repositories to remove.");
+        assert!(app.status_error);
+        assert!(app.mode == mode);
+        assert_eq!(
+            (app.marked.clone(), app.selected.clone()),
+            (marked, selected)
+        );
     }
 
     #[test]

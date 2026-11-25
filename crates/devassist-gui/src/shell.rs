@@ -5,7 +5,7 @@
 //! on it, or by [`placeholder`]; [`draw`] puts the text, icons and buttons of the frame over them all.
 
 use devassist_core::update::VERSION;
-use egui::{Align2, Color32, FontFamily, Id, Painter, Pos2, Rect, Response, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2};
+use egui::{Align2, Color32, FontFamily, FontId, Id, Painter, Pos2, Rect, Response, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::{Sheet, Want};
@@ -159,6 +159,21 @@ pub fn layout(size: Vec2, sidebar_shown: bool, toolbar: bool) -> Layout {
     }
 }
 
+/// The face of the page's title in the top row.
+#[must_use]
+pub fn title_font() -> FontId {
+    font(TEXT_TITLE, assets::medium_family())
+}
+
+/// The room in `layout`'s top row for a screen's actions when the title's words are `title_width` wide: from
+/// [`BAR_GAP`] past the words to `layout.actions`' right end, before the window's own buttons. It reaches into the
+/// title's room where the words leave it empty, never over the words.
+#[must_use]
+pub fn action_room(layout: &Layout, title_width: f32) -> Rect {
+    let left = (layout.title.left() + title_width + BAR_GAP).min(layout.actions.right());
+    Rect::from_min_max(pos2(left, layout.actions.top()), layout.actions.max)
+}
+
 /// The glass panes the baker makes pictures of this frame: the shell's, then what a screen adds.
 #[derive(Clone, Debug, Default)]
 pub struct Wants(Vec<Want>);
@@ -253,13 +268,7 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
     }
     draw_icon(&painter, toggle.center(), Icon::PanelLeft, ICON, palette.on_glass);
     let title = layout.title;
-    painter.with_clip_rect(title).text(
-        pos2(title.left(), title.center().y),
-        Align2::LEFT_CENTER,
-        page.name(),
-        font(TEXT_TITLE, assets::medium_family()),
-        palette.on_glass,
-    );
+    painter.with_clip_rect(title).text(pos2(title.left(), title.center().y), Align2::LEFT_CENTER, page.name(), title_font(), palette.on_glass);
     for (icon, command, rect, response) in captions {
         let (fill, mark) = match (response.hovered(), icon == Icon::X) {
             (true, true) => (palette.danger, palette.on_dark_glass),
@@ -634,6 +643,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_action_room_starts_past_the_titles_words_and_ends_before_the_windows_buttons() {
+        let l = layout(egui::vec2(1440.0, 900.0), true, true);
+        let room = action_room(&l, 100.0);
+        assert_eq!(room.left(), l.title.left() + 100.0 + BAR_GAP);
+        assert_eq!((room.right(), room.top(), room.bottom()), (l.actions.right(), l.toggle.top(), l.toggle.bottom()));
+        assert!(room.right() <= l.captions.left() - BAR_GAP);
+        // At the least window the title's room leaves the actions almost nothing; the room past the words is there.
+        let narrow = layout(egui::vec2(960.0, 600.0), true, true);
+        assert!(narrow.actions.width() < 20.0);
+        assert!(action_room(&narrow, 100.0).width() > 300.0);
+        // Words wider than everything leave no room, and nothing leaves the row.
+        assert_eq!(action_room(&narrow, 2000.0).width(), 0.0);
     }
 
     #[test]

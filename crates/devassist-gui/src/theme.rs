@@ -156,6 +156,15 @@ pub const ACTION_PAD: [f32; 2] = [8.0, 10.0];
 pub const ACTION_GAP: f32 = 6.0;
 /// The width of a search field.
 pub const FIELD_WIDTH: f32 = 280.0;
+/// The least width the filter field narrows to, in a window too narrow for it, the view and the selection bar
+/// without its words: room for its icon and its hint.
+pub const FIELD_MIN_WIDTH: f32 = 200.0;
+/// The width of the line between a capsule's label and its actions (the selection's `divider()`, `width: 1`).
+pub const DIVIDER_WIDTH: f32 = 1.0;
+/// The height of that line (`height: 16`).
+pub const DIVIDER_HEIGHT: f32 = 16.0;
+/// How strong that line is, of the text colour (`fill: soft(0.16)`).
+pub const DIVIDER_OPACITY: f32 = 0.16;
 /// The room inside a search field before its icon.
 pub const FIELD_PAD: f32 = 12.0;
 /// The side of a checkbox.
