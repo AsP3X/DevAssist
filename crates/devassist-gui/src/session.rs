@@ -14,6 +14,9 @@ pub enum Session {
     Broken(String),
     /// The repositories, live.
     Live(Box<Repos>),
+    /// The drawing's repositories (`--demo`): they are on no disk, so nothing that reads a disk or the network is
+    /// ever asked of them.
+    Demo(Box<Repos>),
 }
 
 impl Session {
@@ -24,7 +27,7 @@ impl Session {
     #[must_use]
     pub fn start(settings: Result<Settings, String>, demo: bool) -> Session {
         if demo {
-            return Session::Live(Box::new(demo::repos()));
+            return Session::Demo(Box::new(demo::repos()));
         }
         match settings {
             Err(message) => Session::Broken(message),
@@ -40,7 +43,7 @@ impl Session {
     pub fn tick(&mut self) -> Duration {
         match self {
             Session::Broken(_) => theme::TICK_IDLE,
-            Session::Live(repos) => {
+            Session::Live(repos) | Session::Demo(repos) => {
                 repos.drain();
                 if repos.waiting() { theme::TICK_BUSY } else { theme::TICK_IDLE }
             }
@@ -49,8 +52,22 @@ impl Session {
 
     /// Stops what runs, for closing the window.
     pub fn close(&mut self) {
-        if let Session::Live(repos) = self {
+        if let Session::Live(repos) | Session::Demo(repos) = self {
             repos.quit();
+        }
+    }
+
+    /// Whether the repositories are the demo's.
+    #[must_use]
+    pub fn is_demo(&self) -> bool {
+        matches!(self, Session::Demo(_))
+    }
+
+    /// Asks the core to fetch and read everything again (what `r` does in the terminal app). Does nothing for a
+    /// demo, whose folders are on no disk, or for a broken settings file.
+    pub fn refresh(&mut self) {
+        if let Session::Live(repos) = self {
+            repos.refresh();
         }
     }
 
@@ -58,7 +75,7 @@ impl Session {
     #[must_use]
     pub fn repos(&self) -> Option<&Repos> {
         match self {
-            Session::Live(repos) => Some(repos),
+            Session::Live(repos) | Session::Demo(repos) => Some(repos),
             Session::Broken(_) => None,
         }
     }
@@ -67,7 +84,7 @@ impl Session {
     #[must_use]
     pub fn repos_mut(&mut self) -> Option<&mut Repos> {
         match self {
-            Session::Live(repos) => Some(repos),
+            Session::Live(repos) | Session::Demo(repos) => Some(repos),
             Session::Broken(_) => None,
         }
     }
@@ -100,7 +117,21 @@ mod tests {
         assert!(session.repos().is_none());
         assert!(session.repos_mut().is_none());
         assert_eq!(session.tick(), theme::TICK_IDLE);
+        assert!(!session.is_demo());
+        session.refresh();
         session.close();
+    }
+
+    #[test]
+    fn a_demo_is_never_refreshed() {
+        let mut session = Session::start(Err("ignored in a demo".into()), true);
+        assert!(session.is_demo());
+        session.refresh();
+        session.tick();
+        let repos = session.repos().unwrap();
+        assert!(!repos.waiting());
+        assert_eq!(repos.status, "12 installed. 2 are behind. 1 has new commits on other branches.");
+        assert_eq!(repos.installed.len(), 12);
     }
 
     #[test]

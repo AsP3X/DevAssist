@@ -106,8 +106,11 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // What the core's workers sent is taken in once a frame, and the next frame is asked for in time.
         ctx.request_repaint_after(self.session.tick());
-        if let Some(job) = &mut self.shot {
-            job.frame(ctx);
+        if let Some(code) = self.shot.as_mut().and_then(|job| job.frame(ctx)) {
+            // The picture is the whole job. The repositories are closed first (running git is asked to stop), then
+            // the process leaves at once.
+            self.session.close();
+            std::process::exit(code);
         }
     }
 

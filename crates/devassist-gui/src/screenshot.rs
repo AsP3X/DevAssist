@@ -1,6 +1,7 @@
 // Copied from Quill (pencraft) app/src/screenshot.rs at 6c6a0cc.
 // Imports: `lock` from `devassist_glass::sync`; `ShotSlot` moved here from Quill's app.rs, with its comment.
 // `FRAMES_BEFORE_SHOT` moved to `theme.rs`, which holds every number of the window.
+// `Job::frame` returns the exit code once the picture is done instead of ending the process; the app ends it.
 // The picture is written with `std::fs::write` in place of Quill's `craft_atomic::atomic_write`.
 
 //! `--screenshot <file.png>`: draw about 120 frames, save a picture of the window, quit.
@@ -35,8 +36,9 @@ impl Job {
         Job { path, frames: 0, requested: false, slot: Arc::new(Mutex::new(None)) }
     }
 
-    /// Called every frame: keeps frames coming, asks for the picture, saves it and quits.
-    pub fn frame(&mut self, ctx: &egui::Context) {
+    /// Called every frame: keeps frames coming, asks for the picture and saves it. Gives the process's exit code once that is
+    /// done, `None` before.
+    pub fn frame(&mut self, ctx: &egui::Context) -> Option<i32> {
         ctx.request_repaint();
         // Human: macOS puts a new window on a screen wherever it was asked for; moved afterwards it stays away.
         if self.frames == 0 {
@@ -62,9 +64,9 @@ impl Job {
                     1
                 }
             };
-            // Human: the picture is the whole job; leave at once instead of going through the quit path.
-            std::process::exit(code);
+            return Some(code);
         }
+        None
     }
 }
 

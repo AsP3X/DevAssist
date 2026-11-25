@@ -3,7 +3,7 @@
 //! asks a network.
 //!
 //! The values are those of the design's scripts (`v2-data.mjs`, and the `pulls` table, the renamed
-//! `customer-portal-i18n` and the shortened `release-scripts` folder of `v5-app.mjs`), mapped onto the core's own
+//! `customer-portal-i18n` of `v5-app.mjs`; the paths are the full ones of `v2-data.mjs`, the table shortens them), mapped onto the core's own
 //! rows so that the core's own words (`sync_label`, `remote_label`, `state_label`) give the drawing's.
 
 use std::collections::HashMap;
@@ -66,7 +66,7 @@ const ENTRIES: [Entry; 12] = [
     Entry { dirty: true, pulls: Some((3, 21, 0, 0, 1)), ..Entry::new("portal", "Work", "D:\\code\\work\\portal", "feature/login") },
     Entry { fresh: Some((3, "dev")), ticked: true, pulls: Some((1, 37, 0, 0, 0)), ..Entry::new("web", "Work", "D:\\code\\work\\web", "main") },
     Entry { ahead: 1, behind: 2, pulls: Some((0, 9, 1, 0, 0)), ..Entry::new("DevAssist", "Tools", "D:\\code\\artcraft-repos", "master") },
-    Entry { pulls: Some((1, 6, 0, 0, 0)), ..Entry::new("release-scripts", "Tools", "D:\\\u{2026}\\release-scripts", "main") },
+    Entry { pulls: Some((1, 6, 0, 0, 0)), ..Entry::new("release-scripts", "Tools", "D:\\code\\tools\\release-scripts", "main") },
     Entry { ahead: 1, ..Entry::new("notes", "", "D:\\code\\notes", "main") },
     Entry { error: Some(NOT_FOUND), ..Entry::new("old-blog", "", "E:\\archive\\old-blog", "main") },
     Entry { dirty: true, ..Entry::new("sandbox", "", "D:\\code\\sandbox", "experiment/wasm") },
@@ -167,6 +167,7 @@ mod tests {
         assert_eq!(by("customer-portal-i18n").folder, "portal-i18n");
         assert_eq!(by("release-scripts").folder, "release-scripts");
         assert!(repos.installed.iter().all(|r| r.ready));
+        assert!(repos.installed.iter().all(|r| !r.path.to_string_lossy().contains('\u{2026}')));
     }
 
     #[test]
