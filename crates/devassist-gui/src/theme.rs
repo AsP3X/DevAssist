@@ -84,6 +84,9 @@ pub const BAR_GAP: f32 = 12.0;
 /// The room the top row keeps for the title, from its left edge; the title is shorter, and the window's own
 /// buttons start further right.
 pub const TITLE_ROOM: f32 = 472.0;
+/// The closest any text comes to a panel's edge: the smaller of the two side paddings the design's table rows keep
+/// (12 at the left, 8 at the right).
+pub const PANEL_TEXT_INSET: f32 = 8.0;
 /// The room at either end of the status bar before its text.
 pub const STATUS_PADDING: f32 = 16.0;
 /// How many frames a `--screenshot` run draws before it takes the picture (fonts, layout and the glass have

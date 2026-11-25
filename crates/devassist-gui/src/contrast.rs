@@ -3,7 +3,8 @@
 //!
 //! Only where text can sit is measured: inside the padding the shell gives text in each pane, and only on pixels
 //! where the pane's own picture is (all but) opaque. The rounded corners and the antialiased edge of a pane show
-//! the bare wallpaper through it, and no text is ever drawn there.
+//! the bare wallpaper through it, and no text is ever drawn there. The panel is also measured only inside
+//! `PANEL_TEXT_INSET`, the closest any text comes to its edge (its rim highlight is no place for text).
 
 use std::thread;
 
@@ -13,7 +14,7 @@ use egui::{Color32, Rect, pos2, vec2};
 
 use crate::baker::{Scene, pane_picture, wallpaper};
 use crate::shell;
-use crate::theme::{self, Mode, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, TEXT_SMALL, TEXT_TITLE, WINDOW};
+use crate::theme::{self, Mode, PANEL_TEXT_INSET, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, TEXT_SMALL, TEXT_TITLE, WINDOW};
 
 /// The least contrast of text at `TEXT` (WCAG's level AA for normal text).
 const LEAST_TEXT: f64 = 4.5;
@@ -21,6 +22,9 @@ const LEAST_TEXT: f64 = 4.5;
 const LEAST_QUIET: f64 = 6.0;
 /// A pane's pixel counts as the pane (not its edge) from this alpha.
 const SOLID: f32 = 0.99;
+/// The fewest pixels a place may leave to measure: a mask or rectangle that leaves (almost) none would pass
+/// without having checked anything. The smallest real place, a group label's line, has several thousand.
+const LEAST_PIXELS: usize = 100;
 /// The room, in points, kept above and below a line of text.
 const LINE_SLACK: f32 = 2.0;
 
@@ -57,11 +61,12 @@ struct Window {
     panes: Vec<Laid>,
 }
 
-/// The lowest contrast found in one place and the pixel it is at.
+/// The lowest contrast found in one place, the pixel it is at and how many pixels were measured.
 #[derive(Clone, Copy)]
 struct Lowest {
     contrast: f64,
     at: (usize, usize),
+    count: usize,
 }
 
 /// The light of a display-colour channel in 0..=1, linearised as WCAG does.
@@ -139,10 +144,16 @@ fn places() -> Vec<Place> {
     // The status bar's text starts `STATUS_PADDING` in from each end and fills one line of `TEXT_SMALL`.
     let status = rect("status");
     let status_ends = Rect::from_min_max(pos2(status.left() + STATUS_PADDING, status.top()), pos2(status.right() - STATUS_PADDING, status.bottom()));
+    // Text comes no closer to the panel's edge than `PANEL_TEXT_INSET`.
+    let panel_text = rect("panel").shrink(PANEL_TEXT_INSET);
     let mut places = vec![
         Place { name: "sidebar", pane: Some("sidebar"), rect: sidebar_text, ink: Ink::OnGlass, least: LEAST_TEXT },
-        // The panel's text is centred and the shell gives it no padding: only its own edge is left out.
-        Place { name: "panel", pane: Some("panel"), rect: rect("panel"), ink: Ink::OnGlass, least: LEAST_TEXT },
+        // The version line under the workspace's name is quiet text at `TEXT_SMALL`.
+        Place { name: "sidebar-quiet", pane: Some("sidebar"), rect: sidebar_text, ink: Ink::Quiet, least: LEAST_QUIET },
+        // The panel's text is centred; its place is the panel inside `PANEL_TEXT_INSET`.
+        Place { name: "panel", pane: Some("panel"), rect: panel_text, ink: Ink::OnGlass, least: LEAST_TEXT },
+        // The panel's sentence is quiet text at `TEXT` (normal size), as will be a table's quiet cells.
+        Place { name: "panel-quiet", pane: Some("panel"), rect: panel_text, ink: Ink::Quiet, least: LEAST_TEXT },
         // The title can be longer than the one word now, so its whole room is measured, as one line.
         Place {
             name: "title",
@@ -164,7 +175,7 @@ fn places() -> Vec<Place> {
 /// The pixels of `place` where text can sit: inside its rectangle and on a solid part of its pane's picture.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixel places on a 1440 by 900 window, far inside every range")]
 fn pixels<'a>(window: &'a Window, place: &'a Place) -> impl Iterator<Item = (usize, usize, Pixel)> + 'a {
-    let pane = place.pane.and_then(|id| window.panes.iter().find(|pane| pane.id == id));
+    let pane = place.pane.map(|id| window.panes.iter().find(|pane| pane.id == id).unwrap_or_else(|| panic!("the shell has no pane {id}")));
     let bitmap = &window.bitmap;
     let (x0, x1) = (place.rect.left().floor() as usize, (place.rect.right().ceil() as usize).min(bitmap.w));
     let (y0, y1) = (place.rect.top().floor() as usize, (place.rect.bottom().ceil() as usize).min(bitmap.h));
@@ -180,11 +191,12 @@ fn pixels<'a>(window: &'a Window, place: &'a Place) -> impl Iterator<Item = (usi
 /// The lowest contrast of `ink` against the pixels of `place`.
 fn lowest(window: &Window, place: &Place, ink: Color32) -> Lowest {
     let ink = raster::pixel(ink);
-    let mut found = Lowest { contrast: f64::INFINITY, at: (0, 0) };
+    let mut found = Lowest { contrast: f64::INFINITY, at: (0, 0), count: 0 };
     for (x, y, under) in pixels(window, place) {
+        found.count += 1;
         let contrast = ratio(luminance(over(under, ink)), luminance(under));
         if contrast < found.contrast {
-            found = Lowest { contrast, at: (x, y) };
+            found = Lowest { contrast, at: (x, y), count: found.count };
         }
     }
     found
@@ -202,7 +214,7 @@ struct Row {
 impl Row {
     fn text(&self) -> String {
         format!(
-            "{:<7} {:<6} {:<7} lowest {:>6.2} (needs {:.1}) at x={} y={}{}\n",
+            "{:<7} {:<6} {:<13} lowest {:>6.2} (needs {:.1}) at x={} y={} over {} px{}\n",
             self.backdrop,
             format!("{:?}", self.mode),
             self.name,
@@ -210,6 +222,7 @@ impl Row {
             self.least,
             self.found.at.0,
             self.found.at.1,
+            self.found.count,
             if self.found.contrast >= self.least { "" } else { "  FAIL" }
         )
     }
@@ -229,10 +242,16 @@ fn measure(backdrop: &'static str) -> Vec<Row> {
             };
             let found = lowest(&window, &place, ink);
             match rows[first..].iter_mut().find(|row| row.name == place.name) {
-                Some(row) if found.contrast < row.found.contrast => row.found = found,
-                Some(_) => {}
+                Some(row) => {
+                    let count = row.found.count + found.count;
+                    row.found = if found.contrast < row.found.contrast { found } else { row.found };
+                    row.found.count = count;
+                }
                 None => rows.push(Row { backdrop, mode, name: place.name, least: place.least, found }),
             }
+        }
+        for row in &rows[first..] {
+            assert!(row.found.count >= LEAST_PIXELS, "{backdrop} {mode:?} {}: only {} pixels measured", row.name, row.found.count);
         }
     }
     rows
@@ -244,6 +263,20 @@ fn every_text_on_the_shell_holds_its_contrast_on_all_six_backdrops() {
         let jobs: Vec<_> = BACKDROPS.into_iter().map(|backdrop| scope.spawn(move || measure(backdrop))).collect();
         jobs.into_iter().flat_map(|job| job.join().unwrap()).collect()
     });
+    let mut names: Vec<&str> = places().iter().map(|place| place.name).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(rows.len(), names.len() * BACKDROPS.len() * 2, "one row per place, backdrop and mode");
+    for backdrop in BACKDROPS {
+        for mode in [Mode::Light, Mode::Dark] {
+            for name in &names {
+                assert!(
+                    rows.iter().any(|row| row.backdrop == backdrop && row.mode == mode && row.name == *name),
+                    "no row for {backdrop} {mode:?} {name}"
+                );
+            }
+        }
+    }
     let table: String = rows.iter().map(Row::text).collect();
     eprintln!("{table}");
     let failures: String = rows.iter().filter(|row| row.found.contrast < row.least).map(Row::text).collect();
