@@ -135,7 +135,7 @@ pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Pal
         let fill = Fill { row, shown, panel: rect, under_line: index + 1 < lines.len(), hovered: ui.rect_contains_pointer(shown) };
         match &lines[index] {
             Line::Group(group) => {
-                let response = ui.interact(shown, ui.scope_id().with(("table-group", &group.key)), Sense::click());
+                let response = ui.interact(shown, ui.scope_id().with(("table-group", &group.key)), Sense::CLICK);
                 response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &group.name));
                 let highlight = if group.chosen { palette.selection } else { Color32::TRANSPARENT };
                 draw_fill(ui.painter(), &fill, &[soft(palette, GROUP_FILL_OPACITY), highlight], palette);
@@ -145,7 +145,7 @@ pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Pal
                 }
             }
             Line::Repo(repo) => {
-                let response = ui.interact(shown, ui.scope_id().with(("table-row", &repo.key)), Sense::click());
+                let response = ui.interact(shown, ui.scope_id().with(("table-row", &repo.key)), Sense::CLICK);
                 response.widget_info(|| WidgetInfo::labeled(Role::Row, true, &repo.name));
                 draw_fill(ui.painter(), &fill, &[repo_fill(repo, palette, mode)], palette);
                 draw_repo(ui, row, &columns, repo, palette);

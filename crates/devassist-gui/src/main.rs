@@ -31,7 +31,9 @@ fn main() -> ExitCode {
     match app::run(launch, settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            complain(&message);
+            // Through the log, which says it with the program's name; a release build on Windows has no console
+            // for a plain line on standard error.
+            log::error!("{message}");
             ExitCode::FAILURE
         }
     }

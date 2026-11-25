@@ -5,8 +5,8 @@
 use std::hash::Hash;
 
 use egui::{
-    Align2, Color32, FontFamily, FontId, Frame, Id, Margin, Painter, Pos2, Rect, Response, RichText, Role, Sense, Stroke, StrokeKind, TextEdit, Ui,
-    Vec2, WidgetInfo, pos2, vec2,
+    Align2, Color32, EventFilter, FontFamily, FontId, Frame, Id, Margin, Painter, Pos2, Rect, Response, RichText, Role, Sense, Stroke, StrokeKind,
+    TextEdit, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
 
 use crate::assets::{self, Icon};
@@ -37,7 +37,7 @@ pub enum Tick {
 /// all of `rect` that is inside the `ui`'s clip takes the press. `id_source` tells this checkbox from the others
 /// (the key of what it ticks); `label` is what a screen reader says.
 pub fn checkbox(ui: &mut Ui, rect: Rect, id_source: impl Hash + std::fmt::Debug, state: Tick, palette: Palette, label: &str) -> Response {
-    let response = ui.interact(rect, ui.scope_id().with(("checkbox", id_source)), Sense::click());
+    let response = ui.interact(rect, ui.scope_id().with(("checkbox", id_source)), Sense::CLICK);
     response.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, state == Tick::On, label));
     let shape = box_rect(rect);
     let painter = ui.painter();
@@ -173,7 +173,7 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
                 painter.text(pos2(place.left() + LABEL_PAD[0], place.center().y), Align2::LEFT_CENTER, words, medium.clone(), palette.on_glass);
             }
             Item::Action { icon, words, on } => {
-                let response = ui.interact(place, ui.scope_id().with(("capsule", rect.min.x.to_bits(), index)), Sense::click());
+                let response = ui.interact(place, ui.scope_id().with(("capsule", rect.min.x.to_bits(), index)), Sense::CLICK);
                 let name = if words.is_empty() { icon.name() } else { words };
                 response.widget_info(|| WidgetInfo::selected(Role::Button, true, on, name));
                 let fill = if on {
@@ -201,7 +201,8 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
 }
 
 /// Draws a one-line text field at `rect`, whose glass is baked ([`add_glass`]): `icon` at its left, then `text`,
-/// or `hint` in the quiet colour while `text` is empty. `id` names it, so it can be given the focus.
+/// or `hint` in the quiet colour while `text` is empty. `id` names it, so it can be given the focus. While it has
+/// the focus, Tab and the arrows do not move the focus away.
 pub fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon, palette: Palette, id: Id) -> Response {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     draw_icon(&painter, pos2(rect.left() + FIELD_PAD + ICON / 2.0, rect.center().y), icon, ICON, palette.quiet);
@@ -216,7 +217,10 @@ pub fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon,
         .margin(Margin::ZERO)
         .desired_width(room.width())
         .min_size(room.size())
-        .align(Align2::LEFT_CENTER);
+        .align(Align2::LEFT_CENTER)
+        // Tab and the arrows stay with the field: nothing else on a screen takes the keyboard's focus, and the
+        // screen reads the up and down arrows itself.
+        .event_filter(EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..EventFilter::default() });
     ui.put(room, edit)
 }
 

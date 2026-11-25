@@ -233,7 +233,7 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
     // The empty part of the top row moves the window, as the title bar it replaces did; drawn first, so the
     // buttons over it take their own presses.
     let bar = Rect::from_min_max(pos2(layout.toggle.left(), window.top()), pos2(window.right(), layout.toggle.bottom() + INSET));
-    let drag = ui.interact(bar, ui.scope_id().with("window-drag"), Sense::click_and_drag());
+    let drag = ui.interact(bar, ui.scope_id().with("window-drag"), Sense::CLICK | Sense::DRAG);
     if drag.drag_started() {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
@@ -251,7 +251,7 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
 
     let painter = ui.painter().clone();
     let toggle = layout.toggle;
-    if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::click()).on_hover_text("Show or hide the sidebar").clicked() {
+    if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked() {
         *sidebar_shown = !*sidebar_shown;
         ui.ctx().request_repaint();
     }
@@ -380,7 +380,7 @@ fn draw_sidebar(ui: &Ui, sidebar: Rect, page: Page, waiting: usize, palette: Pal
                 painter.text(pos2(rect.left() + ROW_PADDING, rect.center().y), Align2::LEFT_CENTER, text, small, palette.quiet);
             }
             Row::Nav(target) => {
-                let response = ui.interact(rect.intersect(sidebar), ui.scope_id().with(("page", target.name())), Sense::click());
+                let response = ui.interact(rect.intersect(sidebar), ui.scope_id().with(("page", target.name())), Sense::CLICK);
                 response.widget_info(|| WidgetInfo::selected(Role::Button, true, target == page, target.name()));
                 let fill = if target == page {
                     palette.selection
@@ -464,7 +464,7 @@ fn caption_buttons(ui: &Ui, captions: Rect, palette: Palette) {
     for (icon, hint, command) in buttons {
         let rect = Rect::from_min_max(pos2(right - CAPTION_BUTTON, captions.top()), pos2(right, captions.bottom()));
         right = rect.left();
-        let response = ui.interact(rect, ui.scope_id().with(hint), Sense::click()).on_hover_text(hint);
+        let response = ui.interact(rect, ui.scope_id().with(hint), Sense::CLICK).on_hover_text(hint);
         let close = icon == Icon::X;
         let (fill, mark) = match (response.hovered(), close) {
             (true, true) => (palette.danger, palette.on_dark_glass),
@@ -508,6 +508,7 @@ mod tests {
                         let l = layout(size, sidebar, toolbar);
                         let named = [
                             ("sidebar", l.sidebar),
+                            ("toggle", l.toggle),
                             ("title", l.title),
                             ("actions", l.actions),
                             ("captions", l.captions),
@@ -526,7 +527,7 @@ mod tests {
                         }
                         assert_eq!(l.sidebar.is_positive(), sidebar);
                         assert_eq!(l.toolbar.is_positive(), toolbar);
-                        assert!(l.toggle.is_positive() && !l.toggle.intersect(l.title).is_positive());
+                        assert!(l.toggle.is_positive());
                     }
                 }
             }

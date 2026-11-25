@@ -3,7 +3,7 @@
 //! the terminal app. Every change goes through a method of the core's `Repos`.
 
 use devassist_core::repos::state::{GROUP_KEY, Repos, SortMode};
-use egui::{Event, FontFamily, Id, Key, Painter, Pos2, Rect, Ui, pos2};
+use egui::{Event, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Ui, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
@@ -70,8 +70,6 @@ pub struct Plan {
     view: Rect,
     /// The words of the sort.
     sort: &'static str,
-    /// The sort that puts what needs attention first is on.
-    attention_first: bool,
     /// The selection capsule and its count, when something is ticked.
     selection: Option<(Rect, String)>,
 }
@@ -97,19 +95,18 @@ pub fn has_toolbar(session: &Session) -> bool {
 #[must_use]
 pub fn plan(painter: &Painter, layout: &Layout, session: &Session) -> Option<Plan> {
     let repos = session.repos().filter(|_| has_toolbar(session))?;
-    let attention_first = repos.sort == SortMode::NeedsUpdate;
-    let sort = if attention_first { ATTENTION_FIRST } else { BY_NAME };
-    let view_width = widgets::capsule_width(painter, &view_items(sort, attention_first));
+    let sort = if repos.sort == SortMode::NeedsUpdate { ATTENTION_FIRST } else { BY_NAME };
+    let view_width = widgets::capsule_width(painter, &view_items(sort));
     let count = repos.marked.len();
     let words = selected(count);
     let selection_width = (count > 0).then(|| widgets::capsule_width(painter, &selection_items(&words)));
     let (field, view, selection) = places(layout.toolbar, view_width, selection_width);
-    Some(Plan { field, view, sort, attention_first, selection: selection.map(|rect| (rect, words)) })
+    Some(Plan { field, view, sort, selection: selection.map(|rect| (rect, words)) })
 }
 
-/// The view capsule's items: the sort.
-fn view_items(sort: &str, attention_first: bool) -> [Item<'_>; 1] {
-    [Item::Action { icon: Icon::ArrowUpDown, words: sort, on: attention_first }]
+/// The view capsule's items: the sort, whose words say which it is (no fill, as the design draws it).
+fn view_items(sort: &str) -> [Item<'_>; 1] {
+    [Item::Action { icon: Icon::ArrowUpDown, words: sort, on: false }]
 }
 
 /// The selection capsule's items: how many are ticked, and the button that clears the ticks.
@@ -149,7 +146,7 @@ pub fn state_text(session: &Session) -> Option<(String, Vec<String>)> {
         // While the folders are still being read, the status bar says so and the panel waits.
         return (!repos.waiting()).then(|| (NO_REPOSITORIES.to_owned(), vec![ADD_IN_TERMINAL.to_owned()]));
     }
-    if !repos.list_filter.is_empty() && repos.rows().is_empty() {
+    if filter_hides_everything(repos) {
         return Some((nothing_matches(&repos.list_filter), vec![ESC_CLEARS.to_owned()]));
     }
     None
@@ -166,12 +163,14 @@ enum Command {
     Tick,
     /// Tick every row shown.
     TickAll,
-    /// Clear the ticks, or the filter when it had the focus.
+    /// Clear the filter when it lets nothing through, else the ticks.
     Escape,
     /// Change the sort.
     Sort,
     /// Put the focus in the filter.
     Filter,
+    /// Type this into the filter: text that came after the key that put the focus there, in the same frame.
+    Type(char),
     /// Fetch and read again.
     Refresh,
     /// Fold the highlighted group (`true`) or unfold it.
@@ -179,10 +178,17 @@ enum Command {
 }
 
 /// What the keys among `events` ask, in order, as the terminal app reads them. Letters are read from the typed
-/// text, so they follow the keyboard's layout.
+/// text, so they follow the keyboard's layout. Once `/` has asked for the filter, the rest of the frame's text is
+/// typed into it and its other keys are the field's.
 fn commands(events: &[Event]) -> Vec<Command> {
     let mut commands = Vec::new();
     for event in events {
+        if commands.contains(&Command::Filter) {
+            if let Event::Text(text) = event {
+                commands.extend(text.chars().map(Command::Type));
+            }
+            continue;
+        }
         match event {
             Event::Key { key, pressed: true, modifiers, .. } => {
                 let command = match key {
@@ -202,14 +208,22 @@ fn commands(events: &[Event]) -> Vec<Command> {
                 };
                 commands.push(command);
             }
-            Event::Text(text) => commands.extend(text.chars().filter_map(|typed| match typed {
-                'j' => Some(Command::Move(1)),
-                'k' => Some(Command::Move(-1)),
-                's' | 'S' => Some(Command::Sort),
-                'r' => Some(Command::Refresh),
-                '/' => Some(Command::Filter),
-                _ => None,
-            })),
+            Event::Text(text) => {
+                for typed in text.chars() {
+                    if commands.contains(&Command::Filter) {
+                        commands.push(Command::Type(typed));
+                        continue;
+                    }
+                    match typed {
+                        'j' => commands.push(Command::Move(1)),
+                        'k' => commands.push(Command::Move(-1)),
+                        's' | 'S' => commands.push(Command::Sort),
+                        'r' => commands.push(Command::Refresh),
+                        '/' => commands.push(Command::Filter),
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -241,12 +255,26 @@ fn filter_id() -> Id {
 /// repositories through their methods; `screen` keeps the scroll and the focus between frames.
 pub fn show(ui: &mut Ui, layout: &Layout, plan: Option<&Plan>, session: &mut Session, sheet: Option<&Sheet>, mode: Mode, screen: &mut Screen) {
     let palette = theme::palette(mode);
+    // The frame's keys are the filter's when it held the focus at the end of the last frame; egui takes the focus
+    // away on Esc before the frame sees the key, so the focus now would not say it.
+    let typing = screen.filter_focused;
     let mut moved = false;
     if let (Some(plan), Some(repos)) = (plan, session.repos_mut()) {
+        if ui.memory(|memory| memory.has_focus(filter_id())) {
+            // While the filter has the focus, the up and down keys move the highlight, as in the terminal app's
+            // filter; taken before the field sees them.
+            for (key, rows) in [(Key::ArrowUp, -1), (Key::ArrowDown, 1), (Key::PageUp, -PAGE_ROWS), (Key::PageDown, PAGE_ROWS)] {
+                let presses = ui.input_mut(|input| input.count_and_consume_key(Modifiers::NONE, key));
+                for _ in 0..presses {
+                    repos.move_by(rows);
+                    moved = true;
+                }
+            }
+        }
         let mut text = repos.list_filter.clone();
         widgets::field(ui, plan.field, &mut text, FILTER_HINT, Icon::Search, palette, filter_id());
         repos.set_list_filter(&text);
-        if widgets::capsule(ui, plan.view, &view_items(plan.sort, plan.attention_first), palette).is_some() {
+        if widgets::capsule(ui, plan.view, &view_items(plan.sort), palette).is_some() {
             repos.toggle_sort();
         }
         if let Some((rect, count)) = &plan.selection
@@ -256,16 +284,22 @@ pub fn show(ui: &mut Ui, layout: &Layout, plan: Option<&Plan>, session: &mut Ses
         }
     }
 
-    // The keys act when no text field has the focus; Esc in the filter clears it (egui has taken the focus away
-    // by the time the frame sees the Esc).
-    let typing = ui.memory(|memory| memory.has_focus(filter_id()));
-    if !typing {
-        let events = ui.input(|input| input.events.clone());
+    let events = ui.input(|input| input.events.clone());
+    if typing {
+        // The text was the field's; an Esc that took its focus away clears it.
+        let escaped = events.iter().any(|event| matches!(event, Event::Key { key: Key::Escape, pressed: true, .. }));
+        if escaped && let Some(repos) = session.repos_mut() {
+            repos.set_list_filter("");
+        }
+    } else {
         for command in commands(&events) {
-            moved |= apply(command, session, screen.filter_focused, ui);
+            moved |= apply(command, session, ui);
         }
     }
     screen.filter_focused = ui.memory(|memory| memory.has_focus(filter_id()));
+    if moved {
+        ui.ctx().request_repaint();
+    }
 
     if let Some((title, lines)) = state_text(session) {
         if let Some(sheet) = sheet {
@@ -295,9 +329,8 @@ pub fn show(ui: &mut Ui, layout: &Layout, plan: Option<&Plan>, session: &mut Ses
     }
 }
 
-/// Does what `command` asks of `session`, the filter having had the focus at the end of the last frame when
-/// `filter_focused`; says whether the highlight may have moved.
-fn apply(command: Command, session: &mut Session, filter_focused: bool, ui: &Ui) -> bool {
+/// Does what `command` asks of `session`; says whether it changed what is shown.
+fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
     if command == Command::Refresh {
         session.refresh();
         return false;
@@ -308,7 +341,8 @@ fn apply(command: Command, session: &mut Session, filter_focused: bool, ui: &Ui)
         Command::End(start) => repos.move_to_end(start),
         Command::Tick => repos.toggle_list_mark(),
         Command::TickAll => repos.mark_all_visible(),
-        Command::Escape if filter_focused => repos.set_list_filter(""),
+        // The panel then says that Esc clears the filter, and the ticks are out of sight.
+        Command::Escape if filter_hides_everything(repos) => repos.set_list_filter(""),
         Command::Escape => repos.clear_marks(),
         Command::Sort => repos.toggle_sort(),
         Command::Filter => {
@@ -317,11 +351,19 @@ fn apply(command: Command, session: &mut Session, filter_focused: bool, ui: &Ui)
             }
             return false;
         }
+        Command::Type(typed) => {
+            let text = format!("{}{typed}", repos.list_filter);
+            repos.set_list_filter(&text);
+        }
         Command::Fold(fold) => repos.fold_selected(fold),
         Command::Refresh => {}
     }
-    ui.ctx().request_repaint();
     true
+}
+
+/// Whether a filter is set and lets no row through.
+fn filter_hides_everything(repos: &Repos) -> bool {
+    !repos.list_filter.is_empty() && repos.rows().is_empty()
 }
 
 /// Whether there are repositories, and so a filter to type into.
@@ -370,7 +412,7 @@ fn draw_state(ui: &Ui, panel: Rect, title: &str, lines: &[String], palette: them
 #[cfg(test)]
 mod tests {
     use devassist_core::repos::state::testing::test_settings;
-    use egui::{Context, Modifiers, RawInput, Stroke, TextureId, vec2};
+    use egui::{Context, RawInput, Stroke, TextureId, vec2};
 
     use super::*;
     use crate::shell;
@@ -610,5 +652,84 @@ mod tests {
         let demo = Session::Demo(Box::new(crate::demo::repos()));
         assert_eq!(status(&demo).map(|status| status.text), Some("12 installed. 2 are behind. 1 has new commits on other branches.".to_owned()));
         assert_eq!(status(&Session::Broken(String::new())), None);
+    }
+
+    /// Which widget has egui's keyboard focus.
+    fn focused(ctx: &Context) -> Option<Id> {
+        ctx.memory(egui::Memory::focused)
+    }
+
+    #[test]
+    fn the_arrows_in_the_filter_move_the_highlight_and_the_focus_stays_there() {
+        let ctx = context();
+        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        let rows = keys(&session);
+        session.repos_mut().unwrap().pick(&rows[0]);
+        frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
+        assert_eq!(focused(&ctx), Some(filter_id()));
+
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::ArrowDown)]);
+        assert_eq!(repos(&session).selected.as_deref(), Some(rows[1].as_str()), "ArrowDown in the filter moves the highlight");
+        assert_eq!(focused(&ctx), Some(filter_id()), "and the focus stays in the filter");
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::ArrowDown), press(Key::ArrowUp), press(Key::ArrowDown)]);
+        assert_eq!(repos(&session).selected.as_deref(), Some(rows[2].as_str()));
+        assert_eq!(focused(&ctx), Some(filter_id()));
+
+        // Tab keeps the focus in the filter: nothing else on the screen can hold it.
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Tab)]);
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        assert_eq!(focused(&ctx), Some(filter_id()), "Tab in the filter keeps the focus");
+
+        // Out of the filter, Space ticks the highlighted row only, and nothing else is pressed.
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Escape)]);
+        assert_eq!(focused(&ctx), None);
+        let before = ticked(&session);
+        frame(&ctx, &mut session, &mut screen, typed(Key::Space, " "));
+        let after = ticked(&session);
+        assert_eq!(after.len(), before.len() + 1, "{before:?} then {after:?}");
+        assert!(after.contains(&rows[2]));
+        assert_eq!(repos(&session).selected.as_deref(), Some(rows[3].as_str()), "the highlight moved down once, no row was clicked");
+        assert_eq!(focused(&ctx), None);
+
+        // With nothing focused, Tab gives the focus to the filter, the one control that takes it.
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Tab)]);
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        assert_eq!(focused(&ctx), Some(filter_id()));
+    }
+
+    #[test]
+    fn esc_clears_a_filter_that_lets_nothing_through_even_without_the_focus() {
+        let ctx = context();
+        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
+        frame(&ctx, &mut session, &mut screen, vec![Event::Text("zzz".to_owned())]);
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Enter)]);
+        assert_eq!(focused(&ctx), None, "Enter leaves the filter");
+        assert_eq!(repos(&session).list_filter, "zzz");
+        assert_eq!(state_text(&session).map(|(_, lines)| lines), Some(vec!["Esc clears the filter.".to_owned()]));
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Escape)]);
+        assert_eq!(repos(&session).list_filter, "", "Esc does what the panel says");
+        assert_eq!(ticked(&session), ["api", "web"], "and the ticks, hidden by the filter, stay");
+    }
+
+    #[test]
+    fn text_in_the_frame_the_focus_moves_goes_where_the_focus_is() {
+        let ctx = context();
+        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        // "/po" typed so fast that it comes in one frame: the "po" is the filter's.
+        let fast = [typed(Key::Slash, "/"), typed(Key::P, "p"), typed(Key::O, "o")].concat();
+        frame(&ctx, &mut session, &mut screen, fast);
+        assert_eq!(repos(&session).list_filter, "po");
+        assert_eq!(focused(&ctx), Some(filter_id()));
+        // Esc and an "s" in one frame: the Esc leaves and clears the filter, the "s" was typed for it, not a key.
+        frame(&ctx, &mut session, &mut screen, [vec![press(Key::Escape)], typed(Key::S, "s")].concat());
+        assert_eq!(repos(&session).list_filter, "");
+        assert!(repos(&session).sort == SortMode::Name, "the s did not change the sort");
     }
 }

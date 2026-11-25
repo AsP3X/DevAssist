@@ -40,6 +40,20 @@ pub fn settings_warning(settings: &Result<Settings, String>) -> Option<String> {
     settings.as_ref().err().map(|e| format!("devassist-gui: {e}; opening with the default look"))
 }
 
+/// What the window says in its status bar when `settings` could not be read, in words for a person; `None` when
+/// they were read. The console has its own line ([`settings_warning`]).
+#[must_use]
+pub fn window_warning(settings: &Result<Settings, String>) -> Option<String> {
+    settings.as_ref().err().map(|e| format!("The settings could not be read, so the window opens in the default look: {e}"))
+}
+
+/// What the status bar says instead of the screen's own words: the settings warning `notice`, while less than
+/// [`NOTICE_TIME`] has passed since the window opened (`elapsed`), as an error.
+#[must_use]
+pub fn notice_status(notice: Option<&str>, elapsed: std::time::Duration) -> Option<Status> {
+    notice.filter(|_| elapsed < NOTICE_TIME).map(|text| Status { text: text.to_owned(), error: true, notes: Vec::new() })
+}
+
 /// Opens the window for `launch`, in the look of `settings` (from [`load_settings`]), and runs it until it is
 /// closed.
 ///
@@ -99,7 +113,7 @@ impl App {
             gpu::install(state.device.clone(), state.queue.clone());
         }
         let looks = [launch::look(settings.clone(), launch, false), launch::look(settings.clone(), launch, true)];
-        let notice = settings_warning(&settings);
+        let notice = window_warning(&settings);
         App {
             looks,
             sidebar_shown: !launch.sidebar_hidden,
@@ -174,7 +188,7 @@ impl eframe::App for App {
 
         // The frosted panel is no picture: the screen paints it from the sheet, which costs nothing to move.
         let sheet = self.baker.sheet(Surface::Panel);
-        let notice = self.notice.clone().filter(|_| self.start.elapsed() < NOTICE_TIME).map(|text| Status { text, error: true, notes: Vec::new() });
+        let notice = notice_status(self.notice.as_deref(), self.start.elapsed());
         let status = notice.or_else(|| repos_screen::status(&self.session));
         let waiting = self.session.repos().map_or(0, |repos| repos.queue.len());
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
@@ -190,8 +204,9 @@ impl eframe::App for App {
 }
 
 // Copied from Quill (pencraft) app/src/app.rs at 6c6a0cc: `edge_at` and `resize_edges`.
-// One change: the edges resize the window on every system where it has no frame of its own (all but macOS),
-// not on Windows only.
+// Two changes: the edges resize the window on every system where it has no frame of its own (all but macOS),
+// not on Windows only; and the unseen area under the pointer senses clicks and drags but takes no keyboard focus
+// (`Sense::CLICK | Sense::DRAG`, not `click_and_drag()`), so the filter stays the one control that holds it.
 
 /// Which way a press at `at` resizes a window that covers `window`: `None` away from its edges.
 // Human: within `WINDOW_EDGE` of an edge the window is resized that way; within `WINDOW_CORNER` of a corner
@@ -231,7 +246,7 @@ fn resize_edges(ctx: &egui::Context) {
     let caught = egui::Area::new(egui::Id::unique("window-edge"))
         .order(egui::Order::Tooltip)
         .fixed_pos(catch.min)
-        .show(ctx, |ui| ui.allocate_exact_size(catch.size(), egui::Sense::click_and_drag()).1)
+        .show(ctx, |ui| ui.allocate_exact_size(catch.size(), egui::Sense::CLICK | egui::Sense::DRAG).1)
         .inner;
     ctx.set_cursor_icon(match to {
         To::North | To::South => CursorIcon::ResizeVertical,
@@ -259,6 +274,21 @@ mod tests {
         );
         let read = Ok(Settings::for_folder(Vec::new(), std::path::PathBuf::from("devassist.toml")));
         assert_eq!(settings_warning(&read), None);
+        assert_eq!(
+            window_warning(&broken).as_deref(),
+            Some("The settings could not be read, so the window opens in the default look: line 1: theme is light, dark or system")
+        );
+        assert_eq!(window_warning(&read), None);
+    }
+
+    #[test]
+    fn the_settings_warning_is_the_status_for_its_first_seconds_only() {
+        let notice = Some("The settings could not be read");
+        let said = notice_status(notice, std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!((said.text.as_str(), said.error, said.notes.len()), ("The settings could not be read", true, 0));
+        assert_eq!(notice_status(notice, NOTICE_TIME), None);
+        assert_eq!(notice_status(notice, NOTICE_TIME + std::time::Duration::from_secs(1)), None);
+        assert_eq!(notice_status(None, std::time::Duration::ZERO), None);
     }
 
     #[test]
