@@ -15,8 +15,8 @@ pub enum Session {
     Broken(String),
     /// The repositories, live.
     Live(Box<Repos>),
-    /// The drawing's repositories (`--demo`): they are on no disk, so nothing that reads a disk or the network is
-    /// ever asked of them.
+    /// The drawing's repositories (`--demo`), from [`demo::repos`]: they are on no disk, so all their work is held
+    /// in the core from the start, and nothing a person asks of them is run, fetched, opened or written.
     Demo(Box<Repos>),
 }
 
@@ -54,14 +54,10 @@ impl Session {
         }
     }
 
-    /// Stops what runs, for closing the window; a demo's own settings folder is removed.
+    /// Stops what runs, for closing the window.
     pub fn close(&mut self) {
         match self {
-            Session::Live(repos) => repos.quit(),
-            Session::Demo(repos) => {
-                repos.quit();
-                demo::remove_settings(repos);
-            }
+            Session::Live(repos) | Session::Demo(repos) => repos.quit(),
             Session::Broken(_) => {}
         }
     }
@@ -73,9 +69,9 @@ impl Session {
     }
 
     /// Asks the core to fetch and read everything again (what `r` does in the terminal app). Does nothing for a
-    /// demo, whose folders are on no disk, or for a broken settings file.
+    /// broken settings file; a demo's core holds it and says so.
     pub fn refresh(&mut self) {
-        if let Session::Live(repos) = self {
+        if let Some(repos) = self.repos_mut() {
             repos.refresh();
         }
     }
@@ -124,14 +120,22 @@ mod tests {
     }
 
     #[test]
-    fn a_demo_leaves_no_settings_folder_behind() {
+    fn a_demo_session_is_held() {
         let mut session = Session::start(Err("ignored in a demo".into()), &demo());
+        assert!(session.is_demo());
+        assert!(session.repos().unwrap().work_held(), "the demo's core holds all work from the start");
+        // A fold works and is written nowhere.
         let path = session.repos().unwrap().config_path.clone();
         session.repos_mut().unwrap().toggle_group("home");
-        assert!(path.exists(), "the fold was saved to the demo's own file");
+        assert_eq!(session.repos().unwrap().collapsed, ["home"]);
+        assert!(!path.exists(), "the held demo wrote its settings");
+        // `r` and F5 reach the core, which runs nothing and says so.
+        session.refresh();
+        session.tick();
+        let repos = session.repos().unwrap();
+        assert_eq!(repos.status, devassist_core::repos::state::HELD);
+        assert!(!repos.waiting() && !repos.fetching && !repos.busy && repos.queue.is_empty());
         session.close();
-        assert!(!path.exists());
-        assert!(!path.parent().unwrap().exists(), "the demo's folder is gone");
     }
 
     #[test]
@@ -191,18 +195,6 @@ mod tests {
         assert!(!session.is_demo());
         session.refresh();
         session.close();
-    }
-
-    #[test]
-    fn a_demo_is_never_refreshed() {
-        let mut session = Session::start(Err("ignored in a demo".into()), &demo());
-        assert!(session.is_demo());
-        session.refresh();
-        session.tick();
-        let repos = session.repos().unwrap();
-        assert!(!repos.waiting());
-        assert_eq!(repos.status, "12 installed. 2 are behind. 1 has new commits on other branches.");
-        assert_eq!(repos.installed.len(), 12);
     }
 
     #[test]

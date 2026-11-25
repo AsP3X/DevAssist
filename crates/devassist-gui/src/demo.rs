@@ -8,18 +8,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
 
 use devassist_core::config::Settings;
 use devassist_core::repos::github::PullCounts;
 use devassist_core::repos::gitops::{LocalRepo, PendingPulls};
 use devassist_core::repos::state::Repos;
 
-use crate::theme;
-
-/// The start of the name of the demo's own folder, under the system's temporary folder, that holds its settings
-/// path.
+/// The folder, under the system's temporary folder, of the demo's settings path, which is never written.
 const SETTINGS_FOLDER: &str = "devassist-gui-demo";
 /// The settings file's name in it.
 const SETTINGS_FILE: &str = "devassist.toml";
@@ -119,34 +114,22 @@ fn local(entry: &Entry) -> LocalRepo {
 }
 
 /// The demo's settings: every one at its default (the default look among them), with the drawing's checkouts, and
-/// a settings path in a folder of the demo's own under the system's temporary folder, never the person's settings
-/// file, because the core saves when a group is folded. Each call has a folder of its own. Reads nothing.
+/// a settings path under the system's temporary folder, never the person's settings file. Nothing is written
+/// there: the demo's [`repos`] hold all work, and a held core writes no settings. Reads nothing.
 #[must_use]
 pub fn settings() -> Settings {
-    static FOLDERS: AtomicU32 = AtomicU32::new(0);
-    let folder = format!("{SETTINGS_FOLDER}-{}-{}", std::process::id(), FOLDERS.fetch_add(1, Ordering::Relaxed));
     // The core keeps a watched repository only while it is among the checkouts, also when it saves a fold.
     let checkouts = ENTRIES.iter().map(|entry| PathBuf::from(entry.path)).collect();
-    Settings::for_folder(checkouts, std::env::temp_dir().join(folder).join(SETTINGS_FILE))
-}
-
-/// Removes the folder that holds the settings path of the demo's `repos` (from [`repos`]), which a fold wrote to.
-/// Removes nothing for a settings path that is not the demo's own.
-pub fn remove_settings(repos: &Repos) {
-    let temp = std::env::temp_dir();
-    if let Some(folder) = repos.config_path.parent()
-        && folder.parent() == Some(temp.as_path())
-        && folder.file_name().is_some_and(|name| name.to_string_lossy().starts_with(SETTINGS_FOLDER))
-    {
-        let _ = std::fs::remove_dir_all(folder);
-    }
+    Settings::for_folder(checkouts, std::env::temp_dir().join(SETTINGS_FOLDER).join(SETTINGS_FILE))
 }
 
 /// The drawing's twelve repositories in four groups, with its pull request counts, ticks and watch, reading no disk
-/// and no network, with the demo's [`settings`].
+/// and no network, with the demo's [`settings`]. All work is held (`Repos::hold_work`): whatever a person asks of
+/// them, nothing is run, fetched, pulled, opened or written, and the status line says so.
 #[must_use]
 pub fn repos() -> Repos {
     let mut repos = Repos::offline(settings());
+    repos.hold_work();
     // The core keeps pull request counts under the owner and the repository, in lower case.
     let mut pulls = HashMap::new();
     for entry in &ENTRIES {
@@ -170,8 +153,6 @@ pub fn repos() -> Repos {
     }
     repos.pulls = pulls;
     STATUS.clone_into(&mut repos.status);
-    // The folders of the demo are on no disk: the automatic pull of the watched one must not start.
-    repos.watch_due = Instant::now() + theme::DEMO_WATCH_HOLD;
     repos
 }
 
@@ -187,7 +168,8 @@ mod tests {
         assert!(repos.is_marked_local("api") && repos.is_marked_local("web"));
         assert_eq!(repos.watched_count(), 1);
         assert_eq!(repos.status, "12 installed. 2 are behind. 1 has new commits on other branches.");
-        assert!(repos.config_path.starts_with(std::env::temp_dir())); // folding a group in the demo must not write the real settings
+        assert!(repos.config_path.starts_with(std::env::temp_dir())); // never the real settings, though nothing is written
+        assert!(repos.work_held());
     }
 
     #[test]

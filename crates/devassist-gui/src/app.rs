@@ -10,6 +10,7 @@ use crate::assets;
 use crate::baker::{Baker, Scene};
 use crate::demo;
 use crate::launch::{self, Launch};
+use crate::overlay;
 use crate::repos_screen::{self, Screen};
 use crate::repos_view::Status;
 use crate::screenshot;
@@ -181,8 +182,10 @@ impl eframe::App for App {
         }
         let scene = Scene { size: size.into(), pixels_per_point: ctx.pixels_per_point(), mode, backdrop, blur };
         // The wallpaper first, stretched over the window, then each glass pane; each shows only its own part of
-        // its texture (`uv`), or the backdrop behind a pane would sit shifted against the wallpaper.
-        for drawn in self.baker.frame(&ctx, &scene, wants.as_slice(), self.start.elapsed()) {
+        // its texture (`uv`), or the backdrop behind a pane would sit shifted against the wallpaper. A dialog's or a
+        // menu's pane is not painted here, under the screen, but on its overlay, over the scrim (`overlay::glass`).
+        let drawn = self.baker.frame(&ctx, &scene, wants.as_slice(), self.start.elapsed());
+        for drawn in drawn.iter().filter(|drawn| !overlay::is_overlay_pane(drawn.id)) {
             let mut mesh = Mesh::with_texture(drawn.texture);
             mesh.add_rect_with_uv(drawn.rect, drawn.uv, Color32::WHITE);
             painter.add(mesh);
@@ -200,7 +203,8 @@ impl eframe::App for App {
             let shown = Shown { mode, waiting, status: status.as_ref() };
             shell::draw(ui, &layout, &mut self.sidebar_shown, &mut self.page, shown);
             if on_repositories {
-                repos_screen::show(ui, &layout, plan.as_ref(), &mut self.session, sheet.as_ref(), mode, &mut self.screen);
+                // No overlay is opened yet, so the screen has the keyboard.
+                repos_screen::show(ui, &layout, plan.as_ref(), &mut self.session, sheet.as_ref(), mode, &mut self.screen, true);
             } else {
                 shell::placeholder(ui, layout.panel, sheet.as_ref(), theme::palette(mode));
             }

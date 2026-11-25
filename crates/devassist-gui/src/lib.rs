@@ -9,6 +9,7 @@ pub mod demo;
 pub mod frost;
 pub mod launch;
 pub mod logger;
+pub mod overlay;
 pub mod repos_screen;
 pub mod repos_view;
 pub mod screenshot;

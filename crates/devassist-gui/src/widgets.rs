@@ -1,6 +1,6 @@
 //! The small pieces the screens are drawn with, painted as the shell paints (text and icons through a
-//! [`Painter`]), not egui's stock widgets: a checkbox, text cut to the room it has, a glass capsule of actions and
-//! the glass text field (whose text editing is egui's own).
+//! [`Painter`]), not egui's stock widgets: a checkbox, text cut to the room it has, a glass capsule of actions, the
+//! glass text field (whose text editing is egui's own) and a dialog's button.
 
 use std::hash::Hash;
 
@@ -11,11 +11,12 @@ use egui::{
 
 use crate::assets::{self, Icon};
 use crate::baker::Want;
+use crate::overlay::Kind;
 use crate::repos_view::shorten_path;
 use crate::shell::Wants;
 use crate::theme::{
-    ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX, CHECKBOX_STROKE_OPACITY, FIELD_PAD, HAIRLINE,
-    HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD, Palette, RADIUS_SMALL, Surface, TEXT,
+    ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, BUTTON_PAD, BUTTON_RADIUS, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX, CHECKBOX_STROKE_OPACITY,
+    FIELD_PAD, FOCUS_GAP, FOCUS_RING, HAIRLINE, HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD, Palette, RADIUS_SMALL, Surface, TEXT,
 };
 
 /// The mark that ends a text cut short.
@@ -222,6 +223,46 @@ pub fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon,
         // screen reads the up and down arrows itself.
         .event_filter(EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..EventFilter::default() });
     ui.put(room, edit)
+}
+
+/// How wide a dialog's button with `words` is: its words in the medium face and [`BUTTON_PAD`] at either side.
+#[must_use]
+pub fn button_width(ui: &Ui, words: &str) -> f32 {
+    2.0 * BUTTON_PAD + width(ui.painter(), words, &font(TEXT, assets::medium_family()))
+}
+
+/// Draws a dialog's button of `kind` with `words` centred in it at `rect`, and returns what the pointer and the
+/// keyboard did to it. Its fill is a fill, never glass: the selection's for a plain one, the accent with white
+/// words for the main one, the danger tint with the danger colour's words for a danger one.
+///
+/// `id` names it, so [`crate::overlay::walk`] can give it egui's keyboard focus: Enter and Space press it while it has
+/// the focus, and a ring in the accent colour, [`FOCUS_GAP`] out, marks it then. It is the one control that takes
+/// the focus besides the filter field, and it is drawn only on an overlay, which takes every key from the screen
+/// under it.
+pub fn button(ui: &mut Ui, rect: Rect, words: &str, kind: Kind, palette: Palette, id: Id) -> Response {
+    let response = ui.interact(rect, id, Sense::click());
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, words));
+    let (fill, ink) = match kind {
+        Kind::Plain => (palette.selection, palette.on_glass),
+        Kind::Main => (palette.accent, palette.on_dark_glass),
+        Kind::Danger => (palette.danger_tint, palette.danger),
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, BUTTON_RADIUS, fill);
+    if response.hovered() {
+        painter.rect_filled(rect, BUTTON_RADIUS, palette.on_glass.gamma_multiply(HOVER_OPACITY));
+    }
+    if response.has_focus() {
+        painter.rect_stroke(rect.expand(FOCUS_GAP), BUTTON_RADIUS + FOCUS_GAP, Stroke::new(FOCUS_RING, palette.accent), StrokeKind::Outside);
+    }
+    painter.with_clip_rect(rect.intersect(ui.clip_rect())).text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        words,
+        font(TEXT, assets::medium_family()),
+        ink,
+    );
+    response
 }
 
 /// A face at `size` points.

@@ -235,6 +235,48 @@ pub const NOTICE_TIME: Duration = Duration::from_secs(10);
 /// How many rows Page Up and Page Down move the highlight, as in the terminal app.
 pub const PAGE_ROWS: isize = 10;
 
+/// The corner radius of a dialog's pane.
+pub const DIALOG_RADIUS: f32 = 20.0;
+/// The room between a dialog pane's edge and what is in it.
+pub const DIALOG_PAD: f32 = 24.0;
+/// The gap between the parts of a dialog: its title, its body and its buttons.
+pub const DIALOG_GAP: f32 = 24.0;
+/// The least room between a dialog or a menu and the window's edge.
+pub const DIALOG_MARGIN: f32 = 24.0;
+/// The size of a dialog's title, in the medium face.
+pub const DIALOG_TITLE: f32 = 16.0;
+/// The corner radius of a box inset in a dialog, such as its list of paths.
+pub const INSET_RADIUS: f32 = 16.0;
+/// The height of a dialog's button.
+pub const BUTTON_HEIGHT: f32 = 36.0;
+/// The corner radius of a dialog's button: half its height, so its ends are round.
+pub const BUTTON_RADIUS: f32 = 18.0;
+/// The room inside a dialog's button at either side of its words.
+pub const BUTTON_PAD: f32 = 16.0;
+/// The gap between two buttons of a dialog.
+pub const BUTTON_GAP: f32 = 8.0;
+/// The width of a menu.
+pub const MENU_WIDTH: f32 = 256.0;
+/// The corner radius of a menu's pane.
+pub const MENU_RADIUS: f32 = 16.0;
+/// The room between a menu pane's edge and its rows.
+pub const MENU_PAD: f32 = 4.0;
+/// The height of a menu's row.
+pub const MENU_ROW: f32 = 32.0;
+/// The corner radius of a menu row's fill.
+pub const MENU_ROW_RADIUS: f32 = 12.0;
+/// The height of the line between two parts of a menu, with the room above and below it.
+pub const MENU_LINE: f32 = 9.0;
+/// The gap between a menu and the button it opened from.
+pub const MENU_GAP: f32 = 4.0;
+/// The size of a key's name at the end of a menu row.
+pub const KEY_TEXT: f32 = 12.0;
+/// The width of the ring around the control of an overlay that Enter and Space act on (not the design's: it has
+/// no keyboard; the accent, as egui marks its focus).
+pub const FOCUS_RING: f32 = 2.0;
+/// The gap between that ring and its control, so the ring shows on an accent fill too.
+pub const FOCUS_GAP: f32 = 2.0;
+
 /// The value of [`RULE_WIDTH`].
 #[expect(clippy::cast_precision_loss, reason = "RULE_HALF is a few commits, far below what an f32 holds exactly")]
 const fn rule_width() -> f32 {
@@ -268,9 +310,6 @@ pub const TICK_BUSY: Duration = Duration::from_millis(50);
 /// How long the window may sleep between two looks at the core while it is idle (the core's own timers, such as
 /// the automatic pull of watched repositories, still run on these looks).
 pub const TICK_IDLE: Duration = Duration::from_secs(1);
-/// How long the demo's repositories are left alone by the core's automatic pull: the demo's folders are not on
-/// any disk, so the pull must not start (30 days).
-pub const DEMO_WATCH_HOLD: Duration = Duration::from_hours(30 * 24);
 
 /// Whether the window is drawn light or dark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -414,18 +453,22 @@ pub enum Surface {
     StatusBar,
     /// A panel holding content: frosted, not glass.
     Panel,
+    /// A dialog over the window: glass, the sidebar's.
+    Dialog,
+    /// A menu over the window: glass, the sidebar's.
+    Menu,
 }
 
 impl Surface {
     /// Every surface.
-    pub const ALL: [Surface; 4] = [Surface::Sidebar, Surface::Capsule, Surface::StatusBar, Surface::Panel];
+    pub const ALL: [Surface; 6] = [Surface::Sidebar, Surface::Capsule, Surface::StatusBar, Surface::Panel, Surface::Dialog, Surface::Menu];
 
     /// Whether the surface is glass, whose panes are baked into pictures of their own; a frosted one is drawn
     /// from the baker's sheet instead ([`crate::frost`]).
     #[must_use]
     pub fn is_glass(self) -> bool {
         match self {
-            Surface::Sidebar | Surface::Capsule | Surface::StatusBar => true,
+            Surface::Sidebar | Surface::Capsule | Surface::StatusBar | Surface::Dialog | Surface::Menu => true,
             Surface::Panel => false,
         }
     }
@@ -438,7 +481,8 @@ fn material_value(surface: Surface, mode: Mode) -> Value {
         Mode::Dark => "dark",
     };
     match surface {
-        Surface::Sidebar => json!({ "type": "liquid_glass", "depth": "panel", "appearance": appearance }),
+        // The design draws its dialogs and menus with the capsules' liquid glass at the depth "panel": the sidebar's.
+        Surface::Sidebar | Surface::Dialog | Surface::Menu => json!({ "type": "liquid_glass", "depth": "panel", "appearance": appearance }),
         Surface::Capsule => json!({ "type": "liquid_glass", "appearance": appearance }),
         Surface::StatusBar => json!({ "type": "liquid_glass", "depth": "bar", "appearance": appearance }),
         Surface::Panel => json!({ "type": "frosted", "thickness": "thick", "appearance": appearance }),
@@ -546,6 +590,8 @@ mod tests {
             (Surface::Capsule, glass, None),
             (Surface::StatusBar, glass, Some(Depth::Bar)),
             (Surface::Panel, Kind::Frosted(Thickness::Thick), None),
+            (Surface::Dialog, glass, Some(Depth::Panel)),
+            (Surface::Menu, glass, Some(Depth::Panel)),
         ];
         for (surface, kind, depth) in want {
             for (mode, appearance) in [(Mode::Light, Appearance::Light), (Mode::Dark, Appearance::Dark)] {
@@ -639,6 +685,44 @@ mod tests {
             ("STATUS_GAP", STATUS_GAP, 24.0),
         ] {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
+        }
+    }
+
+    #[test]
+    fn the_overlays_are_the_designs() {
+        let want = [
+            ("DIALOG_RADIUS", DIALOG_RADIUS, 20.0),
+            ("DIALOG_PAD", DIALOG_PAD, 24.0),
+            ("DIALOG_GAP", DIALOG_GAP, 24.0),
+            ("DIALOG_MARGIN", DIALOG_MARGIN, 24.0),
+            ("DIALOG_TITLE", DIALOG_TITLE, 16.0),
+            ("INSET_RADIUS", INSET_RADIUS, 16.0),
+            ("BUTTON_HEIGHT", BUTTON_HEIGHT, 36.0),
+            ("BUTTON_RADIUS", BUTTON_RADIUS, 18.0),
+            ("BUTTON_PAD", BUTTON_PAD, 16.0),
+            ("BUTTON_GAP", BUTTON_GAP, 8.0),
+            ("MENU_WIDTH", MENU_WIDTH, 256.0),
+            ("MENU_RADIUS", MENU_RADIUS, 16.0),
+            ("MENU_PAD", MENU_PAD, 4.0),
+            ("MENU_ROW", MENU_ROW, 32.0),
+            ("MENU_ROW_RADIUS", MENU_ROW_RADIUS, 12.0),
+            ("MENU_LINE", MENU_LINE, 9.0),
+            ("MENU_GAP", MENU_GAP, 4.0),
+            ("KEY_TEXT", KEY_TEXT, 12.0),
+        ];
+        for (constant, got, expected) in want {
+            assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
+        }
+        assert!((BUTTON_RADIUS * 2.0 - BUTTON_HEIGHT).abs() < f32::EPSILON, "a button's ends are round");
+    }
+
+    #[test]
+    fn dialogs_and_menus_are_the_sidebars_glass() {
+        for surface in [Surface::Dialog, Surface::Menu] {
+            assert!(surface.is_glass());
+            for mode in [Mode::Light, Mode::Dark] {
+                assert_eq!(material_value(surface, mode), material_value(Surface::Sidebar, mode), "{surface:?} {mode:?}");
+            }
         }
     }
 

@@ -3,7 +3,7 @@
 //! the terminal app. Every change goes through a method of the core's `Repos`.
 
 use devassist_core::repos::state::{GROUP_KEY, Repos, SortMode};
-use egui::{Event, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Ui, pos2};
+use egui::{Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Ui, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
@@ -246,14 +246,36 @@ fn filter_id() -> Id {
 /// Draws the screen in `layout`: the toolbar of `plan` (from [`plan`] this frame), then the table or the sentence
 /// that stands for it on the panel, with `sheet` its frosted sheet. The keys and presses change `session`'s
 /// repositories through their methods; `screen` keeps the scroll and the focus between frames.
-pub fn show(ui: &mut Ui, layout: &Layout, plan: Option<&Plan>, session: &mut Session, sheet: Option<&Sheet>, mode: Mode, screen: &mut Screen) {
+///
+/// Without `keys` (an overlay is open over the screen and takes them all) the screen handles no key, and its
+/// filter neither keeps nor takes the keyboard's focus. The overlay's shield keeps the pointer from it.
+#[expect(clippy::too_many_arguments, reason = "the screen's one entry: what it draws, on what, and whether it has the keyboard")]
+pub fn show(
+    ui: &mut Ui,
+    layout: &Layout,
+    plan: Option<&Plan>,
+    session: &mut Session,
+    sheet: Option<&Sheet>,
+    mode: Mode,
+    screen: &mut Screen,
+    keys: bool,
+) {
     let palette = theme::palette(mode);
+    if !keys {
+        // egui's own Tab would give the focus to the filter, the one control here that takes it, as the field is
+        // drawn: in the frame an overlay opens, before its layer is modal, nothing else stops that.
+        ui.memory_mut(|memory| {
+            memory.surrender_focus(filter_id());
+            memory.move_focus(FocusDirection::None);
+        });
+        screen.filter_focused = false;
+    }
     // The frame's keys are the filter's when it held the focus at the end of the last frame; egui takes the focus
     // away on Esc before the frame sees the key, so the focus now would not say it.
     let typing = screen.filter_focused;
     let mut moved = false;
     if let (Some(plan), Some(repos)) = (plan, session.repos_mut()) {
-        if ui.memory(|memory| memory.has_focus(filter_id())) {
+        if keys && ui.memory(|memory| memory.has_focus(filter_id())) {
             // While the filter has the focus, the up and down keys move the highlight, as in the terminal app's
             // filter; taken before the field sees them.
             for (key, rows) in [(Key::ArrowUp, -1), (Key::ArrowDown, 1), (Key::PageUp, -PAGE_ROWS), (Key::PageDown, PAGE_ROWS)] {
@@ -277,7 +299,7 @@ pub fn show(ui: &mut Ui, layout: &Layout, plan: Option<&Plan>, session: &mut Ses
         }
     }
 
-    let events = ui.input(|input| input.events.clone());
+    let events = if keys { ui.input(|input| input.events.clone()) } else { Vec::new() };
     if typing {
         // The text was the field's; an Esc that took its focus away clears it.
         let escaped = events.iter().any(|event| matches!(event, Event::Key { key: Key::Escape, pressed: true, .. }));
@@ -288,6 +310,10 @@ pub fn show(ui: &mut Ui, layout: &Layout, plan: Option<&Plan>, session: &mut Ses
         for command in commands(&events) {
             moved |= apply(command, session, ui);
         }
+    }
+    if !keys {
+        // Nor a press on the field in the frame an overlay opens, before its shield is in place.
+        ui.memory_mut(|memory| memory.surrender_focus(filter_id()));
     }
     screen.filter_focused = ui.memory(|memory| memory.has_focus(filter_id()));
     if moved {
@@ -430,13 +456,53 @@ mod tests {
 
     /// Runs one frame of the screen at the design's size with `events`.
     fn frame(ctx: &Context, session: &mut Session, screen: &mut Screen, events: Vec<Event>) {
+        frame_with(ctx, session, screen, events, true);
+    }
+
+    /// Runs one frame of the screen at the design's size with `events`, with the keyboard when `keys`.
+    fn frame_with(ctx: &Context, session: &mut Session, screen: &mut Screen, events: Vec<Event>, keys: bool) {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), events, ..Default::default() };
         let output = ctx.run_ui(input, |ui| {
             let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, has_toolbar(session));
             let plan = plan(ui.painter(), &layout, session);
-            show(ui, &layout, plan.as_ref(), session, Some(&sheet()), Mode::Light, screen);
+            show(ui, &layout, plan.as_ref(), session, Some(&sheet()), Mode::Light, screen, keys);
         });
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn without_the_keyboard_the_screen_hears_no_key_and_its_filter_takes_no_focus() {
+        let ctx = context();
+        let mut session = Session::Demo(Box::new(crate::demo::repos()));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        let rows = keys(&session);
+        session.repos_mut().unwrap().pick(&rows[0]);
+        let before = (repos(&session).selected.clone(), ticked(&session), repos(&session).list_filter.clone());
+        let all = [
+            vec![press(Key::ArrowDown), press(Key::End), key(Key::A, Modifiers::COMMAND), press(Key::Escape)],
+            typed(Key::Space, " "),
+            typed(Key::S, "s"),
+            typed(Key::Slash, "/"),
+            typed(Key::P, "p"),
+            vec![press(Key::Tab)],
+            vec![press(Key::ArrowLeft)],
+        ];
+        for events in all {
+            frame_with(&ctx, &mut session, &mut screen, events, false);
+            frame_with(&ctx, &mut session, &mut screen, Vec::new(), false);
+            assert_eq!(focused(&ctx), None, "the filter took the focus");
+        }
+        assert_eq!((repos(&session).selected.clone(), ticked(&session), repos(&session).list_filter.clone()), before);
+        assert!(repos(&session).sort == SortMode::Name);
+        assert_eq!(repos(&session).collapsed, Vec::<String>::new());
+
+        // A filter that had the focus loses it when the keyboard goes, and gets no text.
+        frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
+        assert_eq!(focused(&ctx), Some(filter_id()));
+        frame_with(&ctx, &mut session, &mut screen, vec![Event::Text("po".to_owned())], false);
+        assert_eq!(focused(&ctx), None);
+        assert_eq!(repos(&session).list_filter, "");
     }
 
     fn repos(session: &Session) -> &Repos {
@@ -524,22 +590,19 @@ mod tests {
     #[test]
     fn the_arrows_fold_and_unfold_the_highlighted_group() {
         let ctx = context();
-        let mut demo = crate::demo::repos();
-        // Folding saves through the core; this one writes to a file of its own.
-        let folder = std::env::temp_dir().join(format!("devassist-gui-fold-{}", std::process::id()));
-        demo.config_path = folder.join("devassist.toml");
-        let mut session = Session::Demo(Box::new(demo));
+        // Folding saves through the core, which writes nothing for the held demo.
+        let mut session = Session::Demo(Box::new(crate::demo::repos()));
         let mut screen = Screen::default();
         session.repos_mut().unwrap().pick("group::home");
         frame(&ctx, &mut session, &mut screen, vec![press(Key::ArrowLeft)]);
         assert_eq!(repos(&session).collapsed, ["home"]);
         assert!(!keys(&session).contains(&"dotfiles".to_owned()));
-        // The fold was saved, and the save kept the watch on homelab.
+        // The save kept the watch on homelab.
         assert_eq!(repos(&session).watched_count(), 1);
         frame(&ctx, &mut session, &mut screen, vec![press(Key::ArrowRight)]);
         assert_eq!(repos(&session).collapsed, Vec::<String>::new());
         assert_eq!(repos(&session).watched_count(), 1);
-        let _ = std::fs::remove_dir_all(folder);
+        assert!(!repos(&session).config_path.exists());
     }
 
     #[test]
@@ -558,7 +621,6 @@ mod tests {
         }
         assert_eq!(repos(&session).collapsed, ["home"]);
         assert_eq!(repos(&session).selected.as_deref(), Some("group::home"), "the highlight is on the header, not on a hidden row");
-        crate::demo::remove_settings(repos(&session));
     }
 
     #[test]

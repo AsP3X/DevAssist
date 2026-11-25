@@ -29,6 +29,8 @@ const DEFAULT_BACKDROP: &str = "lake";
 const PIXEL_SLACK: f32 = 1e-3;
 /// The most pixels a picture may have along one side.
 const MOST_PIXELS: f32 = 100_000.0;
+/// The id of the wallpaper among what [`Baker::frame`] returns.
+pub const WALLPAPER: &str = "wallpaper";
 
 /// What the pictures depend on besides the panes themselves.
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +75,9 @@ pub struct Want {
 /// A picture to draw and where.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drawn {
+    /// The id of the pane it is ([`Want::id`]), or [`WALLPAPER`]: a dialog's or a menu's pane is drawn on the
+    /// overlay, over its scrim, not under the screen ([`crate::overlay::glass`]).
+    pub id: &'static str,
     /// The picture's texture.
     pub texture: TextureId,
     /// Where to draw it, in points.
@@ -577,10 +582,10 @@ impl Baker {
     /// The settled wallpaper over the whole window, then each wanted glass pane's latest picture at its rectangle.
     fn drawn(&self, scene: &Scene, wants: &[Want]) -> Vec<Drawn> {
         let Some(settled) = &self.settled else { return Vec::new() };
-        let window = Drawn { texture: settled.texture.id(), rect: Rect::from_min_size(Pos2::ZERO, scene.size.into()), uv: settled.uv };
+        let window = Drawn { id: WALLPAPER, texture: settled.texture.id(), rect: Rect::from_min_size(Pos2::ZERO, scene.size.into()), uv: settled.uv };
         let panes = wants.iter().filter(|want| want.surface.is_glass()).filter_map(|want| {
             let kept = self.by_id.get(want.id).and_then(|key| self.panes.get(key))?;
-            Some(Drawn { texture: kept.texture.id(), rect: want.rect, uv: kept.uv })
+            Some(Drawn { id: want.id, texture: kept.texture.id(), rect: want.rect, uv: kept.uv })
         });
         std::iter::once(window).chain(panes).collect()
     }
@@ -649,6 +654,20 @@ mod tests {
         }
         assert_eq!(baker.counts(), first);
         assert!(!baker.waiting());
+    }
+
+    #[test]
+    fn a_dialog_and_a_menu_are_baked_like_any_pane_and_named_in_what_is_drawn() {
+        let (ctx, mut baker) = (egui::Context::default(), Baker::new());
+        let mut wants = shell_wants();
+        wants.push(crate::overlay::want_dialog(Rect::from_min_size(pos2(160.0, 150.0), vec2(480.0, 300.0))));
+        wants.push(crate::overlay::want_menu(Rect::from_min_size(pos2(500.0, 60.0), vec2(256.0, 200.0))));
+        let drawn = baker.frame(&ctx, &scene(SIZE), &wants, at(0));
+        assert_eq!(baker.counts(), (wants.len(), 1), "every pane, the dialog's and the menu's among them, has its picture");
+        let ids: Vec<&str> = drawn.iter().map(|drawn| drawn.id).collect();
+        assert_eq!(ids, ["wallpaper", "sidebar", "sidebar-toggle", "status-bar", "dialog", "menu"]);
+        assert_eq!(drawn[4].rect, wants[3].rect);
+        assert_eq!((wants[3].surface, wants[4].surface), (Surface::Dialog, Surface::Menu));
     }
 
     #[test]

@@ -209,12 +209,12 @@ fn linear(channel: f32) -> f64 {
 }
 
 /// The relative luminance of an opaque pixel.
-fn luminance(pixel: Pixel) -> f64 {
+pub(crate) fn luminance(pixel: Pixel) -> f64 {
     0.2126 * linear(pixel[0]) + 0.7152 * linear(pixel[1]) + 0.0722 * linear(pixel[2])
 }
 
 /// WCAG's contrast ratio of two luminances.
-fn ratio(a: f64, b: f64) -> f64 {
+pub(crate) fn ratio(a: f64, b: f64) -> f64 {
     let (high, low) = if a > b { (a, b) } else { (b, a) };
     (high + 0.05) / (low + 0.05)
 }
