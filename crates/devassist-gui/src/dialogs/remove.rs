@@ -108,7 +108,7 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Plan {
     let names: Vec<String> = lines.iter().map(|line| line.name.clone()).collect();
     let header = Header::new(painter, &remove_title(&names), LINE, DIALOG_WIDTH - 2.0 * DIALOG_PAD);
     let places = remove_places(window, header.height(), lines.len());
-    Plan { header: Some(header), parts: Parts::Remove(places) }
+    Plan::dialog(header, Parts::Remove(places))
 }
 
 /// The remove dialog at `places`, with `header`, for `repos`'s chosen folders, on the overlay in `ui`; `scrim` is
@@ -121,7 +121,7 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     let widths: Vec<f32> = BUTTONS.iter().map(|(words, _, _)| widgets::button_width(ui, words)).collect();
     let mut pressed = None;
     for ((place, (words, kind, press)), id) in overlay::buttons(places.buttons, &widths).into_iter().zip(BUTTONS).zip(ids) {
-        if widgets::button(ui, place, words, kind, palette, id).clicked() {
+        if widgets::button(ui, place, words, kind, palette, id) {
             pressed = Some(press);
         }
     }

@@ -23,7 +23,8 @@
 //! chooses the first control, never the last.
 
 use egui::{
-    Align2, Area, AreaState, Color32, Context, Event, FocusDirection, Id, Key, LayerId, Memory, Mesh, Order, Rect, Sense, Ui, Vec2, pos2, vec2,
+    Align2, Area, AreaState, Color32, Context, Event, FocusDirection, Id, Key, LayerId, Memory, Mesh, Order, PointerButton, Rect, Response, Sense,
+    Ui, Vec2, pos2, vec2,
 };
 
 use crate::baker::{Drawn, Want};
@@ -121,9 +122,10 @@ struct Opening {
     /// Enter and Space, when they were down as it opened: until they come up, their presses (the key's repeats)
     /// are not the overlay's.
     held: Vec<Key>,
-    /// A pointer button was pressed on the overlay after the pass it opened in: a click on the scrim from then on
-    /// is a person's, not the rest of the click that opened it.
-    pressed: bool,
+    /// How many frames had a pointer button pressed on the overlay after the pass it opened in: a click whose
+    /// presses (one, two for a double click, three for a triple) all came since is a person's click on the overlay,
+    /// not the rest of the gesture that opened it ([`fresh_click`]).
+    presses: u32,
 }
 
 /// Where egui keeps the [`Opening`].
@@ -152,7 +154,7 @@ pub fn open(ctx: &Context, focus: Option<Id>) {
         input.events.retain(|event| !matches!(event, Event::Key { key: Key::Enter | Key::Space, pressed: true, .. }));
         PRESS_KEYS.into_iter().filter(|key| input.key_down(*key)).collect()
     });
-    let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, pressed: false };
+    let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, presses: 0 };
     ctx.data_mut(|data| data.insert_temp(opening_id(), opened));
     seed(ctx, layer(), ctx.content_rect());
     ctx.memory_mut(|memory| match (focus, memory.focused()) {
@@ -196,7 +198,7 @@ pub fn show<R>(ctx: &Context, contents: impl FnOnce(&mut Ui) -> R) -> R {
         held.retain(|key| input.key_down(*key));
         opened.held = held;
         if now > opened.pass && input.pointer.any_pressed() {
-            opened.pressed = true;
+            opened.presses = opened.presses.saturating_add(1);
         }
     });
     opened.shown = Some(now);
@@ -249,9 +251,35 @@ fn area<R>(ctx: &Context, layer: LayerId, rect: Rect, contents: impl FnOnce(&mut
 /// the overlay ([`pane`], the controls), not the rest of the click that opened the overlay, not the second click
 /// of a double click. Added before anything else on the overlay.
 pub fn shield(ui: &mut Ui, window: Rect, id: Id) -> bool {
-    let response = ui.interact(window, id, Sense::CLICK);
-    let fresh = opening(ui.ctx()).is_some_and(|opening| opening.pressed);
-    response.clicked() && fresh && !response.double_clicked() && !response.triple_clicked()
+    fresh_click(ui, &ui.interact(window, id, Sense::CLICK))
+}
+
+/// Whether `response`, of a control on the open overlay, was pressed by a person in this frame: by the keyboard
+/// (Enter or Space on the control with the focus; the key that opened the overlay is already kept from it, see
+/// [`open`]), or by a click whose every press came after the overlay opened. A press that is part of the gesture
+/// that opened the overlay never acts inside it: not the rest of the click that opened it, not the second click of
+/// a double click (nor the second and third of a triple click) whose first click opened it, also when the overlay
+/// it opened has since handed over to another (a menu's line that opens a dialog). A double click made wholly on
+/// the overlay is a click as egui says it is. Every control on an overlay is asked through this, never through
+/// `clicked` alone: the scrim ([`shield`]), the dialogs' buttons ([`crate::widgets::button`]), the rows of their
+/// lists and the menu's lines.
+#[must_use]
+pub fn fresh_click(ui: &Ui, response: &Response) -> bool {
+    if !response.clicked() {
+        return false;
+    }
+    if !response.clicked_by(PointerButton::Primary) {
+        // Enter or Space on the control with the focus.
+        return true;
+    }
+    let clicks = if response.triple_clicked() {
+        3
+    } else if response.double_clicked() {
+        2
+    } else {
+        1
+    };
+    opening(ui.ctx()).is_some_and(|opening| opening.presses >= clicks)
 }
 
 /// Lays the scrim over `window`, under a dialog. A menu has none.
@@ -605,7 +633,7 @@ mod tests {
                             walk(ui, &ids);
                             let places = buttons(Rect::from_min_size(pos2(500.0, 300.0), vec2(400.0, 100.0)), &[100.0; 3]);
                             for (index, (place, id)) in places.into_iter().zip(ids).enumerate() {
-                                if widgets::button(ui, place, "Go", Kind::Plain, theme::palette(Mode::Light), id).clicked() {
+                                if widgets::button(ui, place, "Go", Kind::Plain, theme::palette(Mode::Light), id) {
                                     pressed.push(index);
                                 }
                             }
@@ -640,7 +668,7 @@ mod tests {
                         shield(ui, window(), Id::unique("shield"));
                         walk(ui, &[main]);
                         let place = Rect::from_min_size(pos2(600.0, 400.0), vec2(100.0, 36.0));
-                        pressed = widgets::button(ui, place, "Go", Kind::Main, theme::palette(Mode::Light), main).clicked();
+                        pressed = widgets::button(ui, place, "Go", Kind::Main, theme::palette(Mode::Light), main);
                     });
                 }
             })

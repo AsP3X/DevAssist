@@ -13,7 +13,7 @@ use egui::{
     pos2, vec2,
 };
 
-use super::{Dialogs, Parts, Plan, Which, after, before, group, progress, remove, which};
+use super::{Dialogs, Parts, Plan, Planned, Which, after, before, group, progress, remove, which};
 use crate::baker::Sheet;
 use crate::overlay;
 use crate::repos_screen::{self, Screen};
@@ -154,7 +154,10 @@ impl Window {
 
     /// The dialog's parts in the last frame.
     pub(super) fn parts(&self) -> Parts {
-        self.plan.as_ref().unwrap().parts
+        match &self.plan.as_ref().unwrap().0 {
+            Planned::Dialog(_, parts) => *parts,
+            Planned::Menu(_) => panic!("the menu, not a dialog"),
+        }
     }
 
     /// The places of the buttons in the last frame, with their words.
@@ -163,7 +166,6 @@ impl Window {
             Parts::Progress(places) => (places.buttons, progress::button_words(self.job())),
             Parts::Remove(places) => (places.buttons, remove::button_words()),
             Parts::Group(places) => (places.buttons, group::said(self.repos())),
-            Parts::Menu(_) => return Vec::new(),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()
@@ -171,9 +173,9 @@ impl Window {
 
     /// The menu's pane in the last frame, when the menu was drawn.
     pub(crate) fn menu_pane(&self) -> Option<Rect> {
-        match self.plan.as_ref()?.parts {
-            Parts::Menu(places) => Some(places.pane),
-            Parts::Progress(_) | Parts::Remove(_) | Parts::Group(_) => None,
+        match &self.plan.as_ref()?.0 {
+            Planned::Menu(places) => Some(places.pane),
+            Planned::Dialog(..) => None,
         }
     }
 

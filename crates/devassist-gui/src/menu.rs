@@ -7,12 +7,13 @@
 //! a shield but no scrim; a click outside it or Esc closes it, and the click goes no further. It is not walked with
 //! Tab: as in the terminal app, Up and Down (and `k` and `j`) move the highlight and stop at the ends, Home and End
 //! go to them, Enter runs the highlighted line, a line's letter runs that line, and `q` closes. A letter of a line
-//! the window does not show does nothing. The pointer over a line highlights it, so the mouse and the keys never
-//! show two highlights. A line that opens a dialog (Update, Move to a group, Remove) hands the overlay over to it in
-//! the next frame, and the key or click that chose the line does nothing in it (`overlay::open`).
+//! the window does not show does nothing. The pointer, when it moves over a line, highlights it, so the mouse and
+//! the keys never show two highlights; a pointer that only rests where the menu opens chooses nothing. A line that
+//! opens a dialog (Update, Move to a group, Remove) hands the overlay over to it in the next frame, and the key or
+//! click that chose the line does nothing in it (`overlay::open`, `overlay::fresh_click`).
 
 use devassist_core::repos::state::{MenuItem, Repos};
-use egui::{Align2, Event, FontFamily, Id, Key, Rect, Sense, Ui, pos2, vec2};
+use egui::{Align2, Event, FontFamily, Id, Key, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use crate::assets::Icon;
 use crate::overlay;
@@ -141,21 +142,22 @@ fn asks(events: &[Event]) -> Vec<Ask> {
 }
 
 /// The highlighted line after `ask`, from the line at `at`: one up or down, stopping at the ends; the first or the
-/// last.
-fn moved(at: usize, ask: Ask) -> usize {
+/// last. From no line, a step goes to the first.
+fn moved(at: Option<usize>, ask: Ask) -> Option<usize> {
     let last = SHOWN.len() - 1;
-    match ask {
-        Ask::Step(true) => at.saturating_sub(1),
-        Ask::Step(false) => (at + 1).min(last),
-        Ask::End(true) => 0,
-        Ask::End(false) => last,
-        Ask::Close | Ask::Highlighted | Ask::Run(_) => at,
-    }
+    Some(match (ask, at) {
+        (Ask::Step(true), Some(at)) => at.saturating_sub(1),
+        (Ask::Step(false), Some(at)) => (at + 1).min(last),
+        (Ask::Step(_) | Ask::End(true), _) => 0,
+        (Ask::End(false), _) => last,
+        (Ask::Close | Ask::Highlighted | Ask::Run(_), _) => return at,
+    })
 }
 
-/// The line of [`SHOWN`] the core highlights; the first when it highlights one the window does not show.
-fn highlighted(repos: &Repos) -> usize {
-    repos.menu_highlight().and_then(|item| SHOWN.iter().position(|shown| *shown == item)).unwrap_or(0)
+/// The line of [`SHOWN`] the core highlights; none when it highlights one the window does not show, and then
+/// Enter runs nothing.
+fn highlighted(repos: &Repos) -> Option<usize> {
+    repos.menu_highlight().and_then(|item| SHOWN.iter().position(|shown| *shown == item))
 }
 
 /// The id of the menu's line `index`.
@@ -165,29 +167,23 @@ fn row_id(index: usize) -> Id {
 
 /// The menu at `places`, for `repos`'s chosen repositories, on the overlay in `ui`: its lines, the highlighted one
 /// on the selection's fill, Remove in the danger colour, each line's key at its right. `outside` is whether the
-/// shield was clicked this frame (outside the pane); `hovered` is the line the pointer was over in the last frame,
-/// kept between frames, so a highlight moved by a key stays until the pointer moves to another line. What a person
-/// does goes to `repos` through its methods.
-pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, hovered: &mut Option<usize>, outside: bool) {
+/// shield was clicked this frame (outside the pane). The highlight follows the pointer only in a frame the pointer
+/// moves, so a highlight moved by a key stays while the pointer rests, and a pointer resting where the menu opens
+/// does not choose its line. What a person does goes to `repos` through its methods.
+pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, outside: bool) {
     // No Tab here: the lines take no focus, so Enter and Space press none of them; the arrows move the highlight.
     overlay::walk(ui, &[]);
     let (rows, rules) = layout(places.pane);
     let mut at = highlighted(repos);
     let mut chosen = None;
-    let mut over = None;
+    let moving = ui.input(|input| input.pointer.delta() != Vec2::ZERO);
     for (index, row) in rows.iter().enumerate() {
         let response = ui.interact(row.intersect(places.pane), row_id(index), Sense::CLICK);
-        if response.hovered() {
-            over = Some(index);
+        if moving && response.hovered() {
+            at = Some(index);
         }
-        if response.clicked() {
+        if overlay::fresh_click(ui, &response) {
             chosen = Some(Ask::Run(SHOWN[index]));
-        }
-    }
-    if over != *hovered {
-        *hovered = over;
-        if let Some(index) = over {
-            at = index;
         }
     }
     let mut done = chosen.or(outside.then_some(Ask::Close));
@@ -197,11 +193,13 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ho
         }
         match ask {
             Ask::Close | Ask::Run(_) => done = Some(ask),
-            Ask::Highlighted => done = Some(Ask::Run(SHOWN[at])),
+            Ask::Highlighted => done = at.map(|at| Ask::Run(SHOWN[at])),
             Ask::Step(_) | Ask::End(_) => at = moved(at, ask),
         }
     }
-    repos.highlight_menu(SHOWN[at]);
+    if let Some(at) = at {
+        repos.highlight_menu(SHOWN[at]);
+    }
 
     let many = repos.chosen().len() > 1;
     let painter = ui.painter().with_clip_rect(places.pane.intersect(ui.clip_rect()));
@@ -211,7 +209,7 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ho
     let words = font(TEXT, FontFamily::Proportional);
     let small = font(KEY_TEXT, FontFamily::Proportional);
     for (index, (row, (item, icon))) in rows.iter().zip(SHOWN.into_iter().zip(ICONS)).enumerate() {
-        if index == at {
+        if Some(index) == at {
             painter.rect_filled(*row, MENU_ROW_RADIUS, palette.selection);
         }
         let (ink, icon_ink) = if item == MenuItem::Remove { (palette.danger, palette.danger) } else { (palette.on_glass, palette.quiet) };
@@ -321,11 +319,16 @@ mod tests {
 
     #[test]
     fn the_highlight_stops_at_the_ends_as_in_the_terminal_app() {
-        assert_eq!(moved(0, Ask::Step(true)), 0);
-        assert_eq!(moved(0, Ask::Step(false)), 1);
-        assert_eq!(moved(7, Ask::Step(false)), 7);
-        assert_eq!(moved(3, Ask::End(true)), 0);
-        assert_eq!(moved(3, Ask::End(false)), 7);
+        assert_eq!(moved(Some(0), Ask::Step(true)), Some(0));
+        assert_eq!(moved(Some(0), Ask::Step(false)), Some(1));
+        assert_eq!(moved(Some(7), Ask::Step(false)), Some(7));
+        assert_eq!(moved(Some(3), Ask::End(true)), Some(0));
+        assert_eq!(moved(Some(3), Ask::End(false)), Some(7));
+        // From no line shown, a step goes to the first; Enter and the rest change nothing.
+        assert_eq!(moved(None, Ask::Step(true)), Some(0));
+        assert_eq!(moved(None, Ask::Step(false)), Some(0));
+        assert_eq!(moved(None, Ask::End(false)), Some(7));
+        assert_eq!(moved(None, Ask::Highlighted), None);
     }
 
     #[test]
@@ -467,15 +470,212 @@ mod tests {
         let mut window = demo();
         open_on(&mut window, "homelab");
         let lines = rows(&window);
-        window.frame(vec![Event::PointerMoved(lines[5].center())]);
+        window.frame(vec![Event::PointerMoved(lines[3].center())]);
         window.frame(Vec::new());
-        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Watch));
+        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Group));
         // A key moves it on while the pointer rests; one highlight only.
         window.key(Key::ArrowDown);
-        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::PullRequests));
-        window.click(lines[5].center());
+        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::CopyPath));
+        // The click runs the line under it, Move to a group (a dialog), not the highlighted Copy the path (held).
+        window.click(lines[3].center());
+        assert!(window.shows(Which::Group), "{}", window.repos().status);
+        assert_ne!(window.repos().status, HELD);
+    }
+
+    /// A press and release at `at`, at the times `pressed` and `pressed + 0.05` seconds.
+    fn click_at_time(window: &mut Window, at: Pos2, pressed: f64) {
+        let button = |down| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: down, modifiers: Modifiers::NONE };
+        window.frame_at(vec![Event::PointerMoved(at)], Some(pressed - 0.01));
+        window.frame_at(vec![button(true)], Some(pressed));
+        window.frame_at(vec![button(false)], Some(pressed + 0.05));
+    }
+
+    /// Opens the menu on `key` at egui's clock 0 to 1 seconds, so the clicks after it start afresh.
+    fn open_at_time(window: &mut Window, key: &str) {
+        let at = dots(window, key).center();
+        click_at_time(window, at, 0.5);
+        window.frame_at(Vec::new(), Some(0.6));
+        window.frame_at(Vec::new(), Some(0.7));
+        assert!(window.shows(Which::Menu));
+    }
+
+    /// The buttons of the dialog `probe` shows, placed as offsets from its window's centre: a dialog stands centred,
+    /// so in a window of another size its buttons are the same offsets from that window's centre.
+    fn button_offsets(probe: &Window) -> Vec<(Rect, &'static str)> {
+        let centre = Rect::from_min_size(Pos2::ZERO, vec2(probe.size[0], probe.size[1])).center().to_vec2();
+        probe.buttons().into_iter().map(|(place, words)| (place.translate(-centre), words)).collect()
+    }
+
+    /// A window size, a row among `keys` of `repos` and a point where the menu's line `line`, opened on that row,
+    /// lies over one of `buttons` (offsets from the window's centre): where a double click on that line has its
+    /// second click on that button. Looked for in the window sizes `widths` by `heights`.
+    fn overlap(
+        repos: &Repos,
+        keys: &[&str],
+        line: usize,
+        buttons: &[(Rect, &'static str)],
+        widths: &[u16],
+        heights: &[u16],
+    ) -> ([f32; 2], String, Pos2, &'static str) {
+        let lines = crate::repos_view::lines(repos);
+        for &width in widths {
+            for &height in heights {
+                let size = vec2(f32::from(width), f32::from(height));
+                let screen = Rect::from_min_size(Pos2::ZERO, size);
+                let panel = crate::shell::layout(size, true, true).panel;
+                for key in keys {
+                    let Some(anchor) = table::dots_rect(panel, &lines, 0.0, key) else { continue };
+                    let row = layout(plan(screen, anchor).pane).0[line];
+                    for (button, words) in buttons {
+                        let both = row.intersect(button.translate(screen.center().to_vec2()));
+                        if both.width() > 4.0 && both.height() > 4.0 {
+                            return ([size.x, size.y], (*key).to_owned(), both.center(), words);
+                        }
+                    }
+                }
+            }
+        }
+        panic!("no window size puts the line over a button");
+    }
+
+    /// A double click at `at`: its first click at egui's clock 5.0, its second at 5.2, `between` run after the
+    /// first click's release (egui's clock standing still).
+    fn double_click(window: &mut Window, at: Pos2, between: impl FnOnce(&mut Window)) {
+        click_at_time(window, at, 5.0);
+        between(window);
+        click_at_time(window, at, 5.2);
+        window.frame_at(Vec::new(), Some(5.3));
+    }
+
+    #[test]
+    fn the_second_click_of_a_double_click_on_remove_presses_no_button_of_its_dialog() {
+        let mut probe = demo();
+        probe.session.repos_mut().unwrap().begin_remove();
+        probe.frame(Vec::new());
+        let buttons = button_offsets(&probe);
+        let (size, key, at, words) = overlap(
+            probe.repos(),
+            &["api", "web"],
+            7,
+            &buttons,
+            &(520..=760).step_by(20).collect::<Vec<_>>(),
+            &(800..=1600).step_by(25).collect::<Vec<_>>(),
+        );
+        let mut window = Window::new(Session::demo(crate::demo::repos()));
+        window.size = size;
+        window.frame(Vec::new());
+        open_at_time(&mut window, &key);
+        assert!(rows(&window)[7].contains(at), "the point is on Remove…");
+        double_click(&mut window, at, |window| {
+            window.frame_at(Vec::new(), Some(5.1));
+            assert!(window.shows(Which::Remove));
+            assert!(window.buttons().iter().any(|(place, said)| *said == words && place.contains(at)), "the point is on {words}");
+        });
+        assert!(window.shows(Which::Remove), "the second click pressed {words}");
+        assert_ne!(window.repos().status, HELD, "the second click pressed {words}");
+        assert_eq!(window.repos().installed.len(), 12);
+        // A click of its own, later, is one.
+        click_at_time(&mut window, at, 9.0);
+        window.frame_at(Vec::new(), Some(9.1));
+        assert!(!window.shows(Which::Remove), "a click of its own on {words} did nothing");
+    }
+
+    #[test]
+    fn the_second_click_of_a_double_click_on_update_neither_hides_nor_cancels_the_run() {
+        let _live = crate::session::tests::live_git();
+        // Enough rows that a row's menu reaches down to the progress dialog's buttons.
+        let owned: Vec<String> = (0..18).map(|index| format!("r{index:02}")).collect();
+        let names: Vec<&str> = owned.iter().map(String::as_str).collect();
+        // The progress dialog of a run of all of them, as it stands while the run goes: Cancel and Hide.
+        let mut probe = Window::new(crate::dialogs::testing::session_with(crate::dialogs::testing::run(&names, 1)));
+        probe.frame(Vec::new());
+        assert_eq!(probe.said(), ["Cancel", "Hide"]);
+        let buttons = button_offsets(&probe);
+        let (_root, settings) = behind("menu-double", &names);
+        let mut window = live(settings, names.len());
+        window.session.repos_mut().unwrap().marked = names.iter().map(|name| (*name).to_owned()).collect();
+        let (size, key, at, words) = overlap(
+            window.repos(),
+            &names,
+            0,
+            &buttons,
+            &(900..=1120).step_by(10).collect::<Vec<_>>(),
+            &(900..=1400).step_by(10).collect::<Vec<_>>(),
+        );
+        window.size = size;
+        window.frame(Vec::new());
+        open_at_time(&mut window, &key);
+        assert!(rows(&window)[0].contains(at), "the point is on Update");
+        double_click(&mut window, at, |window| {
+            // egui's clock stands still while the run starts and its dialog opens.
+            let mut tick = 5.06;
+            while !window.shows(Which::Progress) || !window.painted {
+                window.session.tick();
+                window.frame_at(Vec::new(), Some(tick));
+                tick += 0.0001;
+                assert!(tick < 5.1, "the dialog did not open");
+            }
+            assert!(window.buttons().iter().any(|(place, said)| *said == words && place.contains(at)), "the point is on {words}");
+        });
+        assert!(window.shows(Which::Progress), "the second click pressed {words}");
+        assert!(!window.job().cancelling, "the second click pressed {words}");
+        // A click of its own, later, is one.
+        click_at_time(&mut window, at, 9.0);
+        window.frame_at(Vec::new(), Some(9.1));
+        assert!(!window.shows(Which::Progress) || window.job().cancelling, "a click of its own on {words} did nothing");
+        window.session.close();
+    }
+
+    #[test]
+    fn a_double_click_made_on_an_open_dialog_is_a_click() {
+        // The group dialog, opened by the core (no click): a quick double click on Cancel presses it once, on its
+        // first click; the first click after opening is never held back.
+        let mut window = demo();
+        window.session.repos_mut().unwrap().open_group_prompt();
+        window.frame_at(Vec::new(), Some(1.0));
+        window.frame_at(Vec::new(), Some(1.1));
+        assert!(window.shows(Which::Group));
+        let (cancel, _) = window.buttons().into_iter().find(|(_, words)| *words == "Cancel").unwrap();
+        click_at_time(&mut window, cancel.center(), 5.0);
+        assert!(!window.shows(Which::Group), "the first click after opening did nothing");
+        click_at_time(&mut window, cancel.center(), 5.2);
+        window.frame_at(Vec::new(), Some(5.3));
         assert!(window.repos().mode == CoreMode::List);
-        assert_eq!(window.repos().status, HELD, "the watch was asked for");
+    }
+
+    #[test]
+    fn a_resting_pointer_does_not_choose_the_line_enter_runs() {
+        let mut window = demo();
+        window.session.repos_mut().unwrap().clear_marks();
+        window.session.repos_mut().unwrap().pick("recipes");
+        // The pointer rests where the menu's Remove line will stand.
+        let remove = layout(plan(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0)), dots(&window, "recipes")).pane).0[7].center();
+        window.frame(vec![Event::PointerMoved(remove)]);
+        window.frame(Vec::new());
+        window.key(Key::Enter);
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Menu));
+        assert_eq!(rows(&window)[7].center(), remove, "the pointer is over Remove");
+        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Update), "the resting pointer moved the highlight");
+        // The Enter that opened it comes up, and a second one runs the highlighted line.
+        window.frame(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+        window.key(Key::Enter);
+        assert!(window.repos().mode == CoreMode::List, "Enter ran Remove");
+        assert_eq!(window.repos().status, HELD, "Enter ran Update");
+    }
+
+    #[test]
+    fn enter_runs_nothing_while_the_core_highlights_a_line_the_window_does_not_show() {
+        let mut window = demo();
+        open_on(&mut window, "homelab");
+        window.session.repos_mut().unwrap().highlight_menu(MenuItem::Migrate);
+        window.frame(Vec::new());
+        window.key(Key::Enter);
+        assert!(window.shows(Which::Menu), "Enter ran a line nobody highlighted");
+        assert_ne!(window.repos().status, HELD);
+        // The arrows bring the highlight back onto the lines shown.
+        window.key(Key::ArrowDown);
+        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Update));
     }
 
     #[test]

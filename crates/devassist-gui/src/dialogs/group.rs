@@ -144,7 +144,7 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Option<Pla
     let title = if prompt.rename.is_some() { RENAME_TITLE } else { MOVE_TITLE };
     let header = Header::new(painter, title, &line(prompt), DIALOG_WIDTH - 2.0 * DIALOG_PAD);
     let places = group_places(window, header.height(), note(prompt).is_some(), repos.groups().len());
-    Some(Plan { header: Some(header), parts: Parts::Group(places) })
+    Some(Plan::dialog(header, Parts::Group(places)))
 }
 
 /// The scroll of a list of rows [`LIST_ROW`] tall in a box `room` points tall that shows the whole row `index`,
@@ -212,8 +212,8 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     let widths: Vec<f32> = words.iter().map(|words| widgets::button_width(ui, words)).collect();
     let places = overlay::buttons(places.buttons, &widths);
     if let [cancel, main] = places.as_slice() {
-        done.close |= widgets::button(ui, *cancel, words[0], Kind::Plain, palette, cancel_id()).clicked();
-        done.accept |= widgets::button(ui, *main, words[1], Kind::Main, palette, main_id()).clicked();
+        done.close |= widgets::button(ui, *cancel, words[0], Kind::Plain, palette, cancel_id());
+        done.accept |= widgets::button(ui, *main, words[1], Kind::Main, palette, main_id());
     }
     act(ui, repos, &done);
 }
@@ -271,7 +271,7 @@ fn list(ui: &Ui, rect: Rect, groups: &[String], typed: &str, palette: Palette, d
         let room = row.width() - 2.0 * LIST_PAD[1];
         let words = widgets::ellipsis(group, &regular, room, ui);
         inset.painter.text(pos2(row.left() + LIST_PAD[1], row.center().y), Align2::LEFT_CENTER, words, regular.clone(), palette.on_glass);
-        if response.clicked() {
+        if overlay::fresh_click(ui, &response) {
             clicked = Some(group.clone());
         }
     }

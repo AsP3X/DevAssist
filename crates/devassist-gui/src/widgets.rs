@@ -232,15 +232,16 @@ pub fn button_width(ui: &Ui, words: &str) -> f32 {
     2.0 * BUTTON_PAD + width(ui.painter(), words, &font(TEXT, assets::medium_family()))
 }
 
-/// Draws a dialog's button of `kind` with `words` centred in it at `rect`, and returns what the pointer and the
-/// keyboard did to it. Its fill is a fill, never glass: the selection's for a plain one, the accent with white
-/// words for the main one, the danger tint with the danger colour's words for a danger one.
+/// Draws a dialog's button of `kind` with `words` centred in it at `rect`, and says whether a person pressed it
+/// in this frame ([`crate::overlay::fresh_click`]: never the rest of the gesture that opened the overlay). Its fill
+/// is a fill, never glass: the selection's for a plain one, the accent with white words for the main one, the
+/// danger tint with the danger colour's words for a danger one.
 ///
 /// `id` names it, so [`crate::overlay::walk`] can give it egui's keyboard focus: Enter and Space press it while it has
 /// the focus, and a ring in the accent colour, [`FOCUS_GAP`] out, marks it then. It is the one control that takes
 /// the focus besides the filter field, and it is drawn only on an overlay, which takes every key from the screen
 /// under it.
-pub fn button(ui: &mut Ui, rect: Rect, words: &str, kind: Kind, palette: Palette, id: Id) -> Response {
+pub fn button(ui: &mut Ui, rect: Rect, words: &str, kind: Kind, palette: Palette, id: Id) -> bool {
     let response = ui.interact(rect, id, Sense::click());
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, words));
     let (fill, ink) = match kind {
@@ -263,7 +264,7 @@ pub fn button(ui: &mut Ui, rect: Rect, words: &str, kind: Kind, palette: Palette
         font(TEXT, assets::medium_family()),
         ink,
     );
-    response
+    crate::overlay::fresh_click(ui, &response)
 }
 
 /// Draws a plain dialog's button with `words` at `rect` that cannot be pressed: the plain one's fill and words at

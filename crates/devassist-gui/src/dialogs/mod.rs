@@ -88,8 +88,6 @@ pub struct Dialogs {
     list_scroll: f32,
     /// The group the group dialog's list showed picked last, so the list follows Up and Down.
     list_shown: Option<usize>,
-    /// The menu's line the pointer was over in the last frame.
-    menu_hovered: Option<usize>,
 }
 
 /// The id of a dialog's main button, the one Enter presses: every dialog's, so that the focus [`sync`] gives it
@@ -188,14 +186,18 @@ fn most_scroll(count: usize, height: f32) -> f32 {
 
 /// Where a dialog's or the menu's parts are, decided before the bake: its pane is baked there.
 #[derive(Clone, Debug)]
-pub struct Plan {
-    /// A dialog's title and quiet line; the menu has none.
-    header: Option<Header>,
-    /// The dialog or the menu, and where its parts are.
-    parts: Parts,
+pub struct Plan(Planned);
+
+/// A dialog, always with its header, or the menu, which has none.
+#[derive(Clone, Debug)]
+enum Planned {
+    /// A dialog: its title and quiet line, and where its parts are.
+    Dialog(Header, Parts),
+    /// The menu, and where it stands.
+    Menu(menu::Places),
 }
 
-/// A dialog or the menu, and where its parts are.
+/// A dialog and where its parts are.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Parts {
     /// The progress dialog's.
@@ -204,18 +206,15 @@ enum Parts {
     Remove(remove::Places),
     /// The group dialog's.
     Group(group::Places),
-    /// The menu's.
-    Menu(menu::Places),
 }
 
 impl Parts {
-    /// The dialog or the menu these are the parts of.
+    /// The dialog these are the parts of.
     fn which(self) -> Which {
         match self {
             Parts::Progress(_) => Which::Progress,
             Parts::Remove(_) => Which::Remove,
             Parts::Group(_) => Which::Group,
-            Parts::Menu(_) => Which::Menu,
         }
     }
 
@@ -225,18 +224,38 @@ impl Parts {
             Parts::Progress(places) => places.pane,
             Parts::Remove(places) => places.pane,
             Parts::Group(places) => places.pane,
-            Parts::Menu(places) => places.pane,
         }
     }
 }
 
 impl Plan {
+    /// A dialog's plan: its header and its parts.
+    fn dialog(header: Header, parts: Parts) -> Plan {
+        Plan(Planned::Dialog(header, parts))
+    }
+
+    /// The dialog or the menu this is the plan of.
+    fn which(&self) -> Which {
+        match &self.0 {
+            Planned::Dialog(_, parts) => parts.which(),
+            Planned::Menu(_) => Which::Menu,
+        }
+    }
+
+    /// The whole pane.
+    fn pane(&self) -> Rect {
+        match &self.0 {
+            Planned::Dialog(_, parts) => parts.pane(),
+            Planned::Menu(places) => places.pane,
+        }
+    }
+
     /// The glass pane of the dialog or the menu, to add to the panes baked this frame.
     #[must_use]
     pub fn want(&self) -> Want {
-        match self.parts {
-            Parts::Menu(places) => overlay::want_menu(places.pane),
-            Parts::Progress(_) | Parts::Remove(_) | Parts::Group(_) => overlay::want_dialog(self.parts.pane()),
+        match &self.0 {
+            Planned::Dialog(_, parts) => overlay::want_dialog(parts.pane()),
+            Planned::Menu(places) => overlay::want_menu(places.pane),
         }
     }
 }
@@ -251,7 +270,7 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Opti
         Which::Progress => progress::plan(painter, window, repos),
         Which::Remove => Some(remove::plan(painter, window, repos)),
         Which::Group => group::plan(painter, window, repos),
-        Which::Menu => anchor.map(|anchor| Plan { header: None, parts: Parts::Menu(menu::plan(window, anchor)) }),
+        Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(window, anchor)))),
     }
 }
 
@@ -278,7 +297,7 @@ pub fn after(ctx: &Context, planned: Option<Plan>, repos: Option<&mut Repos>, dr
     let Some(repos) = repos else { return };
     sync(ctx, Some(repos), dialogs);
     let Some(want) = which(repos) else { return };
-    if let Some(plan) = planned.filter(|plan| plan.parts.which() == want) {
+    if let Some(plan) = planned.filter(|plan| plan.which() == want) {
         show(ctx, &plan, repos, drawn, mode, dialogs);
     } else {
         // Opened after the bake: the shield alone keeps it open, with its focus, and paints nothing.
@@ -296,22 +315,20 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
     overlay::show(ctx, |ui| {
         // For a dialog a click on its scrim; for the menu, which has none, a click outside it.
         let outside = overlay::shield(ui, window, shield_id());
-        if !matches!(plan.parts, Parts::Menu(_)) {
+        if matches!(plan.0, Planned::Dialog(..)) {
             overlay::scrim(ui, window, palette);
         }
         overlay::glass(ui, drawn);
-        overlay::pane(ui, plan.parts.pane(), Id::unique("dialog-pane"));
-        ui.set_clip_rect(plan.parts.pane());
-        match (plan.parts, &plan.header) {
-            (Parts::Progress(places), Some(header)) => progress::show(ui, header, places, repos, palette, dialogs, outside),
-            (Parts::Remove(places), Some(header)) => remove::show(ui, header, places, repos, palette, dialogs, outside),
-            (Parts::Group(places), Some(header)) => group::show(ui, header, places, repos, palette, dialogs, outside),
-            (Parts::Menu(places), _) => menu::show(ui, places, repos, palette, &mut dialogs.menu_hovered, outside),
-            // A dialog's plan always has its header.
-            (Parts::Progress(_) | Parts::Remove(_) | Parts::Group(_), None) => {}
+        overlay::pane(ui, plan.pane(), Id::unique("dialog-pane"));
+        ui.set_clip_rect(plan.pane());
+        match &plan.0 {
+            Planned::Dialog(header, Parts::Progress(places)) => progress::show(ui, header, *places, repos, palette, dialogs, outside),
+            Planned::Dialog(header, Parts::Remove(places)) => remove::show(ui, header, *places, repos, palette, dialogs, outside),
+            Planned::Dialog(header, Parts::Group(places)) => group::show(ui, header, *places, repos, palette, dialogs, outside),
+            Planned::Menu(places) => menu::show(ui, *places, repos, palette, outside),
         }
     });
-    if which(repos) != Some(plan.parts.which()) {
+    if which(repos) != Some(plan.which()) {
         // The dialog went: the screen gets its keys back in the next frame, at once.
         ctx.request_repaint();
     }

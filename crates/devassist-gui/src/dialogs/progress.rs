@@ -86,7 +86,7 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Option<Pla
     let job = repos.job.as_ref()?;
     let header = Header::new(painter, &job.title, &job.summary().to_string(), PROGRESS_WIDTH - 2.0 * DIALOG_PAD);
     let places = progress_places(window, header.height(), job.items.len());
-    Some(Plan { header: Some(header), parts: Parts::Progress(places) })
+    Some(Plan::dialog(header, Parts::Progress(places)))
 }
 
 /// What a button of the progress dialog does when pressed.
@@ -188,7 +188,7 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     for (place, button) in overlay::buttons(places.buttons, &widths).into_iter().zip(&buttons) {
         match button.press {
             Some(press) => {
-                if widgets::button(ui, place, button.words, button.kind, palette, button.id()).clicked() {
+                if widgets::button(ui, place, button.words, button.kind, palette, button.id()) {
                     done.pressed = Some(press);
                 }
             }
@@ -240,7 +240,7 @@ fn tasks(ui: &mut Ui, rect: Rect, job: &Job, palette: Palette, dialogs: &mut Dia
         if !visible.is_positive() {
             continue;
         }
-        if ui.interact(visible, Id::unique(("dialog-task", index)), Sense::CLICK).clicked() {
+        if overlay::fresh_click(ui, &ui.interact(visible, Id::unique(("dialog-task", index)), Sense::CLICK)) {
             picked = Some(index);
         }
         if index == shown {
