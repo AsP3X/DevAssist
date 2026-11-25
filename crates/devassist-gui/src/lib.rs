@@ -4,6 +4,7 @@
 pub mod app;
 pub mod assets;
 pub mod baker;
+pub mod columns;
 pub mod demo;
 pub mod frost;
 pub mod launch;
