@@ -364,6 +364,7 @@ dependencies = [
 name = "devassist"
 version = "0.6.0"
 dependencies = [
+ "devassist-core",
  "ratatui",
  "serde",
  "serde_json",
@@ -371,6 +372,10 @@ dependencies = [
  "unicode-width",
  "ureq",
 ]
+
+[[package]]
+name = "devassist-core"
+version = "0.6.0"
 
 [[package]]
 name = "digest"
