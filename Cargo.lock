@@ -510,6 +510,11 @@ dependencies = [
 [[package]]
 name = "devassist-gui"
 version = "0.6.0"
+dependencies = [
+ "devassist-core",
+ "egui",
+ "image",
+]
 
 [[package]]
 name = "digest"

@@ -6,5 +6,10 @@ rust-version.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+devassist-core.workspace = true
+egui.workspace = true
+image.workspace = true
+
 [lints]
 workspace = true
