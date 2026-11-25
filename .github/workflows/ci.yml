@@ -50,4 +50,6 @@ jobs:
       - name: The core uses no interface library
         shell: bash
         run: |
-          if cargo tree -p devassist-core --locked --prefix none | grep -E '^(ratatui|crossterm) '; then exit 1; fi
+          set -euo pipefail
+          tree=$(cargo tree -p devassist-core --locked --prefix none)
+          if grep -E '^(ratatui|crossterm) ' <<<"$tree"; then exit 1; fi
