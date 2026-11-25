@@ -81,6 +81,96 @@ pub const PANEL_TEXT_INSET: f32 = 8.0;
 /// The room at either end of the status bar before its text.
 pub const STATUS_PADDING: f32 = 16.0;
 
+/// The height of a repository row in the table.
+pub const ROW_HEIGHT: f32 = 44.0;
+/// The height of the table's heading row.
+pub const HEAD_HEIGHT: f32 = 40.0;
+/// The height of a group's heading row in the table.
+pub const GROUP_HEIGHT: f32 = 36.0;
+/// The room at the left of a table row before its first column.
+pub const ROW_PAD_LEFT: f32 = 12.0;
+/// The room at the right of a table row after its last column.
+pub const ROW_PAD_RIGHT: f32 = 8.0;
+/// The gap between two columns of the table.
+pub const COLUMN_GAP: f32 = 12.0;
+/// The width of the column with the row's checkbox.
+pub const COLUMN_CHECK: f32 = 24.0;
+/// The width of the column with the repository's folder.
+pub const COLUMN_FOLDER: f32 = 176.0;
+/// The width of the column with the checked-out branch.
+pub const COLUMN_BRANCH: f32 = 136.0;
+/// The width of the column that says whether the checkout has uncommitted changes.
+pub const COLUMN_CHANGES: f32 = 104.0;
+/// The width of the column with the ahead and behind rule and its counts.
+pub const COLUMN_PULLS: f32 = 134.0;
+/// The width of the column with the origin's address.
+pub const COLUMN_ORIGIN: f32 = 288.0;
+/// The width of the column with the row's menu button.
+pub const COLUMN_ACTION: f32 = 32.0;
+/// The least width the name column keeps; it takes what the other columns leave.
+pub const COLUMN_NAME_LEAST: f32 = 120.0;
+/// How many points one commit takes in the ahead and behind rule.
+pub const RULE_UNIT: f32 = 8.0;
+/// How many commits the rule shows each way from its middle; more are drawn as this many.
+pub const RULE_HALF: u32 = 10;
+/// The width of the rule: its commits each way, at [`RULE_UNIT`] points each, and one more point for the middle
+/// line.
+pub const RULE_WIDTH: f32 = rule_width();
+/// The height of the rule.
+pub const RULE_HEIGHT: f32 = 16.0;
+/// The height of the bar that shows the commits ahead or behind.
+pub const RULE_BAR: f32 = 6.0;
+/// The distance from the rule's top to its bar.
+pub const RULE_BAR_TOP: f32 = 2.0;
+/// The height of the rule's small tick at each commit.
+pub const RULE_TICK: f32 = 4.0;
+/// The height of the taller tick at every fifth commit.
+pub const RULE_TICK_FIFTH: f32 = 7.0;
+/// The gap between the rule and the number beside it.
+pub const RULE_LABEL_GAP: f32 = 12.0;
+/// How strong the rule's small ticks are, of the text colour.
+pub const RULE_TICK_OPACITY: f32 = 0.28;
+/// How strong the rule's taller ticks are, of the text colour.
+pub const RULE_FIFTH_OPACITY: f32 = 0.5;
+/// The room between a view capsule's edge and the controls in it.
+pub const CAPSULE_PAD: f32 = 4.0;
+/// The gap between two controls in a capsule.
+pub const CAPSULE_GAP: f32 = 2.0;
+/// The height of an action button.
+pub const ACTION_HEIGHT: f32 = 28.0;
+/// The room inside an action button before its first item and after its last, left then right.
+pub const ACTION_PAD: [f32; 2] = [8.0, 10.0];
+/// The gap between the items of an action button, and between action buttons.
+pub const ACTION_GAP: f32 = 6.0;
+/// The width of a search field.
+pub const FIELD_WIDTH: f32 = 280.0;
+/// The room inside a search field before its icon.
+pub const FIELD_PAD: f32 = 12.0;
+/// The side of a checkbox.
+pub const CHECKBOX: f32 = 16.0;
+/// The gap between the controls in the bar above the table.
+pub const TOOLBAR_GAP: f32 = 8.0;
+/// How strong the lines of the table are, of the text colour.
+pub const LINE_OPACITY: f32 = 0.10;
+/// How strong the fill of the table's heading row is, of the text colour.
+pub const HEAD_FILL_OPACITY: f32 = 0.06;
+/// How strong the fill of a group's heading row is, of the text colour.
+pub const GROUP_FILL_OPACITY: f32 = 0.03;
+/// How strong the fill under the pointer is, of the text colour.
+pub const HOVER_OPACITY: f32 = 0.05;
+/// How strong the outline of an unchecked checkbox is, of the text colour.
+pub const CHECKBOX_STROKE_OPACITY: f32 = 0.4;
+/// How strong the fill of a selected row is in the light mode, of the accent colour.
+pub const SELECTED_OPACITY_LIGHT: f32 = 0.14;
+/// How strong the fill of a selected row is in the dark mode, of the accent colour.
+pub const SELECTED_OPACITY_DARK: f32 = 0.32;
+
+/// The value of [`RULE_WIDTH`].
+#[expect(clippy::cast_precision_loss, reason = "RULE_HALF is a few commits, far below what an f32 holds exactly")]
+const fn rule_width() -> f32 {
+    (2 * RULE_HALF) as f32 * RULE_UNIT + 1.0
+}
+
 // Tuning, not design: how fine, how long and when the window makes and keeps its pictures. These set the work
 // and memory the glass takes, not the design's look.
 
@@ -182,6 +272,19 @@ pub fn palette(mode: Mode) -> Palette {
             veil: rgb(0x06, 0x0d, 0x18),
         },
     }
+}
+
+/// The fill of a selected row in `mode`: the accent colour at [`SELECTED_OPACITY_LIGHT`] or
+/// [`SELECTED_OPACITY_DARK`].
+#[must_use]
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "an opacity between 0 and 1 times 255 rounds to 0..=255")]
+pub fn selected_fill(mode: Mode) -> Color32 {
+    let opacity = match mode {
+        Mode::Light => SELECTED_OPACITY_LIGHT,
+        Mode::Dark => SELECTED_OPACITY_DARK,
+    };
+    let accent = palette(mode).accent;
+    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), (255.0 * opacity).round() as u8)
 }
 
 /// The veil's two strengths over the backdrop `backdrop`: the first in the lower part of the window (its bottom
@@ -377,5 +480,78 @@ mod tests {
         assert_eq!(Mode::of(Theme::Dark, false), Mode::Dark);
         assert_eq!(Mode::of(Theme::System, true), Mode::Dark);
         assert_eq!(Mode::of(Theme::System, false), Mode::Light);
+    }
+
+    #[test]
+    fn the_table_is_the_designs() {
+        let want = [
+            (ROW_HEIGHT, 44.0),
+            (HEAD_HEIGHT, 40.0),
+            (GROUP_HEIGHT, 36.0),
+            (ROW_PAD_LEFT, 12.0),
+            (ROW_PAD_RIGHT, 8.0),
+            (COLUMN_GAP, 12.0),
+            (COLUMN_CHECK, 24.0),
+            (COLUMN_FOLDER, 176.0),
+            (COLUMN_BRANCH, 136.0),
+            (COLUMN_CHANGES, 104.0),
+            (COLUMN_PULLS, 134.0),
+            (COLUMN_ORIGIN, 288.0),
+            (COLUMN_ACTION, 32.0),
+            (COLUMN_NAME_LEAST, 120.0),
+            (RULE_UNIT, 8.0),
+            (RULE_HEIGHT, 16.0),
+            (RULE_BAR, 6.0),
+            (RULE_BAR_TOP, 2.0),
+            (RULE_TICK, 4.0),
+            (RULE_TICK_FIFTH, 7.0),
+            (RULE_LABEL_GAP, 12.0),
+            (RULE_TICK_OPACITY, 0.28),
+            (RULE_FIFTH_OPACITY, 0.5),
+            (CAPSULE_PAD, 4.0),
+            (CAPSULE_GAP, 2.0),
+            (ACTION_HEIGHT, 28.0),
+            (ACTION_GAP, 6.0),
+            (FIELD_WIDTH, 280.0),
+            (FIELD_PAD, 12.0),
+            (CHECKBOX, 16.0),
+            (TOOLBAR_GAP, 8.0),
+            (LINE_OPACITY, 0.10),
+            (HEAD_FILL_OPACITY, 0.06),
+            (GROUP_FILL_OPACITY, 0.03),
+            (HOVER_OPACITY, 0.05),
+            (CHECKBOX_STROKE_OPACITY, 0.4),
+            (SELECTED_OPACITY_LIGHT, 0.14),
+            (SELECTED_OPACITY_DARK, 0.32),
+        ];
+        for (i, (got, expected)) in want.into_iter().enumerate() {
+            assert!((got - expected).abs() < f32::EPSILON, "measure {i} is {got}, the design has {expected}");
+        }
+        assert_eq!(RULE_HALF, 10);
+        assert_eq!(ACTION_PAD, [8.0, 10.0]);
+    }
+
+    #[test]
+    fn the_rule_is_twice_its_half_in_commits_and_the_middle_line() {
+        let commits = f32::from(u16::try_from(2 * RULE_HALF).unwrap());
+        assert!((RULE_WIDTH - (commits * RULE_UNIT + 1.0)).abs() < f32::EPSILON);
+        assert!((RULE_WIDTH - 161.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_columns_fit_the_design_width() {
+        let panel = 1148.0;
+        let fixed = COLUMN_CHECK + COLUMN_FOLDER + COLUMN_BRANCH + COLUMN_CHANGES + COLUMN_PULLS + COLUMN_ORIGIN + COLUMN_ACTION;
+        let columns = 8.0; // the seven fixed ones and the name
+        let name = panel - fixed - (columns - 1.0) * COLUMN_GAP - ROW_PAD_LEFT - ROW_PAD_RIGHT;
+        assert!(name >= COLUMN_NAME_LEAST, "the name gets {name} of the {panel} points, it needs {COLUMN_NAME_LEAST}");
+    }
+
+    #[test]
+    fn the_selected_fill_is_the_accent_at_its_two_opacities() {
+        for (mode, alpha) in [(Mode::Light, 36), (Mode::Dark, 82)] {
+            let a = palette(mode).accent;
+            assert_eq!(selected_fill(mode), Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), alpha), "{mode:?}");
+        }
     }
 }

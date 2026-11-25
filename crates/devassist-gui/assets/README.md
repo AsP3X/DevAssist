@@ -46,6 +46,22 @@ From the npm package `lucide-static` version **1.80.0** (the `latest` tag on 202
 | `lucide.ttf` | `4067ac045c28dd64c23131a119ffd8a3531ff7dffc34a6cd3edb66e26b5828fe` | 1032408 |
 | `LUCIDE-LICENSE.txt` | `b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57` | 3208 |
 
+The code points of the icons added for the repositories table were read on 2026-11-25 from
+`https://unpkg.com/lucide-static@1.80.0/font/info.json` (version 1.80.0, the `encodedCode` of each name; the list is
+not stored). The file is long, so it was read in four successive parts of that one URL. Its `house` (`e0f5`) and
+`folder-git-2` (`e40a`) agree with `src/assets.rs`.
+
+| Name | Code point | Name | Code point |
+| --- | --- | --- | --- |
+| `git-branch` | `e0e2` | `arrow-up-down` | `e37d` |
+| `git-pull-request` | `e0e5` | `check` | `e06c` |
+| `git-merge` | `e0e4` | `ellipsis` | `e0b6` |
+| `git-pull-request-closed` | `e35a` | `triangle-alert` | `e193` |
+| `eye` | `e0ba` | `loader-circle` | `e10a` |
+| `chevron-down` | `e06d` | `rotate-cw` | `e149` |
+| `chevron-right` | `e06f` | `clock` | `e087` |
+| `arrow-up` | `e04a` | `arrow-down` | `e042` |
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

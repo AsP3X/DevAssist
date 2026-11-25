@@ -84,11 +84,43 @@ pub enum Icon {
     X,
     /// Lucide `ellipsis-vertical`.
     EllipsisVertical,
+    /// Lucide `git-branch`.
+    GitBranch,
+    /// Lucide `git-pull-request`.
+    GitPullRequest,
+    /// Lucide `git-merge`.
+    GitMerge,
+    /// Lucide `git-pull-request-closed`.
+    GitPullRequestClosed,
+    /// Lucide `eye`.
+    Eye,
+    /// Lucide `chevron-down`.
+    ChevronDown,
+    /// Lucide `chevron-right`.
+    ChevronRight,
+    /// Lucide `arrow-up`.
+    ArrowUp,
+    /// Lucide `arrow-down`.
+    ArrowDown,
+    /// Lucide `arrow-up-down`.
+    ArrowUpDown,
+    /// Lucide `check`.
+    Check,
+    /// Lucide `ellipsis`.
+    Ellipsis,
+    /// Lucide `triangle-alert`.
+    TriangleAlert,
+    /// Lucide `loader-circle`.
+    LoaderCircle,
+    /// Lucide `rotate-cw`.
+    RotateCw,
+    /// Lucide `clock`.
+    Clock,
 }
 
 impl Icon {
     /// Every icon, in the order of the enum.
-    pub const ALL: [Icon; 14] = [
+    pub const ALL: [Icon; 30] = [
         Icon::House,
         Icon::FolderGit2,
         Icon::Container,
@@ -103,6 +135,22 @@ impl Icon {
         Icon::Square,
         Icon::X,
         Icon::EllipsisVertical,
+        Icon::GitBranch,
+        Icon::GitPullRequest,
+        Icon::GitMerge,
+        Icon::GitPullRequestClosed,
+        Icon::Eye,
+        Icon::ChevronDown,
+        Icon::ChevronRight,
+        Icon::ArrowUp,
+        Icon::ArrowDown,
+        Icon::ArrowUpDown,
+        Icon::Check,
+        Icon::Ellipsis,
+        Icon::TriangleAlert,
+        Icon::LoaderCircle,
+        Icon::RotateCw,
+        Icon::Clock,
     ];
 }
 
@@ -124,6 +172,22 @@ pub fn icon(name: Icon) -> char {
         Icon::Square => '\u{e167}',
         Icon::X => '\u{e1b2}',
         Icon::EllipsisVertical => '\u{e0b7}',
+        Icon::GitBranch => '\u{e0e2}',
+        Icon::GitPullRequest => '\u{e0e5}',
+        Icon::GitMerge => '\u{e0e4}',
+        Icon::GitPullRequestClosed => '\u{e35a}',
+        Icon::Eye => '\u{e0ba}',
+        Icon::ChevronDown => '\u{e06d}',
+        Icon::ChevronRight => '\u{e06f}',
+        Icon::ArrowUp => '\u{e04a}',
+        Icon::ArrowDown => '\u{e042}',
+        Icon::ArrowUpDown => '\u{e37d}',
+        Icon::Check => '\u{e06c}',
+        Icon::Ellipsis => '\u{e0b6}',
+        Icon::TriangleAlert => '\u{e193}',
+        Icon::LoaderCircle => '\u{e10a}',
+        Icon::RotateCw => '\u{e149}',
+        Icon::Clock => '\u{e087}',
     }
 }
 
@@ -220,5 +284,48 @@ mod tests {
         }
         let distinct: std::collections::BTreeSet<char> = Icon::ALL.into_iter().map(icon).collect();
         assert_eq!(distinct.len(), Icon::ALL.len(), "two icons share a character");
+    }
+
+    #[test]
+    fn icon_all_lists_every_icon() {
+        // A variant missing from this match does not compile; one missing from ALL fails the assertion.
+        fn place(name: Icon) -> usize {
+            match name {
+                Icon::House => 0,
+                Icon::FolderGit2 => 1,
+                Icon::Container => 2,
+                Icon::ListOrdered => 3,
+                Icon::ScrollText => 4,
+                Icon::Search => 5,
+                Icon::Settings => 6,
+                Icon::CircleHelp => 7,
+                Icon::PanelLeft => 8,
+                Icon::Wrench => 9,
+                Icon::Minus => 10,
+                Icon::Square => 11,
+                Icon::X => 12,
+                Icon::EllipsisVertical => 13,
+                Icon::GitBranch => 14,
+                Icon::GitPullRequest => 15,
+                Icon::GitMerge => 16,
+                Icon::GitPullRequestClosed => 17,
+                Icon::Eye => 18,
+                Icon::ChevronDown => 19,
+                Icon::ChevronRight => 20,
+                Icon::ArrowUp => 21,
+                Icon::ArrowDown => 22,
+                Icon::ArrowUpDown => 23,
+                Icon::Check => 24,
+                Icon::Ellipsis => 25,
+                Icon::TriangleAlert => 26,
+                Icon::LoaderCircle => 27,
+                Icon::RotateCw => 28,
+                Icon::Clock => 29,
+            }
+        }
+        for (at, name) in Icon::ALL.into_iter().enumerate() {
+            assert_eq!(place(name), at, "{name:?} is not at its place in ALL");
+        }
+        assert_eq!(Icon::ALL.len(), 30);
     }
 }
