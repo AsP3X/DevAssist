@@ -647,8 +647,25 @@ pub fn save(path: &Path, saved: &Saved) -> Result<(), String> {
         fs::create_dir_all(parent)
             .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
     }
-    fs::write(path, render(saved))
-        .map_err(|err| format!("could not save {}: {err}", path.display()))
+    // The settings go to a file of their own beside the old one, which then
+    // takes the old one's place, so a program reading the file meanwhile
+    // gets the old settings or the new ones and never half a file.
+    let temp = temp_path(path);
+    fs::write(&temp, render(saved))
+        .and_then(|()| fs::rename(&temp, path))
+        .map_err(|err| {
+            let _ = fs::remove_file(&temp);
+            format!("could not save {}: {err}", path.display())
+        })
+}
+
+/// Where `save` writes before the file takes `path`'s place: beside it,
+/// named after this process, so two programs saving at once do not
+/// write into the same file.
+fn temp_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", std::process::id()));
+    path.with_file_name(name)
 }
 
 /// Writes the settings this program changed since `before` and keeps
@@ -1910,5 +1927,85 @@ mod tests {
         };
         assert_eq!(save_changes(&path, &before, &after), Ok(()));
         assert_eq!(read_back(&path), after);
+    }
+
+    /// An empty folder of its own for one test.
+    fn temp_folder(name: &str) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!(
+            "devassist-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// The names in `folder`, sorted.
+    fn names_in(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_save_puts_a_new_file_in_place_instead_of_rewriting_the_old_one() {
+        // A program reading the file while it is saved sees the old file
+        // or the new one, never half of one. A second name for the old
+        // file keeps the old text when the new file takes its place.
+        let folder = temp_folder("save-replace");
+        let path = folder.join(FILE_NAME);
+        let old = one_checkout();
+        save(&path, &old).unwrap();
+        let link = folder.join("old.toml");
+        fs::hard_link(&path, &link).unwrap();
+        let new = Saved {
+            watch_interval: 30,
+            ..old.clone()
+        };
+        save(&path, &new).unwrap();
+        let kept = fs::read_to_string(&link);
+        let saved = read_config(&path);
+        let _ = fs::remove_dir_all(&folder);
+        assert_eq!(kept.unwrap(), render(&old));
+        assert_eq!(saved_from(&saved.unwrap()), new);
+    }
+
+    #[test]
+    fn a_save_leaves_only_the_settings_file_behind() {
+        let folder = temp_folder("save-clean");
+        let path = folder.join(FILE_NAME);
+        save(&path, &one_checkout()).unwrap();
+        let new = Saved {
+            title: Some("Desk".into()),
+            ..one_checkout()
+        };
+        save(&path, &new).unwrap();
+        let names = names_in(&folder);
+        let saved = read_config(&path);
+        let _ = fs::remove_dir_all(&folder);
+        assert_eq!(names, vec![FILE_NAME.to_string()]);
+        assert_eq!(saved_from(&saved.unwrap()), new);
+    }
+
+    #[test]
+    fn a_save_that_fails_leaves_nothing_behind() {
+        // A folder where the file should be: the new file is written but
+        // cannot take the folder's place.
+        let folder = temp_folder("save-fails");
+        let path = folder.join(FILE_NAME);
+        fs::create_dir(&path).unwrap();
+        let result = save(&path, &one_checkout());
+        let names = names_in(&folder);
+        let _ = fs::remove_dir_all(&folder);
+        let message = result.unwrap_err();
+        assert!(
+            message.starts_with(&format!("could not save {}: ", path.display())),
+            "{message}"
+        );
+        assert_eq!(names, vec![FILE_NAME.to_string()]);
     }
 }
