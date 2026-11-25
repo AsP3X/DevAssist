@@ -212,14 +212,21 @@ const REACH: f32 = 3.0;
 static WARNED: AtomicBool = AtomicBool::new(false);
 
 /// What lies behind every pane: the whole window's backdrop in linear light, blurred for the pane's body
-/// (`soft`) and only lightly for its rim (`rim`), both `scale` pixels per point with the window's top left at 0,0.
+/// (`soft`) and only lightly for its rim (`rim`), each with the window's top left at 0,0.
+///
+/// A blurred picture holds no detail finer than its blur, so each may be coarser than the pane's picture:
+/// each has its own pixels per point, and the pane's picture is drawn at `picture_scale`.
 pub struct Behind<'a> {
     /// The backdrop blurred as the pane's body shows it.
     pub soft: &'a Bitmap,
     /// The backdrop only lightly blurred, as the rim of a glass pane shows it.
     pub rim: &'a Bitmap,
-    /// Pixels per point of both pictures.
+    /// Pixels per point of `soft`.
     pub scale: f32,
+    /// Pixels per point of `rim`.
+    pub rim_scale: f32,
+    /// Pixels per point of the pane's picture.
+    pub picture_scale: f32,
 }
 
 /// One pane: its rectangle in points (x, y, width, height), its corner radius, and the numbers it is drawn with.
@@ -254,12 +261,12 @@ impl Pane {
     }
 }
 
-/// The pane as a picture of `rect` at `scale` pixels per point, premultiplied, in display (gamma) colours:
-/// through the glass shader when `params.glass` and a GPU is there, else frosted on the CPU.
+/// The pane as a picture of `rect` at `picture_scale` pixels per point, premultiplied, in display (gamma)
+/// colours: through the glass shader when `params.glass` and a GPU is there, else frosted on the CPU.
 /// A pane with no area gives `None`.
 #[must_use]
 pub fn draw(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
-    let size = pane.pixels(behind.scale)?;
+    let size = pane.pixels(behind.picture_scale)?;
     if pane.params.glass
         && gpu::ready()
         && let Some(program) = program()
@@ -279,12 +286,12 @@ pub fn draw(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
 /// The frosted picture, always on the CPU.
 #[must_use]
 pub fn frosted(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
-    let (w, h) = pane.pixels(behind.scale)?;
+    let (w, h) = pane.pixels(behind.picture_scale)?;
     let params = &pane.params;
     let tint = linear(params.tint);
     let shape = pane.shape();
     let centre = pane.centre();
-    let scale = behind.scale;
+    let (scale, soft_scale) = (behind.picture_scale, behind.scale);
     let mut out = Bitmap::new(w, h);
     for y in 0..out.h {
         for x in 0..out.w {
@@ -298,7 +305,7 @@ pub fn frosted(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
             if cover > 0.0
                 && let Some(pixel) = out.px.get_mut(y * out.w + x)
             {
-                *pixel = frosted_pixel(behind.soft.sample(doc[0] * scale, doc[1] * scale), params, tint, cover, edge);
+                *pixel = frosted_pixel(behind.soft.sample(doc[0] * soft_scale, doc[1] * soft_scale), params, tint, cover, edge);
             }
         }
     }
@@ -351,16 +358,17 @@ pub fn to_display(bitmap: &Bitmap) -> Bitmap {
 fn glass(program: &Program, behind: &Behind<'_>, pane: &Pane, size: (usize, usize)) -> Result<Bitmap, String> {
     let whole = |pixels: usize| u32::try_from(pixels).map_err(|e| e.to_string());
     let params = &pane.params;
-    let scale = behind.scale;
+    let scale = behind.picture_scale;
     let shape = pane.shape();
     let centre = pane.centre();
-    let map = |bitmap: &Bitmap| {
-        let (w, h) = (length(bitmap.w) / scale, length(bitmap.h) / scale);
+    // Each backdrop picture at its own pixels per point.
+    let map = |bitmap: &Bitmap, bitmap_scale: f32| {
+        let (w, h) = (length(bitmap.w) / bitmap_scale, length(bitmap.h) / bitmap_scale);
         [1.0 / w, 1.0 / h, centre[0] / w, centre[1] / h]
     };
     let tint = linear(params.tint);
     let light = toward_light(params.light_angle);
-    let maps = [(shader::map_member(BACKDROP), map(behind.soft)), (shader::map_member(RIM), map(behind.rim))];
+    let maps = [(shader::map_member(BACKDROP), map(behind.soft, behind.scale)), (shader::map_member(RIM), map(behind.rim, behind.rim_scale))];
     // A rim can't be wider than half the narrowest outline.
     let narrowest = shape.half[0].min(shape.half[1]);
     let frame = [pane.rect[2] / 2.0 * scale, pane.rect[3] / 2.0 * scale, scale, 0.0];
@@ -410,7 +418,7 @@ mod tests {
 
     impl Backdrop {
         fn as_behind(&self) -> Behind<'_> {
-            Behind { soft: &self.soft, rim: &self.rim, scale: self.scale }
+            Behind { soft: &self.soft, rim: &self.rim, scale: self.scale, rim_scale: self.scale, picture_scale: self.scale }
         }
     }
 
@@ -612,7 +620,7 @@ mod tests {
         }
         let picture = photo(2);
         let (soft, rim) = (prepare(&picture, 0.0, 2.0), prepare(&picture, 0.0, 2.0));
-        let behind = Behind { soft: &soft, rim: &rim, scale: 2.0 };
+        let behind = Behind { soft: &soft, rim: &rim, scale: 2.0, rim_scale: 2.0, picture_scale: 2.0 };
         let clear = |refraction: u8| {
             let material = Material::read(&json!({"type": "liquid_glass", "variant": "clear", "appearance": "light",
                 "advanced": {"refraction": refraction, "highlight": 0, "blur": 0}}))
@@ -638,6 +646,26 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_over_a_backdrop_at_half_scale_looks_the_same() {
+        const RECT: [f32; 4] = [30.0, 30.0, 260.0, 140.0];
+        let picture = photo(1);
+        let half = picture.halved();
+        for appearance in ["light", "dark"] {
+            let pane = material_pane(RECT, 32.0, "frosted", appearance);
+            let (blur, rim_blur) = (pane.params.blur, pane.params.blur * RIM_BLUR);
+            let (soft, rim) = (prepare(&picture, blur, 1.0), prepare(&picture, rim_blur, 1.0));
+            let full = frosted(&Behind { soft: &soft, rim: &rim, scale: 1.0, rim_scale: 1.0, picture_scale: 1.0 }, &pane).unwrap();
+            let (soft, rim) = (prepare(&half, blur, 0.5), prepare(&half, rim_blur, 0.5));
+            let coarse = frosted(&Behind { soft: &soft, rim: &rim, scale: 0.5, rim_scale: 0.5, picture_scale: 1.0 }, &pane).unwrap();
+            assert_eq!((coarse.w, coarse.h), (full.w, full.h), "the picture keeps its own scale");
+            let channels = f64::from(u32::try_from(full.px.len() * 4).unwrap());
+            let total: f64 = full.px.iter().zip(&coarse.px).flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| f64::from((a - b).abs()))).sum();
+            let mean = total / channels;
+            assert!(mean < 2.0 / 255.0, "{appearance}: a mean difference of {:.2} / 255", mean * 255.0);
+        }
+    }
+
+    #[test]
     fn the_panes_match_the_kept_pictures() {
         const RECT: [f32; 4] = [30.0, 30.0, 260.0, 140.0];
         const RADIUS: f32 = 32.0;
@@ -652,7 +680,7 @@ mod tests {
                 for appearance in ["light", "dark"] {
                     let pane = material_pane(RECT, RADIUS, kind, appearance);
                     let (soft, rim) = (prepare(&picture, pane.params.blur, at), prepare(&picture, pane.params.blur * RIM_BLUR, at));
-                    let behind = Behind { soft: &soft, rim: &rim, scale: at };
+                    let behind = Behind { soft: &soft, rim: &rim, scale: at, rim_scale: at, picture_scale: at };
                     let drawn = draw(&behind, &pane).unwrap();
                     assert_eq!((drawn.w, drawn.h), (260 * usize::from(scale), 140 * usize::from(scale)));
                     let cpu = frosted(&behind, &pane).unwrap();

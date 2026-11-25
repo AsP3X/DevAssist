@@ -48,6 +48,13 @@ Rewritten for one pane that is a single rounded box and never turned:
 - `to_display` is new code, not from Quill: it takes a picture `prepare` returned (linear light) back to
   display colours with the copied `recode` and `to_gamma`, so the window can blur its own wallpaper with
   `prepare`'s mirrored edges. Its test is `a_prepared_picture_comes_back_to_display_colours`.
+- `Behind`'s `rim_scale` and `picture_scale` are new code, not from Quill: a blurred backdrop holds no
+  detail finer than its blur, so the window makes `soft` and `rim` coarse, each at its own pixels per point
+  (`scale`, `rim_scale`), while the pane's picture is drawn at `picture_scale`. `draw`, `frosted` and the
+  shader's frame, `u_scale` and picture size use `picture_scale`; each sampler's map and the frosted sampling
+  use the scale of the bitmap they read. With all three equal everything draws as before (the existing tests
+  and golden pictures are unchanged). Its test is `a_pane_over_a_backdrop_at_half_scale_looks_the_same`
+  (frosted over `golden/behind.png`, mean difference per channel under 2/255).
 - The test `the_rim_bends_what_is_behind_it_and_the_middle_does_not` follows Quill's test of that name
   (`src/render/glass/drawn.rs`), over the photo instead of a checkerboard; `matches_golden` and `shader_runs`
   follow the functions of those names there, with this crate's environment variables (`DEVASSIST_BLESS`,

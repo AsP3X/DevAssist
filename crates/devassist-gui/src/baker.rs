@@ -17,7 +17,7 @@ use image::RgbaImage;
 use image::imageops::{self, FilterType};
 
 use crate::assets;
-use crate::theme::{self, BACKDROP_BLUR, Mode, PICTURE_KEEP_FRAMES, RESIZE_SETTLE, Surface, VEIL_KNEE};
+use crate::theme::{self, BACKDROP_BLUR, COARSE_LEAST_PIXELS, COARSE_SIGMA_PX, Mode, PICTURE_KEEP_FRAMES, RESIZE_SETTLE, Surface, VEIL_KNEE};
 
 /// The backdrop drawn for a key that names none.
 const DEFAULT_BACKDROP: &str = "lake";
@@ -72,6 +72,14 @@ pub struct Drawn {
     pub texture: TextureId,
     /// Where to draw it, in points.
     pub rect: Rect,
+    /// The part of the texture that belongs at `rect`: a picture is whole pixels, so it reaches a little past
+    /// what it shows.
+    pub uv: Rect,
+}
+
+/// The part of a picture of `w` by `h` pixels that shows `length` pixels from its top left.
+fn uv_of(w: usize, h: usize, length_x: f32, length_y: f32) -> Rect {
+    Rect::from_min_max(Pos2::ZERO, Pos2::new((length_x / length(w)).min(1.0), (length_y / length(h)).min(1.0)))
 }
 
 /// A length in pixels as a count of whole pixels, rounded up; `None` for no length or one beyond any picture.
@@ -149,39 +157,139 @@ fn lay_veil(picture: &mut Bitmap, colour: Color32, opacity: [f32; 2]) {
     }
 }
 
-/// The wallpaper of `scene` from its decoded `photo`.
-fn wallpaper_from(photo: &RgbaImage, scene: &Scene) -> Option<Bitmap> {
-    let (w, h) = scene.pixels()?;
-    let covered = cover(photo, w, h)?;
-    // `prepare` grows the picture by its own mirrored edge before it blurs, so the window's edges don't fade.
-    let mut picture = if scene.blur { pane::to_display(&pane::prepare(&covered, BACKDROP_BLUR, scene.pixels_per_point)) } else { covered };
-    lay_veil(&mut picture, theme::palette(scene.mode).veil, theme::veil(&scene.backdrop, scene.mode));
-    Some(picture)
+/// The standard deviation, in points, of the Gaussian a blur of `radius` points is (as the glass crate reads a
+/// blur's radius: half of it).
+fn sigma(radius: f32) -> f32 {
+    radius.max(0.0) / 2.0
 }
 
-/// The whole window's backdrop in display colours, `size × pixels_per_point` pixels: the photo scaled to cover
-/// the window, blurred when `scene.blur`, and the veil laid over it. `None` for a window without area.
+/// The pixels per point a picture blurred by a Gaussian of `sigma` points needs to show all it holds: at most
+/// `finest`, and at least enough for [`COARSE_LEAST_PIXELS`] along the window's shorter side.
+fn coarse_scale(finest: f32, sigma: f32, size: [f32; 2]) -> f32 {
+    let least = (COARSE_LEAST_PIXELS / size[0].min(size[1])).min(finest);
+    if !(sigma.is_finite() && sigma > 0.0) {
+        return finest;
+    }
+    (COARSE_SIGMA_PX / sigma).clamp(least, finest)
+}
+
+/// For each of `count_out` pixels along a line of `count_in` pixels shrunk by `factor`: the pixels it averages
+/// and the share each has in it.
+fn spans(count_in: usize, count_out: usize, factor: f32) -> Vec<Vec<(usize, f32)>> {
+    let end = length(count_in);
+    (0..count_out)
+        .map(|out| {
+            let (from, to) = (length(out) / factor, (length(out + 1) / factor).min(end));
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "within 0..count_in, as from and to are")]
+            let (first, last) = (from.floor() as usize, (to.ceil() as usize).min(count_in));
+            let parts: Vec<(usize, f32)> = (first..last).map(|at| (at, (length(at + 1).min(to) - length(at).max(from)).max(0.0))).collect();
+            let total: f32 = parts.iter().map(|(_, part)| part).sum();
+            parts.into_iter().map(|(at, part)| (at, if total > 0.0 { part / total } else { 0.0 })).collect()
+        })
+        .collect()
+}
+
+/// `bitmap` shrunk by `factor` (below 1) with each pixel the average of the area it covers, so that its pixels
+/// per point are exactly `factor` times as many; the last pixel of a line, reaching past the picture, averages
+/// the part it covers.
+fn shrink(bitmap: &Bitmap, factor: f32) -> Option<Bitmap> {
+    let (w, h) = (whole_pixels(length(bitmap.w) * factor)?, whole_pixels(length(bitmap.h) * factor)?);
+    if bitmap.px.len() != bitmap.w * bitmap.h {
+        return None;
+    }
+    let (across, down) = (spans(bitmap.w, w, factor), spans(bitmap.h, h, factor));
+    let mut narrow = Bitmap::new(w, bitmap.h);
+    for (row, line) in narrow.px.chunks_mut(w).enumerate() {
+        let source = &bitmap.px[row * bitmap.w..(row + 1) * bitmap.w];
+        for (pixel, span) in line.iter_mut().zip(&across) {
+            *pixel = span.iter().fold([0.0; 4], |sum, &(at, share)| [0, 1, 2, 3].map(|c| sum[c] + source[at][c] * share));
+        }
+    }
+    let mut out = Bitmap::new(w, h);
+    for (row, span) in down.iter().enumerate() {
+        for &(at, share) in span {
+            let (to, from) = (&mut out.px[row * w..(row + 1) * w], &narrow.px[at * w..(at + 1) * w]);
+            for (pixel, source) in to.iter_mut().zip(from) {
+                *pixel = [0, 1, 2, 3].map(|c| pixel[c] + source[c] * share);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The window's backdrop in display colours, `bitmap` being `scale` pixels per point with the window's top
+/// left at 0,0.
+pub struct Wallpaper {
+    /// The picture, `size × scale` pixels rounded up (it reaches a little past the window's right and bottom).
+    pub bitmap: Bitmap,
+    /// Its pixels per point: `pixels_per_point` when the photo is not blurred, else as coarse as the blur
+    /// allows ([`wallpaper_scale`]).
+    pub scale: f32,
+}
+
+/// The pixels per point of the wallpaper of `scene`.
 #[must_use]
-pub fn wallpaper(scene: &Scene) -> Option<Bitmap> {
+pub fn wallpaper_scale(scene: &Scene) -> f32 {
+    if scene.blur { coarse_scale(scene.pixels_per_point, sigma(BACKDROP_BLUR), scene.size) } else { scene.pixels_per_point }
+}
+
+/// The wallpaper of `scene` from its decoded `photo`.
+fn wallpaper_from(photo: &RgbaImage, scene: &Scene) -> Option<Wallpaper> {
+    scene.pixels()?;
+    let scale = wallpaper_scale(scene);
+    let covered = cover(photo, whole_pixels(scene.size[0] * scale)?, whole_pixels(scene.size[1] * scale)?)?;
+    // `prepare` grows the picture by its own mirrored edge before it blurs, so the window's edges don't fade.
+    let mut bitmap = if scene.blur { pane::to_display(&pane::prepare(&covered, BACKDROP_BLUR, scale)) } else { covered };
+    lay_veil(&mut bitmap, theme::palette(scene.mode).veil, theme::veil(&scene.backdrop, scene.mode));
+    Some(Wallpaper { bitmap, scale })
+}
+
+/// The whole window's backdrop in display colours: the photo scaled to cover the window, blurred when
+/// `scene.blur`, and the veil laid over it. Unblurred it is `size × pixels_per_point` pixels; blurred it holds
+/// no fine detail and is made at [`wallpaper_scale`], far fewer pixels, to be drawn stretched over the window.
+/// `None` for a window without area.
+#[must_use]
+pub fn wallpaper(scene: &Scene) -> Option<Wallpaper> {
     scene.pixels()?;
     wallpaper_from(&decode(&scene.backdrop)?, scene)
 }
 
-/// The wallpaper, made ready for panes of one blur: blurred in linear light for their body, and, once a glass
-/// pane needs it, only lightly for its rim.
+/// The wallpaper made ready for panes of one blur, each copy as coarse as what it shows allows: blurred in linear
+/// light for their body, and, once a glass pane needs it, only lightly for its rim.
 struct Prepared {
     soft: Bitmap,
-    rim: Option<Bitmap>,
+    scale: f32,
+    rim: Option<(Bitmap, f32)>,
+}
+
+/// `wallpaper` (display colours) blurred by `radius` points in linear light, at the scale the blur and what the
+/// wallpaper already holds allow; with that scale.
+fn prepare_coarse(wallpaper: &Wallpaper, scene: &Scene, radius: f32) -> (Bitmap, f32) {
+    // What the wallpaper's own blur left, blurred again: the two blurs add up as squares.
+    let already = if scene.blur { sigma(BACKDROP_BLUR) } else { 0.0 };
+    let scale = coarse_scale(wallpaper.scale, already.hypot(sigma(radius)), scene.size);
+    let factor = scale / wallpaper.scale;
+    if factor < 1.0
+        && let Some(small) = shrink(&wallpaper.bitmap, factor)
+    {
+        (pane::prepare(&small, radius, scale), scale)
+    } else {
+        (pane::prepare(&wallpaper.bitmap, radius, wallpaper.scale), wallpaper.scale)
+    }
 }
 
 /// The wallpaper as panes drawn with `params` see it, from the ones `prepared` already, or prepared now and kept.
-fn behind<'a>(prepared: &'a mut HashMap<u32, Prepared>, wallpaper: &Bitmap, params: &Params, scale: f32) -> Behind<'a> {
-    let kept = prepared.entry(params.blur.to_bits()).or_insert_with(|| Prepared { soft: pane::prepare(wallpaper, params.blur, scale), rim: None });
+fn behind<'a>(prepared: &'a mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene: &Scene, params: &Params) -> Behind<'a> {
+    let kept = prepared.entry(params.blur.to_bits()).or_insert_with(|| {
+        let (soft, scale) = prepare_coarse(wallpaper, scene, params.blur);
+        Prepared { soft, scale, rim: None }
+    });
     if params.glass && kept.rim.is_none() {
-        kept.rim = Some(pane::prepare(wallpaper, params.blur * RIM_BLUR, scale));
+        kept.rim = Some(prepare_coarse(wallpaper, scene, params.blur * RIM_BLUR));
     }
     // A frosted pane shows no rim; it is lent the body's picture, which it doesn't read.
-    Behind { soft: &kept.soft, rim: kept.rim.as_ref().unwrap_or(&kept.soft), scale }
+    let (rim, rim_scale) = kept.rim.as_ref().map_or((&kept.soft, kept.scale), |(rim, scale)| (rim, *scale));
+    Behind { soft: &kept.soft, rim, scale: kept.scale, rim_scale, picture_scale: scene.pixels_per_point }
 }
 
 /// What `pane` draws `want` as in `scene`, or `None` for one without area.
@@ -195,16 +303,16 @@ fn pane_of(scene: &Scene, want: &Want) -> Option<Pane> {
 }
 
 /// One pane drawn over `wallpaper`, with the prepared copies of it kept in `prepared`.
-fn draw_pane(prepared: &mut HashMap<u32, Prepared>, wallpaper: &Bitmap, scale: f32, pane: &Pane) -> Option<Bitmap> {
-    pane::draw(&behind(prepared, wallpaper, &pane.params, scale), pane)
+fn draw_pane(prepared: &mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene: &Scene, pane: &Pane) -> Option<Bitmap> {
+    pane::draw(&behind(prepared, wallpaper, scene, &pane.params), pane)
 }
 
 /// The picture of the pane `want` over `wallpaper` (from [`wallpaper`] for the same `scene`), in display
-/// colours, `want.rect × pixels_per_point` pixels. `None` for a pane or a window without area.
+/// colours, `want.rect × pixels_per_point` pixels rounded up. `None` for a pane or a window without area.
 #[must_use]
-pub fn pane_picture(wallpaper: &Bitmap, scene: &Scene, want: &Want) -> Option<Bitmap> {
+pub fn pane_picture(wallpaper: &Wallpaper, scene: &Scene, want: &Want) -> Option<Bitmap> {
     scene.pixels()?;
-    draw_pane(&mut HashMap::new(), wallpaper, scene.pixels_per_point, &pane_of(scene, want)?)
+    draw_pane(&mut HashMap::new(), wallpaper, scene, &pane_of(scene, want)?)
 }
 
 /// What a pane's picture shows besides the scene: its rectangle in whole pixels, its radius and its surface.
@@ -224,17 +332,20 @@ impl PaneKey {
     }
 }
 
-/// A pane's picture and the last frame that wanted it.
+/// A pane's picture, the part of it that shows the pane, and the last frame that wanted it.
 struct Kept {
     texture: TextureHandle,
+    uv: Rect,
     wanted: u64,
 }
 
-/// The wallpaper of the last settled scene, with its texture and the copies of it prepared for panes.
+/// The wallpaper of the last settled scene, with its texture and the copies of it prepared for panes. When the
+/// photo is blurred, all of it is coarse; nothing at the window's full resolution is kept.
 struct Settled {
     scene: Scene,
-    wallpaper: Bitmap,
+    wallpaper: Wallpaper,
     texture: TextureHandle,
+    uv: Rect,
     prepared: HashMap<u32, Prepared>,
 }
 
@@ -309,8 +420,9 @@ impl Baker {
             let key = known_backdrop(&scene.backdrop);
             let photo = self.photos.entry(key.to_owned()).or_insert_with(|| decode(key));
             let Some(wallpaper) = photo.as_ref().and_then(|photo| wallpaper_from(photo, scene)) else { return };
-            let texture = ctx.load_texture("glass-wallpaper", wallpaper.image(), TextureOptions::LINEAR);
-            self.settled = Some(Settled { scene: scene.clone(), wallpaper, texture, prepared: HashMap::new() });
+            let texture = ctx.load_texture("glass-wallpaper", wallpaper.bitmap.image(), TextureOptions::LINEAR);
+            let uv = uv_of(wallpaper.bitmap.w, wallpaper.bitmap.h, scene.size[0] * wallpaper.scale, scene.size[1] * wallpaper.scale);
+            self.settled = Some(Settled { scene: scene.clone(), wallpaper, texture, uv, prepared: HashMap::new() });
             self.panes.clear();
             self.by_id.clear();
             self.counts.1 += 1;
@@ -326,9 +438,10 @@ impl Baker {
             let key = PaneKey::of(want, scale);
             if let Some(kept) = self.panes.get_mut(&key) {
                 kept.wanted = self.frame;
-            } else if let Some(picture) = draw_pane(&mut settled.prepared, &settled.wallpaper, scale, &pane) {
+            } else if let Some(picture) = draw_pane(&mut settled.prepared, &settled.wallpaper, scene, &pane) {
                 let texture = ctx.load_texture(format!("glass-{}", want.id), picture.image(), TextureOptions::LINEAR);
-                self.panes.insert(key, Kept { texture, wanted: self.frame });
+                let uv = uv_of(picture.w, picture.h, pane.rect[2] * scale, pane.rect[3] * scale);
+                self.panes.insert(key, Kept { texture, uv, wanted: self.frame });
                 self.counts.0 += 1;
                 made += 1;
             }
@@ -345,10 +458,10 @@ impl Baker {
     /// The settled wallpaper over the whole window, then each wanted pane's latest picture at its rectangle.
     fn drawn(&self, scene: &Scene, wants: &[Want]) -> Vec<Drawn> {
         let Some(settled) = &self.settled else { return Vec::new() };
-        let window = Drawn { texture: settled.texture.id(), rect: Rect::from_min_size(Pos2::ZERO, scene.size.into()) };
+        let window = Drawn { texture: settled.texture.id(), rect: Rect::from_min_size(Pos2::ZERO, scene.size.into()), uv: settled.uv };
         let panes = wants.iter().filter_map(|want| {
             let kept = self.by_id.get(want.id).and_then(|key| self.panes.get(key))?;
-            Some(Drawn { texture: kept.texture.id(), rect: want.rect })
+            Some(Drawn { texture: kept.texture.id(), rect: want.rect, uv: kept.uv })
         });
         std::iter::once(window).chain(panes).collect()
     }
@@ -516,7 +629,7 @@ mod tests {
         for mode in [Mode::Light, Mode::Dark] {
             let (mut small_moon, mut lake) = (scene([64.0, 40.0]), scene([64.0, 40.0]));
             (small_moon.backdrop, small_moon.mode, lake.mode) = ("moon".to_owned(), mode, mode);
-            assert_eq!(wallpaper(&small_moon).map(|w| w.px), wallpaper(&lake).map(|w| w.px));
+            assert_eq!(wallpaper(&small_moon).map(|w| w.bitmap.px), wallpaper(&lake).map(|w| w.bitmap.px));
         }
     }
 
@@ -550,8 +663,11 @@ mod tests {
         big.pixels_per_point = 2.0;
         for blur in [true, false] {
             big.blur = blur;
-            let Some(picture) = wallpaper(&big) else { panic!("no wallpaper") };
-            assert_eq!((picture.w, picture.h), (400, 240));
+            let Some(Wallpaper { bitmap: picture, scale }) = wallpaper(&big) else { panic!("no wallpaper") };
+            // Unblurred, the window's own pixels; blurred, coarser (drawn stretched over the window).
+            assert_eq!(scale, wallpaper_scale(&big));
+            assert!(if blur { scale < 2.0 } else { (scale - 2.0).abs() < f32::EPSILON }, "{scale} with blur {blur}");
+            assert_eq!((picture.w, picture.h), (whole_pixels(200.0 * scale).unwrap(), whole_pixels(120.0 * scale).unwrap()));
             for pixel in &picture.px {
                 assert!((pixel[3] - 1.0).abs() < 1e-3, "a pixel of alpha {} with blur {blur}", pixel[3]);
             }
@@ -572,26 +688,74 @@ mod tests {
         assert!(picture.px.iter().all(|p| (p[3] - 1.0).abs() < 1e-6));
     }
 
+    #[test]
+    fn shrinking_averages_the_area_each_pixel_covers() {
+        // Left half white, right half black, ten pixels wide: halved, the middle pixel covers one of each.
+        let mut picture = Bitmap::new(10, 4);
+        for (at, pixel) in picture.px.iter_mut().enumerate() {
+            *pixel = if at % 10 < 5 { [1.0; 4] } else { [0.0, 0.0, 0.0, 1.0] };
+        }
+        let Some(half) = shrink(&picture, 0.5) else { panic!("nothing shrunk") };
+        assert_eq!((half.w, half.h), (5, 2));
+        let reds: Vec<f32> = half.px[..5].iter().map(|p| p[0]).collect();
+        for (red, want) in reds.iter().zip([1.0, 1.0, 0.5, 0.0, 0.0]) {
+            assert!((red - want).abs() < 1e-5, "{reds:?}");
+        }
+        // A share that does not divide the picture: the last pixel averages the part it covers, still opaque.
+        let Some(third) = shrink(&picture, 0.3) else { panic!("nothing shrunk") };
+        assert_eq!((third.w, third.h), (3, 2));
+        assert!(third.px.iter().all(|p| (p[3] - 1.0).abs() < 1e-5));
+        assert!(third.px[2][0].abs() < 1e-5 && (third.px[0][0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_panes_see_a_backdrop_only_as_fine_as_its_blur() {
+        let mut scene = scene(SIZE);
+        scene.pixels_per_point = 2.0;
+        let Some(blurred) = wallpaper(&scene) else { panic!("no wallpaper") };
+        assert!(blurred.scale < 1.0, "a blurred wallpaper is coarse: {}", blurred.scale);
+        assert_eq!((blurred.bitmap.w, blurred.bitmap.h), (whole_pixels(800.0 * blurred.scale).unwrap(), 200));
+        let mut prepared = HashMap::new();
+        for want in shell_wants() {
+            let pane = pane_of(&scene, &want).unwrap();
+            let behind = behind(&mut prepared, &blurred, &scene, &pane.params);
+            assert_eq!(behind.picture_scale, 2.0, "the pane's picture stays sharp");
+            assert!(behind.scale <= blurred.scale && behind.rim_scale <= blurred.scale, "{}", want.id);
+            // The body copy is as fine as its blur on top of the wallpaper's shows, and no finer.
+            let shows = sigma(BACKDROP_BLUR).hypot(sigma(pane.params.blur));
+            assert!((behind.scale - (COARSE_SIGMA_PX / shows).min(blurred.scale)).abs() < 1e-6, "{}", want.id);
+            // It covers the window, reaching at most two of its pixels past the edge.
+            let points = |pixels: usize| length(pixels) / behind.scale;
+            assert!(points(behind.soft.w) >= 800.0 - 1e-3 && points(behind.soft.w - 2) < 800.0, "{}: {}", want.id, behind.soft.w);
+            assert!(points(behind.soft.h) >= 600.0 - 1e-3 && points(behind.soft.h - 2) < 600.0, "{}: {}", want.id, behind.soft.h);
+        }
+        // Unblurred, the wallpaper is the window's own pixels.
+        scene.blur = false;
+        let Some(sharp) = wallpaper(&scene) else { panic!("no wallpaper") };
+        assert_eq!((sharp.scale, sharp.bitmap.w, sharp.bitmap.h), (2.0, 1600, 1200));
+    }
+
     /// Milliseconds since `start`.
     fn ms(start: Instant) -> f64 {
         start.elapsed().as_secs_f64() * 1000.0
     }
 
-    /// Times each step of baking the shell at the design's size, at one and two pixels per point.
+    /// Times each step of baking the shell at the design's size, at one and two pixels per point, and counts the
+    /// bytes kept after it.
     fn measure(label: &str) {
         let wants = shell_wants_at(WINDOW);
-        for pixels_per_point in [1.0, 2.0] {
+        for (pixels_per_point, blur) in [(1.0, true), (2.0, true), (1.0, false), (2.0, false)] {
             let mut scene = scene(WINDOW);
-            scene.pixels_per_point = pixels_per_point;
-            let (w, h) = scene.pixels().unwrap();
+            (scene.pixels_per_point, scene.blur) = (pixels_per_point, blur);
+            let scale = wallpaper_scale(&scene);
             let start = Instant::now();
             let photo = decode(&scene.backdrop).unwrap();
             let decoding = ms(start);
             let start = Instant::now();
-            let covered = cover(&photo, w, h).unwrap();
+            let covered = cover(&photo, whole_pixels(WINDOW[0] * scale).unwrap(), whole_pixels(WINDOW[1] * scale).unwrap()).unwrap();
             let covering = ms(start);
             let start = Instant::now();
-            let mut picture = pane::to_display(&pane::prepare(&covered, BACKDROP_BLUR, pixels_per_point));
+            let mut picture = if blur { pane::to_display(&pane::prepare(&covered, BACKDROP_BLUR, scale)) } else { covered };
             let blurring = ms(start);
             let start = Instant::now();
             lay_veil(&mut picture, theme::palette(scene.mode).veil, theme::veil(&scene.backdrop, scene.mode));
@@ -603,15 +767,15 @@ mod tests {
             let mut prepared = HashMap::new();
             let start = Instant::now();
             for pane in &panes {
-                behind(&mut prepared, &whole, &pane.params, pixels_per_point);
+                behind(&mut prepared, &whole, &scene, &pane.params);
             }
             let preparing = ms(start);
             let start = Instant::now();
-            let pictures: Vec<Bitmap> = panes.iter().map(|pane| draw_pane(&mut prepared, &whole, pixels_per_point, pane).unwrap()).collect();
+            let pictures: Vec<Bitmap> = panes.iter().map(|pane| draw_pane(&mut prepared, &whole, &scene, pane).unwrap()).collect();
             let drawing = ms(start);
             let ctx = egui::Context::default();
             let start = Instant::now();
-            let _textures: Vec<TextureHandle> = std::iter::once(&whole)
+            let _textures: Vec<TextureHandle> = std::iter::once(&whole.bitmap)
                 .chain(&pictures)
                 .map(|picture| ctx.load_texture("measured", picture.image(), TextureOptions::LINEAR))
                 .collect();
@@ -619,12 +783,22 @@ mod tests {
             let start = Instant::now();
             Baker::new().frame(&egui::Context::default(), &scene, &wants, at(0));
             let first_frame = ms(start);
+            let bytes = |bitmap: &Bitmap| bitmap.px.len() * size_of::<[f32; 4]>();
+            let rims = prepared.values().filter_map(|kept| kept.rim.as_ref());
+            let kept_bytes = bytes(&whole.bitmap)
+                + prepared.values().map(|kept| bytes(&kept.soft)).sum::<usize>()
+                + rims.map(|(rim, _)| bytes(rim)).sum::<usize>();
+            let scales: Vec<String> =
+                prepared.values().map(|kept| format!("{:.2}/{:.2}", kept.scale, kept.rim.as_ref().map_or(f32::NAN, |(_, scale)| *scale))).collect();
+            #[expect(clippy::cast_precision_loss, reason = "a byte count printed in megabytes")]
+            let megabytes = kept_bytes as f64 / 1e6;
             println!(
-                "{label} at {pixels_per_point}x ({w} x {h} px): wallpaper {wallpaper_ms:.0} ms (decode {decoding:.0}, cover {covering:.0}, \
-                 blur {blurring:.0}, veil {veiling:.0}); panes {:.0} ms (prepare {} blurs {preparing:.0}, draw {drawing:.0}); \
-                 textures {uploading:.0} ms; a whole first frame {first_frame:.0} ms",
+                "{label} at {pixels_per_point}x, blur {blur} (wallpaper {} x {} px at {scale:.2}): wallpaper {wallpaper_ms:.1} ms (decode {decoding:.1}, \
+                 cover {covering:.1}, blur {blurring:.1}, veil {veiling:.1}); panes {:.1} ms (prepare {preparing:.1} at body/rim scales {scales:?}, \
+                 draw {drawing:.1}); textures {uploading:.1} ms; a whole first frame {first_frame:.1} ms; kept {megabytes:.1} MB",
+                whole.bitmap.w,
+                whole.bitmap.h,
                 preparing + drawing,
-                prepared.len(),
             );
         }
     }
