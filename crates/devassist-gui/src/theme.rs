@@ -43,8 +43,8 @@ pub const BACKDROP_BLUR: f32 = 24.0;
 pub const QUIET_OPACITY: f32 = 0.74;
 /// How long the window must be left alone after a resize before its glass is redrawn at the new size.
 pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
-/// How far down the window the veil keeps its top opacity, as a share of the height; below, it rises
-/// evenly to its bottom opacity.
+/// How far up from the window's bottom the veil keeps its lower strength, as a share of the height; above, it
+/// rises evenly to its strength at the top.
 pub const VEIL_KNEE: f32 = 0.45;
 /// How many pixels of a blurred picture one standard deviation of its blur spans: a blurred picture holds no
 /// detail finer than its blur, so it is made only this fine.
@@ -184,20 +184,35 @@ pub fn palette(mode: Mode) -> Palette {
     }
 }
 
-/// The veil's opacity over the backdrop `backdrop`: at the top 45 % of the window, and at the bottom. A key
+/// The veil's two strengths over the backdrop `backdrop`: the first in the lower part of the window (its bottom
+/// [`VEIL_KNEE`] of the height), the second at the very top; between them it rises evenly ([`veil_at`]). A key
 /// that names no backdrop gets the values of `"lake"`.
 #[must_use]
 pub fn veil(backdrop: &str, mode: Mode) -> [f32; 2] {
     match (backdrop, mode) {
         ("midday", Mode::Dark) => [0.45, 0.72],
-        ("forest", Mode::Dark) => [0.57, 0.82],
-        ("dusk", Mode::Light) => [0.22, 0.62],
+        ("dusk", Mode::Light) => [0.2, 0.62],
         ("dusk", Mode::Dark) => [0.2, 0.5],
-        ("golden", Mode::Dark) | ("night", Mode::Light) => [0.5, 0.82],
         ("night", Mode::Dark) => [0.1, 0.35],
+        // The lake, the forest and the golden hour in the dark mode, and the night in the light one.
+        ("night", Mode::Light) | (_, Mode::Dark) => [0.5, 0.82],
         (_, Mode::Light) => [0.0, 0.0],
-        (_, Mode::Dark) => [0.54, 0.82],
     }
+}
+
+/// The veil's strength `down` the window (0 at the top, 1 at the bottom) when its two numbers are `strengths`
+/// (the strength in the lower part, the strength at the top): the lower one from the bottom up to
+/// [`VEIL_KNEE`] of the height, rising evenly from there to the higher one at the very top.
+#[must_use]
+pub fn veil_at(strengths: [f32; 2], down: f32) -> f32 {
+    let rise = ((1.0 - down - VEIL_KNEE) / (1.0 - VEIL_KNEE)).clamp(0.0, 1.0);
+    (strengths[0] + (strengths[1] - strengths[0]) * rise).clamp(0.0, 1.0)
+}
+
+/// The veil's strength over the backdrop `backdrop` in `mode`, `down` the window (0 at the top, 1 at the bottom).
+#[must_use]
+pub fn veil_strength(backdrop: &str, mode: Mode, down: f32) -> f32 {
+    veil_at(veil(backdrop, mode), down)
 }
 
 /// A kind of pane, each with its own material.
@@ -280,11 +295,11 @@ mod tests {
     #[test]
     fn every_backdrop_has_its_veil_in_both_themes() {
         let want = [
-            ("lake", [0.0, 0.0], [0.54, 0.82]),
+            ("lake", [0.0, 0.0], [0.5, 0.82]),
             ("golden", [0.0, 0.0], [0.5, 0.82]),
             ("midday", [0.0, 0.0], [0.45, 0.72]),
-            ("forest", [0.0, 0.0], [0.57, 0.82]),
-            ("dusk", [0.22, 0.62], [0.2, 0.5]),
+            ("forest", [0.0, 0.0], [0.5, 0.82]),
+            ("dusk", [0.2, 0.62], [0.2, 0.5]),
             ("night", [0.5, 0.82], [0.1, 0.35]),
         ];
         for (key, light, dark) in want {

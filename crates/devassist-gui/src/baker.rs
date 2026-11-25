@@ -17,7 +17,7 @@ use image::RgbaImage;
 use image::imageops::{self, FilterType};
 
 use crate::assets;
-use crate::theme::{self, BACKDROP_BLUR, COARSE_LEAST_PIXELS, COARSE_SIGMA_PX, Mode, PICTURE_KEEP_FRAMES, RESIZE_SETTLE, Surface, VEIL_KNEE};
+use crate::theme::{self, BACKDROP_BLUR, COARSE_LEAST_PIXELS, COARSE_SIGMA_PX, Mode, PICTURE_KEEP_FRAMES, RESIZE_SETTLE, Surface};
 
 /// The backdrop drawn for a key that names none.
 const DEFAULT_BACKDROP: &str = "lake";
@@ -136,18 +136,17 @@ fn cover(photo: &RgbaImage, w: usize, h: usize) -> Option<Bitmap> {
     Bitmap::from_bytes(w, h, cut.as_raw())
 }
 
-/// Lays the veil over `picture` (display colours): `colour` at `opacity[0]` from the top down to
-/// [`VEIL_KNEE`] of the height, rising evenly from there to `opacity[1]` at the bottom.
-fn lay_veil(picture: &mut Bitmap, colour: Color32, opacity: [f32; 2]) {
+/// Lays the veil over `picture` (display colours): `colour` at `strengths[0]` from the bottom up to
+/// [`VEIL_KNEE`](theme::VEIL_KNEE) of the height, rising evenly from there to `strengths[1]` at the very top
+/// ([`theme::veil_at`]).
+fn lay_veil(picture: &mut Bitmap, colour: Color32, strengths: [f32; 2]) {
     if picture.w == 0 || picture.h == 0 {
         return;
     }
     let veil = raster::pixel(colour);
     let height = length(picture.h);
     for (row, line) in picture.px.chunks_mut(picture.w).enumerate() {
-        let down = (length(row) + 0.5) / height;
-        let rise = ((down - VEIL_KNEE) / (1.0 - VEIL_KNEE)).clamp(0.0, 1.0);
-        let strength = (opacity[0] + (opacity[1] - opacity[0]) * rise).clamp(0.0, 1.0);
+        let strength = theme::veil_at(strengths, (length(row) + 0.5) / height);
         if strength <= 0.0 {
             continue;
         }
@@ -737,17 +736,45 @@ mod tests {
     }
 
     #[test]
-    fn the_veil_keeps_its_top_opacity_to_the_knee_then_rises_to_the_bottom() {
+    fn the_veil_keeps_its_low_strength_up_from_the_bottom_to_the_knee_then_rises_to_the_top() {
         let (w, h) = (4, 100);
         let mut picture = Bitmap::new(w, h);
         picture.fill([0.0, 0.0, 0.0, 1.0]);
         lay_veil(&mut picture, Color32::WHITE, [0.2, 0.8]);
         let row = |y: usize| picture.px[y * w];
-        assert!((row(0)[0] - 0.2).abs() < 1e-3, "{:?}", row(0));
-        assert!((row(40)[0] - 0.2).abs() < 1e-3, "{:?}", row(40));
-        assert!((row(99)[0] - 0.8).abs() < 0.01, "{:?}", row(99));
-        assert!(row(60)[0] > 0.2 && row(60)[0] < row(80)[0] && row(80)[0] < row(99)[0]);
+        assert!((row(99)[0] - 0.2).abs() < 1e-3, "{:?}", row(99));
+        assert!((row(60)[0] - 0.2).abs() < 1e-3, "{:?}", row(60));
+        assert!((row(0)[0] - 0.8).abs() < 0.01, "{:?}", row(0));
+        assert!(row(40)[0] > 0.2 && row(40)[0] < row(20)[0] && row(20)[0] < row(0)[0]);
         assert!(picture.px.iter().all(|p| (p[3] - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn the_veil_is_as_strong_as_the_designs_at_each_height() {
+        // Measured on the design's export for the lake in the dark mode at 1440 by 900: 0.79 at 6 % from the top,
+        // 0.66 at 28 %, 0.51 from 56 % down.
+        for (down, want) in [(0.06, 0.79), (0.28, 0.66), (0.93, 0.51)] {
+            let strength = theme::veil_strength("lake", Mode::Dark, down);
+            assert!((strength - want).abs() <= 0.03, "{strength} at {down} of the height, the design has {want}");
+        }
+        // The two ends are the two numbers: the strength at the top and the strength in the lower part.
+        let [low, high] = theme::veil("lake", Mode::Dark);
+        assert!((theme::veil_strength("lake", Mode::Dark, 0.0) - high).abs() < 1e-6);
+        assert!((theme::veil_strength("lake", Mode::Dark, 1.0) - low).abs() < 1e-6);
+        // The wallpaper itself is veiled that way: over a black picture the night-blue veil's blue channel is
+        // the strength times the veil's own blue.
+        let (w, h) = (2, 900);
+        let mut picture = Bitmap::new(w, h);
+        picture.fill([0.0, 0.0, 0.0, 1.0]);
+        let colour = theme::palette(Mode::Dark).veil;
+        lay_veil(&mut picture, colour, theme::veil("lake", Mode::Dark));
+        let blue = raster::pixel(colour)[2];
+        for (down, want) in [(0.06, 0.79), (0.28, 0.66), (0.93, 0.51)] {
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a row of a 900-pixel picture")]
+            let row = (down * 900.0) as usize;
+            let strength = picture.px[row * w][2] / blue;
+            assert!((strength - want).abs() <= 0.03, "{strength} at row {row}, the design has {want}");
+        }
     }
 
     #[test]
