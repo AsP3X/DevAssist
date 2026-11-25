@@ -1,10 +1,14 @@
 //! The window's glass, drawn once into pictures and kept until something it depends on changes.
 //!
-//! Drawing a pane is slow (a blur of the whole window's backdrop and, for glass, a run of the glass shader),
-//! so the window never draws one at every frame. The [`Baker`] draws the wallpaper (the backdrop photo under
-//! its veil) and each pane into a picture, hands egui one texture per picture, and draws a picture again only
-//! when what it shows changed: the pane's place, size, radius or surface, or the window's size, scale, mode,
-//! backdrop or blur.
+//! Drawing a glass pane is slow (a blur of the whole window's backdrop and a run of the glass shader), so the
+//! window never draws one at every frame. The [`Baker`] draws the wallpaper (the backdrop photo under its veil)
+//! and each glass pane into a picture, hands egui one texture per picture, and draws a picture again only when
+//! what it shows changed: the pane's place, size, radius or surface, or the window's size, scale, mode, backdrop
+//! or blur.
+//!
+//! Frosted panes have no picture of their own. With each wallpaper the baker makes one [`Sheet`] per frosted
+//! surface: the whole window blurred and tinted as the middle of such a pane is. A frosted pane is a rounded
+//! rectangle showing the part of the sheet under it ([`crate::frost`]), so it moves and scrolls without a bake.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -12,7 +16,7 @@ use std::time::{Duration, Instant};
 use devassist_glass::material::Params;
 use devassist_glass::pane::{self, Behind, Pane, RIM_BLUR, sigma};
 use devassist_glass::raster::{self, Bitmap};
-use egui::{Color32, Context, Pos2, Rect, TextureHandle, TextureId, TextureOptions};
+use egui::{Color32, Context, Pos2, Rect, Stroke, TextureHandle, TextureId, TextureOptions};
 use image::RgbaImage;
 use image::imageops::{self, FilterType};
 
@@ -52,7 +56,8 @@ impl Scene {
     }
 }
 
-/// One pane the shell wants drawn this frame.
+/// One glass pane the shell wants drawn this frame. [`Baker::frame`] bakes glass surfaces only; a frosted one is
+/// drawn from its [`Sheet`] instead, and a want of one is left out (said once in the log).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Want {
     /// The pane's name, the same at every frame; while the window is resized its last picture is found by it.
@@ -75,6 +80,30 @@ pub struct Drawn {
     /// The part of the texture that belongs at `rect`: a picture is whole pixels, so it reaches a little past
     /// what it shows.
     pub uv: Rect,
+}
+
+/// A blurred, tinted picture of the whole window that frosted panes show a part of.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sheet {
+    /// The picture's texture.
+    pub texture: TextureId,
+    /// The part of the texture that covers the window: the picture is whole pixels, so it reaches a little past
+    /// the window's right and bottom.
+    pub uv: Rect,
+    /// The light along a frosted pane's edge, to stroke its outline with.
+    pub edge: Stroke,
+}
+
+/// A [`Sheet`] as a picture, before egui has it.
+pub struct SheetPicture {
+    /// The picture in display colours, with the window's top left at 0,0.
+    pub bitmap: Bitmap,
+    /// Its pixels per point: as coarse as the material's blur allows.
+    pub scale: f32,
+    /// The part of it that covers the window.
+    pub uv: Rect,
+    /// The light along a frosted pane's edge.
+    pub edge: Stroke,
 }
 
 /// The part of a picture of `w` by `h` pixels that shows `length` pixels from its top left.
@@ -339,6 +368,30 @@ pub fn frosted_pane_picture(wallpaper: &Wallpaper, scene: &Scene, want: &Want) -
     pane::frosted(&behind(&mut HashMap::new(), wallpaper, scene, &pane.params, scene.pixels_per_point), &pane)
 }
 
+/// The sheet of the frosted `surface` over `wallpaper` (from [`wallpaper`] for the same `scene`), with the copies
+/// of the wallpaper prepared for panes kept in `prepared`; `None` for a glass surface.
+fn make_sheet(prepared: &mut HashMap<u32, Prepared>, wallpaper: &Wallpaper, scene: &Scene, surface: Surface) -> Option<SheetPicture> {
+    if surface.is_glass() {
+        return None;
+    }
+    // A frosted material's numbers do not depend on the pane's size; the window's is as good as any.
+    let params = theme::params(surface, scene.mode, (scene.size[0], scene.size[1]));
+    let behind = behind(prepared, wallpaper, scene, &params, scene.pixels_per_point);
+    let bitmap = pane::frost_sheet(behind.soft, &params);
+    let uv = uv_of(bitmap.w, bitmap.h, scene.size[0] * behind.scale, scene.size[1] * behind.scale);
+    let (colour, width) = pane::frost_edge(&params);
+    let edge = Stroke::new(width, Color32::from_rgba_unmultiplied(colour.r, colour.g, colour.b, colour.a));
+    Some(SheetPicture { scale: behind.scale, bitmap, uv, edge })
+}
+
+/// The sheet of the frosted `surface` over `wallpaper` (from [`wallpaper`] for the same `scene`), as [`Baker`]
+/// makes it. `None` for a glass surface or a window without area.
+#[must_use]
+pub fn sheet_picture(wallpaper: &Wallpaper, scene: &Scene, surface: Surface) -> Option<SheetPicture> {
+    scene.pixels()?;
+    make_sheet(&mut HashMap::new(), wallpaper, scene, surface)
+}
+
 /// What a pane's picture shows besides the scene: its rectangle in whole pixels, its radius and its surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct PaneKey {
@@ -363,14 +416,24 @@ struct Kept {
     wanted: u64,
 }
 
-/// The wallpaper of the last settled scene, with its texture and the copies of it prepared for panes. When the
-/// photo is blurred, all of it is coarse; nothing at the window's full resolution is kept.
+/// A frosted surface's sheet, as egui has it.
+struct KeptSheet {
+    surface: Surface,
+    texture: TextureHandle,
+    uv: Rect,
+    edge: Stroke,
+}
+
+/// The wallpaper of the last settled scene, with its texture, the copies of it prepared for panes and the sheets
+/// of the frosted surfaces. When the photo is blurred, all of it is coarse; nothing at the window's full
+/// resolution is kept.
 struct Settled {
     scene: Scene,
     wallpaper: Wallpaper,
     texture: TextureHandle,
     uv: Rect,
     prepared: HashMap<u32, Prepared>,
+    sheets: Vec<KeptSheet>,
 }
 
 /// Makes and keeps the window's pictures.
@@ -390,6 +453,8 @@ pub struct Baker {
     frame: u64,
     /// How many pane pictures and wallpapers have been made.
     counts: (usize, usize),
+    /// Whether the log has been told that a frosted want was left out.
+    told_frosted: bool,
 }
 
 impl Baker {
@@ -399,12 +464,20 @@ impl Baker {
         Baker::default()
     }
 
-    /// The wallpaper and one picture per wanted pane, baking only what changed. `now` is the frame's time.
-    /// While the window's size keeps changing, nothing is baked: the pictures of the last settled size are
-    /// returned, stretched to the new rectangles. Returns the wallpaper first.
+    /// The wallpaper and one picture per wanted glass pane, baking only what changed, and the sheets of the
+    /// frosted surfaces with each new wallpaper ([`Baker::sheet`]). `now` is the frame's time. While the window's
+    /// size keeps changing, nothing is baked: the pictures of the last settled size are returned, stretched to
+    /// the new rectangles. Returns the wallpaper first. A want of a frosted surface is left out: it is drawn from
+    /// its sheet.
     pub fn frame(&mut self, ctx: &Context, scene: &Scene, wants: &[Want], now: Duration) -> Vec<Drawn> {
         if scene.pixels().is_none() {
             return Vec::new();
+        }
+        if !self.told_frosted
+            && let Some(want) = wants.iter().find(|want| !want.surface.is_glass())
+        {
+            self.told_frosted = true;
+            log::warn!("the pane {} is frosted, which is drawn from its sheet, not baked; it is left out", want.id);
         }
         self.frame += 1;
         let resized = self.settled.as_ref().is_some_and(|settled| !same_size(settled.scene.size, scene.size));
@@ -421,6 +494,15 @@ impl Baker {
         self.resizing = None;
         self.bake(ctx, scene, wants);
         self.drawn(scene, wants)
+    }
+
+    /// The sheet for a frosted surface in the last scene `frame` saw; `None` before the first frame, and for a
+    /// glass surface. While the window is resized it is the last settled size's, to be stretched over the window
+    /// as the wallpaper is.
+    #[must_use]
+    pub fn sheet(&self, surface: Surface) -> Option<Sheet> {
+        let kept = self.settled.as_ref()?.sheets.iter().find(|kept| kept.surface == surface)?;
+        Some(Sheet { texture: kept.texture.id(), uv: kept.uv, edge: kept.edge })
     }
 
     /// How many pane pictures and how many wallpapers have been made since the start.
@@ -448,7 +530,16 @@ impl Baker {
             let Some(wallpaper) = photo.as_ref().and_then(|photo| wallpaper_from(photo, scene, limit)) else { return };
             let texture = ctx.load_texture("glass-wallpaper", wallpaper.bitmap.image(), TextureOptions::LINEAR);
             let uv = uv_of(wallpaper.bitmap.w, wallpaper.bitmap.h, scene.size[0] * wallpaper.scale, scene.size[1] * wallpaper.scale);
-            self.settled = Some(Settled { scene: scene.clone(), wallpaper, texture, uv, prepared: HashMap::new() });
+            let mut prepared = HashMap::new();
+            let sheets = Surface::ALL
+                .into_iter()
+                .filter_map(|surface| {
+                    let sheet = make_sheet(&mut prepared, &wallpaper, scene, surface)?;
+                    let texture = ctx.load_texture(format!("frost-{surface:?}"), sheet.bitmap.image(), TextureOptions::LINEAR);
+                    Some(KeptSheet { surface, texture, uv: sheet.uv, edge: sheet.edge })
+                })
+                .collect();
+            self.settled = Some(Settled { scene: scene.clone(), wallpaper, texture, uv, prepared, sheets });
             self.panes.clear();
             self.by_id.clear();
             self.counts.1 += 1;
@@ -456,7 +547,7 @@ impl Baker {
         let Some(settled) = self.settled.as_mut() else { return };
         let scale = scene.pixels_per_point;
         let mut made = 0;
-        for want in wants {
+        for want in wants.iter().filter(|want| want.surface.is_glass()) {
             let Some(pane) = pane_of(scene, want) else {
                 self.by_id.remove(want.id);
                 continue;
@@ -483,11 +574,11 @@ impl Baker {
         }
     }
 
-    /// The settled wallpaper over the whole window, then each wanted pane's latest picture at its rectangle.
+    /// The settled wallpaper over the whole window, then each wanted glass pane's latest picture at its rectangle.
     fn drawn(&self, scene: &Scene, wants: &[Want]) -> Vec<Drawn> {
         let Some(settled) = &self.settled else { return Vec::new() };
         let window = Drawn { texture: settled.texture.id(), rect: Rect::from_min_size(Pos2::ZERO, scene.size.into()), uv: settled.uv };
-        let panes = wants.iter().filter_map(|want| {
+        let panes = wants.iter().filter(|want| want.surface.is_glass()).filter_map(|want| {
             let kept = self.by_id.get(want.id).and_then(|key| self.panes.get(key))?;
             Some(Drawn { texture: kept.texture.id(), rect: want.rect, uv: kept.uv })
         });
@@ -513,9 +604,9 @@ mod tests {
         Duration::from_millis(ms)
     }
 
-    /// The shell's four panes in a window of `size`, laid out as the design lays them out at 1440 by 900 (where
-    /// the sidebar is 12, 12, 256 × 876 and the panel 280, 60 to 1428, 844), each kept inside the window with at
-    /// least a point a side.
+    /// The shell's three glass panes in a window of `size`, laid out as the design lays them out at 1440 by 900
+    /// (where the sidebar is 12, 12, 256 × 876), each kept inside the window with at least a point a side. The
+    /// frosted panel is no pane the baker makes.
     fn shell_wants_at(size: [f32; 2]) -> Vec<Want> {
         let [w, h] = size;
         let content = INSET + SIDEBAR_WIDTH + INSET;
@@ -531,12 +622,6 @@ mod tests {
                 rect: rect(content, INSET, content + BAR_HEIGHT, INSET + BAR_HEIGHT),
                 radius: BAR_HEIGHT / 2.0,
                 surface: Surface::Capsule,
-            },
-            Want {
-                id: "panel",
-                rect: rect(content, INSET + BAR_HEIGHT + INSET, w - INSET, status_top - INSET),
-                radius: RADIUS_PANEL,
-                surface: Surface::Panel,
             },
             Want { id: "status-bar", rect: rect(content, status_top, w - INSET, h - INSET), radius: RADIUS_PANEL, surface: Surface::StatusBar },
         ]
@@ -583,6 +668,101 @@ mod tests {
         for index in 2..after.len() {
             assert_eq!(after[index].texture, before[index].texture);
         }
+    }
+
+    #[test]
+    fn a_frosted_pane_that_moves_bakes_nothing() {
+        let (ctx, mut baker) = (egui::Context::default(), Baker::new());
+        let (scene, wants) = (scene(SIZE), shell_wants());
+        assert!(baker.sheet(Surface::Panel).is_none(), "no sheet before the first frame");
+        baker.frame(&ctx, &scene, &wants, at(0));
+        let counts = baker.counts();
+        let Some(sheet) = baker.sheet(Surface::Panel) else { panic!("no sheet for the panel") };
+        let window = whole(SIZE);
+        for ms in 1..=100 {
+            baker.frame(&ctx, &scene, &wants, at(ms * 16));
+            // The panel moves and grows at every frame; it is the same sheet, only another part of it.
+            #[expect(clippy::cast_precision_loss, reason = "a frame count below 101")]
+            let step = ms as f32;
+            let panel = Rect::from_min_size(pos2(280.0 + step, 60.0 + step), vec2(300.0 + step, 300.0));
+            assert_eq!(baker.sheet(Surface::Panel), Some(sheet));
+            let uv = crate::frost::uv_under(window, panel, sheet.uv);
+            assert!(uv.min.x > sheet.uv.min.x && uv.max.x < sheet.uv.max.x && uv.min.y > sheet.uv.min.y && uv.max.y < sheet.uv.max.y, "{uv:?}");
+        }
+        assert_eq!(baker.counts(), counts);
+    }
+
+    #[test]
+    fn the_sheet_follows_the_theme_and_the_backdrop() {
+        let (ctx, mut baker) = (egui::Context::default(), Baker::new());
+        let (mut scene, wants) = (scene(SIZE), shell_wants());
+        baker.frame(&ctx, &scene, &wants, at(0));
+        let light = baker.sheet(Surface::Panel).map(|sheet| sheet.texture);
+        let picture = |scene: &Scene| sheet_picture(&wallpaper(scene).unwrap(), scene, Surface::Panel).map(|sheet| sheet.bitmap.px);
+        let light_picture = picture(&scene);
+        scene.mode = Mode::Dark;
+        baker.frame(&ctx, &scene, &wants, at(16));
+        let dark = baker.sheet(Surface::Panel).map(|sheet| sheet.texture);
+        assert!(light.is_some() && dark.is_some());
+        assert_ne!(dark, light);
+        assert_ne!(picture(&scene), light_picture, "the dark sheet is another picture");
+        scene.backdrop = "night".to_owned();
+        baker.frame(&ctx, &scene, &wants, at(32));
+        let night = baker.sheet(Surface::Panel).map(|sheet| sheet.texture);
+        assert!(night.is_some());
+        assert_ne!(night, dark);
+        // Only frosted surfaces have a sheet.
+        for surface in [Surface::Sidebar, Surface::Capsule, Surface::StatusBar] {
+            assert!(baker.sheet(surface).is_none(), "{surface:?}");
+        }
+    }
+
+    #[test]
+    fn a_frosted_want_is_not_baked() {
+        let (ctx, mut baker) = (egui::Context::default(), Baker::new());
+        let (scene, mut wants) = (scene(SIZE), shell_wants());
+        let glass = wants.len();
+        wants.push(Want {
+            id: "panel",
+            rect: Rect::from_min_size(pos2(280.0, 60.0), vec2(500.0, 400.0)),
+            radius: RADIUS_PANEL,
+            surface: Surface::Panel,
+        });
+        let drawn = baker.frame(&ctx, &scene, &wants, at(0));
+        assert_eq!(baker.counts(), (glass, 1), "only the glass panes are baked");
+        assert_eq!(drawn.len(), glass + 1, "and only they are drawn, after the wallpaper");
+        assert!(drawn.iter().all(|drawn| drawn.rect != wants[glass].rect));
+        baker.frame(&ctx, &scene, &wants, at(16));
+        assert_eq!(baker.counts(), (glass, 1));
+    }
+
+    #[test]
+    fn a_sheet_covers_the_window_at_the_coarse_scale_of_its_blur() {
+        let mut scene = scene(SIZE);
+        scene.pixels_per_point = 2.0;
+        for blur in [true, false] {
+            scene.blur = blur;
+            let Some(wallpaper) = wallpaper(&scene) else { panic!("no wallpaper") };
+            let Some(sheet) = sheet_picture(&wallpaper, &scene, Surface::Panel) else { panic!("no sheet") };
+            // As coarse as the frosted panel's own blur on top of the backdrop's allows; the backdrop's blur
+            // switched off, the panel still blurs by its own.
+            let already = if blur { sigma(BACKDROP_BLUR) } else { 0.0 };
+            let own = sigma(theme::params(Surface::Panel, scene.mode, (SIZE[0], SIZE[1])).blur);
+            assert!((sheet.scale - (COARSE_SIGMA_PX / already.hypot(own)).min(wallpaper.scale)).abs() < 1e-6, "{} with blur {blur}", sheet.scale);
+            assert!(sheet.scale < 0.2, "{}", sheet.scale);
+            let (w, h) = (sheet.bitmap.w, sheet.bitmap.h);
+            assert_eq!((w, h), (whole_pixels(800.0 * sheet.scale).unwrap(), whole_pixels(600.0 * sheet.scale).unwrap()));
+            // Its uv is the part that covers the window: the last pixel may be partial.
+            assert!((sheet.uv.max.x - 800.0 * sheet.scale / length(w)).abs() < 1e-6, "{:?}", sheet.uv);
+            assert!((sheet.uv.max.y - 600.0 * sheet.scale / length(h)).abs() < 1e-6, "{:?}", sheet.uv);
+            assert_eq!(sheet.uv.min, Pos2::ZERO);
+            assert!(sheet.uv.max.x > 1.0 - 1.0 / length(w) && sheet.uv.max.x <= 1.0);
+            assert!(sheet.bitmap.px.iter().all(|p| (p[3] - 1.0).abs() < 1e-3), "opaque with blur {blur}");
+            // The edge is the frosted material's.
+            let (colour, width) = pane::frost_edge(&theme::params(Surface::Panel, scene.mode, (SIZE[0], SIZE[1])));
+            assert_eq!(sheet.edge, egui::Stroke::new(width, Color32::from_rgba_unmultiplied(colour.r, colour.g, colour.b, colour.a)));
+        }
+        assert!(sheet_picture(&wallpaper(&scene).unwrap(), &scene, Surface::Sidebar).is_none(), "glass has no sheet");
     }
 
     #[test]
@@ -889,10 +1069,15 @@ mod tests {
             let pictures: Vec<Bitmap> =
                 panes.iter().map(|pane| draw_pane(&mut prepared, &whole, &scene, pane, scene.pixels_per_point).unwrap()).collect();
             let drawing = ms(start);
+            // The frosted panel is no pane: one sheet of the whole window, made with the wallpaper.
+            let start = Instant::now();
+            let sheet = make_sheet(&mut prepared, &whole, &scene, Surface::Panel).unwrap();
+            let sheeting = ms(start);
             let ctx = egui::Context::default();
             let start = Instant::now();
             let _textures: Vec<TextureHandle> = std::iter::once(&whole.bitmap)
                 .chain(&pictures)
+                .chain(std::iter::once(&sheet.bitmap))
                 .map(|picture| ctx.load_texture("measured", picture.image(), TextureOptions::LINEAR))
                 .collect();
             let uploading = ms(start);
@@ -902,6 +1087,7 @@ mod tests {
             let bytes = |bitmap: &Bitmap| bitmap.px.len() * size_of::<[f32; 4]>();
             let rims = prepared.values().filter_map(|kept| kept.rim.as_ref());
             let kept_bytes = bytes(&whole.bitmap)
+                + bytes(&sheet.bitmap)
                 + prepared.values().map(|kept| bytes(&kept.soft)).sum::<usize>()
                 + rims.map(|(rim, _)| bytes(rim)).sum::<usize>();
             let scales: Vec<String> =
@@ -911,10 +1097,14 @@ mod tests {
             println!(
                 "{label} at {pixels_per_point}x, blur {blur} (wallpaper {} x {} px at {scale:.2}): wallpaper {wallpaper_ms:.1} ms (decode {decoding:.1}, \
                  cover {covering:.1}, blur {blurring:.1}, veil {veiling:.1}); panes {:.1} ms (prepare {preparing:.1} at body/rim scales {scales:?}, \
-                 draw {drawing:.1}); textures {uploading:.1} ms; a whole first frame {first_frame:.1} ms; kept {megabytes:.1} MB",
+                 draw {drawing:.1}); the panel's sheet {sheeting:.1} ms ({} x {} px at {:.2}); textures {uploading:.1} ms; a whole first frame \
+                 {first_frame:.1} ms; kept {megabytes:.1} MB",
                 whole.bitmap.w,
                 whole.bitmap.h,
                 preparing + drawing,
+                sheet.bitmap.w,
+                sheet.bitmap.h,
+                sheet.scale,
             );
         }
     }
@@ -924,8 +1114,10 @@ mod tests {
     fn measure_a_glass_bake() {
         // The test shell at the design's size is the design's own layout.
         let rects: Vec<Rect> = shell_wants_at(WINDOW).iter().map(|want| want.rect).collect();
-        let design = [(12.0, 12.0, 256.0, 876.0), (280.0, 12.0, 36.0, 36.0), (280.0, 60.0, 1148.0, 784.0), (280.0, 856.0, 1148.0, 32.0)];
+        let design = [(12.0, 12.0, 256.0, 876.0), (280.0, 12.0, 36.0, 36.0), (280.0, 856.0, 1148.0, 32.0)];
         assert_eq!(rects, design.map(|(x, y, w, h)| Rect::from_min_size(pos2(x, y), vec2(w, h))));
+        // The frosted panel, drawn from the sheet, is the design's too.
+        assert_eq!(crate::shell::panel_rect(WINDOW.into(), true), Rect::from_min_size(pos2(280.0, 60.0), vec2(1148.0, 784.0)));
         // Frosted first: once a device is installed it stays for the rest of the run.
         measure("frosted");
         if devassist_glass::gpu::install_own_device() {

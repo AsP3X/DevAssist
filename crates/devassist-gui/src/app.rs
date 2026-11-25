@@ -11,7 +11,7 @@ use crate::baker::{Baker, Scene};
 use crate::launch::{self, Launch};
 use crate::screenshot;
 use crate::shell::{self, Shown};
-use crate::theme::{self, Mode, RESIZE_SETTLE};
+use crate::theme::{self, Mode, RESIZE_SETTLE, Surface};
 
 /// The window's title, and the app's name to the system.
 const TITLE: &str = "DevAssist";
@@ -126,8 +126,8 @@ impl eframe::App for App {
         let scene = Scene { size: size.into(), pixels_per_point: ctx.pixels_per_point(), mode, backdrop: backdrop.clone(), blur };
         let wants = shell::wants(size, self.sidebar_shown);
         let painter = ctx.layer_painter(LayerId::background());
-        // The wallpaper first, stretched over the window, then each pane; each shows only its own part of its
-        // texture (`uv`), or the backdrop behind a pane would sit shifted against the wallpaper.
+        // The wallpaper first, stretched over the window, then each glass pane; each shows only its own part of
+        // its texture (`uv`), or the backdrop behind a pane would sit shifted against the wallpaper.
         for drawn in self.baker.frame(&ctx, &scene, &wants, self.start.elapsed()) {
             let mut mesh = Mesh::with_texture(drawn.texture);
             mesh.add_rect_with_uv(drawn.rect, drawn.uv, Color32::WHITE);
@@ -137,8 +137,10 @@ impl eframe::App for App {
             ctx.request_repaint_after(RESIZE_SETTLE);
         }
 
+        // The frosted panel is no picture: the shell paints it from the sheet, which costs nothing to move.
+        let sheet = self.baker.sheet(Surface::Panel);
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
-            shell::draw(ui, &wants, &mut self.sidebar_shown, Shown { mode, backdrop: &backdrop });
+            shell::draw(ui, &wants, &mut self.sidebar_shown, Shown { mode, backdrop: &backdrop, sheet });
         });
     }
 }

@@ -56,6 +56,16 @@ Rewritten for one pane that is a single rounded box and never turned:
 - `to_display` is new code, not from Quill: it takes a picture `prepare` returned (linear light) back to
   display colours with the copied `recode` and `to_gamma`, so the window can blur its own wallpaper with
   `prepare`'s mirrored edges. Its test is `a_prepared_picture_comes_back_to_display_colours`.
+- `frost_sheet` and `frost_edge` are new code, not from Quill. `frost_sheet` runs the copied `frosted_pixel`
+  (unchanged) over every pixel of a prepared backdrop with full cover and no edge: the middle of a frosted pane,
+  as one picture of the whole window. The window shows a part of it inside each frosted pane's outline, so a
+  frosted pane needs no picture of its own and moves and scrolls without being drawn again. `frost_edge`
+  approximates the hairline `frosted` lights along the edge (`HAIRLINE` wide, from `highlight` at the edge
+  smoothly to none, added in linear light) as one even stroke: `HAIRLINE` wide, white, with the alpha that,
+  blended over the material's tint in display colours, adds the hairline's mean light (half of `highlight`).
+  Their tests are `a_frost_sheet_is_the_middle_of_a_frosted_pane` (over `golden/behind.png`, every pixel more
+  than 2 points inside a frosted pane within 2/255 of the sheet at the same place, light and dark),
+  `a_frost_sheet_of_nothing_is_empty` and `a_frost_edge_is_a_faint_light_line_as_wide_as_the_hairline`.
 - `Behind`'s `rim_scale` and `picture_scale` are new code, not from Quill: a blurred backdrop holds no
   detail finer than its blur, so the window makes `soft` and `rim` coarse, each at its own pixels per point
   (`scale`, `rim_scale`), while the pane's picture is drawn at `picture_scale`. `draw`, `frosted` and the

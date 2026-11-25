@@ -4,13 +4,16 @@
 // 6c6a0cc: `REACH`, `sigma` (made public), `length` and `pixels_up`. `outward` is `Form::outward` for one shape that is not turned;
 // `draw`'s glass part is `Builder::glass`, `frosted` is Quill's `frosted` with its `form` branch only.
 // New code, not from Quill: `SHADER_FAILED`, `shader_allowed` and `shader_gave_up`, with which `draw` stops trying
-// the shader after its first failure in a process.
+// the shader after its first failure in a process; `frost_sheet` and `frost_edge`, with which the window draws a
+// frosted pane without a picture of its own (the copied `frosted_pixel` is called, not changed).
 
 //! One pane of glass or frost over a backdrop picture.
 //!
 //! The window's backdrop is prepared once ([`prepare`]): taken to linear light and blurred, once as the body
 //! of a pane shows it and once, only lightly, for the rim of a glass pane. Each pane is then drawn as a picture
-//! of its own rectangle ([`draw`]), through Quill's glass shader on the GPU, or frosted on the CPU.
+//! of its own rectangle ([`draw`]), through Quill's glass shader on the GPU, or frosted on the CPU. A frosted
+//! pane can also be drawn without a picture of its own: one [`frost_sheet`] of the whole window, shown inside the
+//! pane's outline, with [`frost_edge`] stroked along it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -337,6 +340,40 @@ pub fn frosted(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
         }
     }
     Some(out)
+}
+
+/// The frosted material laid over the whole of `soft`: every pixel tinted and brightened as the middle of a
+/// frosted pane is, with no edge. Display colours, opaque, the size of `soft`.
+///
+/// `soft` is a backdrop as [`prepare`] makes it (linear light, blurred by the material's own `blur`). A frosted pane
+/// is then a rounded rectangle showing the part of this sheet under it, with [`frost_edge`] along its outline,
+/// and needs no picture of its own.
+#[must_use]
+pub fn frost_sheet(soft: &Bitmap, params: &Params) -> Bitmap {
+    let tint = linear(params.tint);
+    Bitmap { w: soft.w, h: soft.h, px: soft.px.iter().map(|pixel| frosted_pixel(*pixel, params, tint, 1.0, None)).collect() }
+}
+
+/// The light a frosted pane's edge carries, as a colour to stroke its outline with, and the stroke's width in points.
+///
+/// [`frosted`] lights a band [`HAIRLINE`] wide inside the edge, brightest at the edge and fading smoothly to none:
+/// on average half its `highlight`, added in linear light. The stroke is that band at that average, white with an
+/// alpha that, blended over the material's own tint in display colours (as the screen blends it), comes to the
+/// same light: over the dark tint that is more than half the highlight, as light added in linear light shows more
+/// on dark colours.
+#[must_use]
+pub fn frost_edge(params: &Params) -> (Rgba, f32) {
+    /// The mean of the hairline's light across its width: 1 less a smoothstep, from 1 at the edge to 0.
+    const MEAN: f32 = 0.5;
+    let light = (params.highlight * MEAN).clamp(0.0, 1.0);
+    let shares = linear(params.tint).map(|under| {
+        let (before, after) = (to_gamma(under), to_gamma(under + light * (1.0 - under)));
+        if before < 1.0 - 1e-4 { (after - before) / (1.0 - before) } else { light }
+    });
+    let alpha = (shares.iter().sum::<f32>() / 3.0).clamp(0.0, 1.0);
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to 0..=1 just above, so within 0..=255")]
+    let a = (alpha * 255.0).round() as u8;
+    (Rgba { r: 255, g: 255, b: 255, a }, HAIRLINE)
 }
 
 /// The backdrop for `Behind`: `picture` (display colours) taken to linear light and blurred by `radius` points.
@@ -718,6 +755,75 @@ mod tests {
             let total: f64 = full.px.iter().zip(&coarse.px).flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| f64::from((a - b).abs()))).sum();
             let mean = total / channels;
             assert!(mean < 2.0 / 255.0, "{appearance}: a mean difference of {:.2} / 255", mean * 255.0);
+        }
+    }
+
+    /// The window's frosted panel material (`frosted`, `thick`) in `appearance`, as a pane of 200 by 120.
+    fn frosted_params_in(appearance: &str) -> Params {
+        let material = Material::read(&json!({"type": "frosted", "thickness": "thick", "appearance": appearance})).unwrap();
+        material.resolve((200.0, 120.0), false, &Lookup { number: &|_| None, color: &|_| None })
+    }
+
+    fn frosted_params() -> Params {
+        frosted_params_in("light")
+    }
+
+    #[test]
+    fn a_frost_sheet_is_the_middle_of_a_frosted_pane() {
+        const RECT: [f32; 4] = [40.0, 40.0, 200.0, 120.0];
+        const MOST: f32 = 2.0 / 255.0;
+        let picture = photo(1);
+        for appearance in ["light", "dark"] {
+            let params = frosted_params_in(appearance);
+            let soft = prepare(&picture, params.blur, 1.0);
+            let sheet = frost_sheet(&soft, &params);
+            assert_eq!((sheet.w, sheet.h), (soft.w, soft.h), "the sheet is the size of what it frosts");
+            assert!(sheet.px.iter().all(|p| (p[3] - 1.0).abs() < 1e-4), "{appearance}: the sheet is opaque");
+            let pane = Pane { rect: RECT, radius: 16.0, params };
+            let drawn = frosted(&Behind { soft: &soft, rim: &soft, scale: 1.0, rim_scale: 1.0, picture_scale: 1.0 }, &pane).unwrap();
+            let (shape, centre) = (pane.shape(), pane.centre());
+            let mut compared = 0;
+            for y in 0..drawn.h {
+                for x in 0..drawn.w {
+                    let doc = [RECT[0] + length(x) + 0.5, RECT[1] + length(y) + 0.5];
+                    if shape.distance([doc[0] - centre[0], doc[1] - centre[1]]) > -2.0 {
+                        continue;
+                    }
+                    let (on_pane, on_sheet) = (drawn.px[y * drawn.w + x], sheet.px[(40 + y) * sheet.w + 40 + x]);
+                    for (a, b) in on_pane.iter().zip(on_sheet) {
+                        assert!((a - b).abs() <= MOST, "{appearance}: {on_pane:?} on the pane at {x}, {y}, {on_sheet:?} on the sheet");
+                    }
+                    compared += 1;
+                }
+            }
+            // All of the pane but a band two points wide along its edge and the corners.
+            assert!(compared > 196 * 116 - 4 * 16 * 16, "only {compared} pixels compared");
+        }
+    }
+
+    #[test]
+    fn a_frost_sheet_of_nothing_is_empty() {
+        assert_eq!(frost_sheet(&Bitmap::new(0, 0), &frosted_params()).px.len(), 0);
+    }
+
+    #[test]
+    fn a_frost_edge_is_a_faint_light_line_as_wide_as_the_hairline() {
+        for (appearance, dark) in [("light", false), ("dark", true)] {
+            let params = frosted_params_in(appearance);
+            let (colour, width) = frost_edge(&params);
+            assert!((width - HAIRLINE).abs() < 1e-6, "{appearance}: {width}");
+            assert_eq!((colour.r, colour.g, colour.b), (255, 255, 255), "{appearance}: the edge is lit, so white");
+            // Half the hairline's light at its brightest (its mean across its width), and more over the dark
+            // tint, where light added in linear light shows more on the screen's gamma.
+            let light = params.highlight * 0.5;
+            let alpha = f32::from(colour.a) / 255.0;
+            assert!(if dark { alpha > light } else { (alpha - light).abs() <= 1.0 / 255.0 }, "{appearance}: {alpha} for a light of {light}");
+            // Blended over the tint in display colours, the stroke gives what that light gives in linear light.
+            for channel in [params.tint.r, params.tint.g, params.tint.b] {
+                let under = f32::from(channel) / 255.0;
+                let (stroked, lit) = (under + alpha * (1.0 - under), to_gamma(to_linear(under) + light * (1.0 - to_linear(under))));
+                assert!((stroked - lit).abs() <= 2.0 / 255.0, "{appearance}: {stroked} stroked, {lit} lit over {under}");
+            }
         }
     }
 

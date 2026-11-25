@@ -6,19 +6,23 @@
 //! the bare wallpaper through it, and no text is ever drawn there. The panel is also measured only inside
 //! `PANEL_TEXT_INSET`, the closest any text comes to its edge (its rim highlight is no place for text).
 //!
-//! Both renderings are measured: the panes frosted on the CPU, as a window draws them when the glass shader
+//! Both renderings are measured: the glass panes frosted on the CPU, as a window draws them when the glass shader
 //! cannot run, and, where there is a GPU adapter, the glass panes through the shader, as people with a GPU see
-//! them.
+//! them. The frosted panel is the same in both: the baker's sheet in the panel's rounded rectangle with its edge,
+//! tessellated by egui as the window paints it ([`crate::frost`]) and laid over the wallpaper.
 
 use std::thread;
 
 use devassist_core::config::BACKDROPS;
 use devassist_glass::raster::{self, Bitmap, Pixel};
-use egui::{Color32, Rect, pos2, vec2};
+use egui::epaint::{Mesh, Shape, TessellationOptions, Tessellator};
+use egui::{Color32, Pos2, Rect, TextureId, pos2, vec2};
 
-use crate::baker::{Scene, frosted_pane_picture, pane_picture, wallpaper};
-use crate::shell;
-use crate::theme::{self, Mode, PANEL_TEXT_INSET, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, TEXT_SMALL, TEXT_TITLE, WINDOW};
+use crate::baker::{Scene, Sheet, SheetPicture, frosted_pane_picture, pane_picture, sheet_picture, wallpaper};
+use crate::theme::{
+    self, Mode, PANEL_TEXT_INSET, RADIUS_PANEL, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT_SMALL, TEXT_TITLE, WINDOW,
+};
+use crate::{frost, shell};
 
 /// The least contrast of text at `TEXT` (WCAG's level AA for normal text).
 const LEAST_TEXT: f64 = 4.5;
@@ -41,12 +45,12 @@ enum Ink {
     Quiet,
 }
 
-/// How the panes are drawn.
+/// How the glass panes are drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rendering {
-    /// Every pane frosted on the CPU.
+    /// Every glass pane frosted on the CPU.
     Frosted,
-    /// The glass panes through the glass shader on the GPU; the panel is frosted in both.
+    /// The glass panes through the glass shader on the GPU; the panel is drawn from its sheet in both.
     Glass,
 }
 
@@ -105,7 +109,27 @@ fn over(under: Pixel, over: Pixel) -> Pixel {
     [0, 1, 2, 3].map(|i| over[i] + under[i] * keep)
 }
 
-/// A window of `WINDOW` points as pixels: the wallpaper scaled up with bilinear sampling, the shell's panes over it.
+/// The frosted panel at `panel` in a window of `w` by `h` points at one pixel per point, painted as the window
+/// paints it: the shapes [`frost::paint`] adds, tessellated by egui and filled from `sheet` read between its
+/// pixels, as the GPU's linear sampler reads the texture. A picture of the whole window, clear outside the panel.
+fn painted_panel(sheet: &SheetPicture, panel: Rect, w: usize, h: usize) -> Bitmap {
+    let window = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
+    // The texture's id does not matter here: the fill's mesh is painted from the sheet's picture.
+    let painted = Sheet { texture: TextureId::User(0), uv: sheet.uv, edge: sheet.edge };
+    let texture = sheet.bitmap.image();
+    let mut tessellator = Tessellator::new(1.0, TessellationOptions::default(), [1, 1], Vec::new());
+    let mut picture = Bitmap::new(w, h);
+    for shape in frost::shapes(window, panel, RADIUS_PANEL, &painted) {
+        let textured = shape.brush.is_some();
+        let mut mesh = Mesh::default();
+        tessellator.tessellate_shape(Shape::Rect(shape), &mut mesh);
+        picture.triangles(&mesh, |p| [p.x, p.y], None, textured.then_some(&texture), false);
+    }
+    picture
+}
+
+/// A window of `WINDOW` points as pixels: the wallpaper scaled up with bilinear sampling, the shell's glass panes
+/// and its frosted panel over it.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -144,6 +168,12 @@ fn window(backdrop: &str, mode: Mode, rendering: Rendering) -> Window {
         }
         panes.push(Laid { id: want.id, left, top, picture });
     }
+    let sheet = sheet_picture(&wall, &scene, Surface::Panel).unwrap();
+    let painted = painted_panel(&sheet, shell::panel_rect(vec2(WINDOW[0], WINDOW[1]), true), w, h);
+    for (under, over_it) in bitmap.px.iter_mut().zip(&painted.px) {
+        *under = over(*under, *over_it);
+    }
+    panes.push(Laid { id: "panel", left: 0, top: 0, picture: painted });
     // Glass that fell back to frost would measure the frosted panes twice.
     assert!(rendering == Rendering::Frosted || shaded, "{backdrop} {mode:?}: no pane was drawn through the glass shader");
     Window { bitmap, panes }
@@ -169,7 +199,7 @@ fn places() -> Vec<Place> {
     let status = rect("status");
     let status_ends = Rect::from_min_max(pos2(status.left() + STATUS_PADDING, status.top()), pos2(status.right() - STATUS_PADDING, status.bottom()));
     // Text comes no closer to the panel's edge than `PANEL_TEXT_INSET`.
-    let panel_text = rect("panel").shrink(PANEL_TEXT_INSET);
+    let panel_text = shell::panel_rect(vec2(WINDOW[0], WINDOW[1]), true).shrink(PANEL_TEXT_INSET);
     let mut places = vec![
         Place { name: "sidebar", pane: Some("sidebar"), rect: sidebar_text, ink: Ink::OnGlass, least: LEAST_TEXT },
         // The version line under the workspace's name is quiet text at `TEXT_SMALL`.

@@ -1,12 +1,14 @@
 //! The window's frame from the design: a glass sidebar, the top row with the title and the window's own
-//! buttons, one frosted panel and the status bar. The panes are pictures the [`crate::baker`] makes from
-//! [`wants`]; [`draw`] puts the text, icons and buttons over them.
+//! buttons, one frosted panel and the status bar. The glass panes are pictures the [`crate::baker`] makes from
+//! [`wants`]; the panel, at [`panel_rect`], is drawn from the baker's frosted sheet ([`crate::frost`]); [`draw`]
+//! paints the panel and puts the text, icons and buttons over them all.
 
 use devassist_core::update::VERSION;
 use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, Sense, Ui, Vec2, ViewportCommand, pos2};
 
 use crate::assets::{self, Icon};
-use crate::baker::Want;
+use crate::baker::{Sheet, Want};
+use crate::frost;
 use crate::theme::{
     self, BAR_GAP, BAR_HEIGHT, CAPTION_BUTTON, GROUP_GAP, ICON, ICON_GAP, INSET, LABEL_GAP, LABEL_ROW, Mode, NAV_ROW, Palette, RADIUS_PANE,
     RADIUS_PANEL, RADIUS_ROW, RADIUS_SMALL, ROW_GAP, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP, SIDEBAR_WIDTH, STATUS_HEIGHT, STATUS_PADDING,
@@ -17,8 +19,6 @@ use crate::theme::{
 const SIDEBAR: &str = "sidebar";
 /// The round button that shows and hides the sidebar.
 const SIDEBAR_TOGGLE: &str = "sidebar-toggle";
-/// The frosted panel that holds a screen.
-const PANEL: &str = "panel";
 /// The status bar.
 const STATUS: &str = "status";
 
@@ -27,19 +27,35 @@ const PANEL_TEXT: &str = "The screens come next.";
 /// The screen the title names and the sidebar shows as chosen.
 const SCREEN: &str = "Repositories";
 
-/// The panes of the shell in a window of `size` points, the sidebar among them when `sidebar_shown`. Each
-/// is kept inside the window with at least a point a side, however small the window.
+/// The rectangle from `x0`, `y0` to `x1`, `y1` kept inside a window of `size` with at least a point a side,
+/// however small the window.
+fn kept_inside(size: Vec2, [x0, y0, x1, y1]: [f32; 4]) -> Rect {
+    let (w, h) = (size.x, size.y);
+    let (x0, y0) = (x0.min(w - 1.0).max(0.0), y0.min(h - 1.0).max(0.0));
+    Rect::from_min_max(pos2(x0, y0), pos2(x1.min(w).max(x0 + 1.0), y1.min(h).max(y0 + 1.0)))
+}
+
+/// Where the content starts from the window's left: past the sidebar when it is shown.
+fn content_left(sidebar_shown: bool) -> f32 {
+    if sidebar_shown { INSET + SIDEBAR_WIDTH + INSET } else { INSET }
+}
+
+/// The top of the status bar in a window of `size`.
+fn status_top(size: Vec2) -> f32 {
+    size.y - INSET - STATUS_HEIGHT
+}
+
+/// The glass panes of the shell in a window of `size` points, the sidebar among them when `sidebar_shown`. Each
+/// is kept inside the window with at least a point a side, however small the window. The frosted panel is not
+/// among them: it is no picture of its own ([`panel_rect`]).
 #[must_use]
 pub fn wants(size: Vec2, sidebar_shown: bool) -> Vec<Want> {
     let (w, h) = (size.x, size.y);
-    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| {
-        let (x0, y0) = (x0.min(w - 1.0).max(0.0), y0.min(h - 1.0).max(0.0));
-        Rect::from_min_max(pos2(x0, y0), pos2(x1.min(w).max(x0 + 1.0), y1.min(h).max(y0 + 1.0)))
-    };
-    let content = if sidebar_shown { INSET + SIDEBAR_WIDTH + INSET } else { INSET };
+    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| kept_inside(size, [x0, y0, x1, y1]);
+    let content = content_left(sidebar_shown);
     // Human: on a Mac the traffic lights sit at the window's top left, where the sidebar is when it is shown.
     let bar_left = if cfg!(target_os = "macos") && !sidebar_shown { content + theme::TRAFFIC_LIGHT_SPACE } else { content };
-    let status_top = h - INSET - STATUS_HEIGHT;
+    let status_top = status_top(size);
     let mut wants = Vec::new();
     if sidebar_shown {
         wants.push(Want { id: SIDEBAR, rect: rect(INSET, INSET, INSET + SIDEBAR_WIDTH, h - INSET), radius: RADIUS_PANE, surface: Surface::Sidebar });
@@ -51,15 +67,17 @@ pub fn wants(size: Vec2, sidebar_shown: bool) -> Vec<Want> {
             radius: BAR_HEIGHT / 2.0,
             surface: Surface::Capsule,
         },
-        Want {
-            id: PANEL,
-            rect: rect(content, INSET + BAR_HEIGHT + INSET, w - INSET, status_top - INSET),
-            radius: RADIUS_PANEL,
-            surface: Surface::Panel,
-        },
         Want { id: STATUS, rect: rect(content, status_top, w - INSET, h - INSET), radius: RADIUS_PANEL, surface: Surface::StatusBar },
     ]);
     wants
+}
+
+/// The frosted panel that holds a screen, in a window of `size` points: below the top row, above the status bar,
+/// past the sidebar when `sidebar_shown`. Kept inside the window with at least a point a side. Its corners are
+/// [`RADIUS_PANEL`].
+#[must_use]
+pub fn panel_rect(size: Vec2, sidebar_shown: bool) -> Rect {
+    kept_inside(size, [content_left(sidebar_shown), INSET + BAR_HEIGHT + INSET, size.x - INSET, status_top(size) - INSET])
 }
 
 /// The room of the title in the top row whose sidebar button is at `toggle`: the title's text starts at its left
@@ -83,15 +101,23 @@ pub struct Shown<'a> {
     pub mode: Mode,
     /// The backdrop's key, named in the status bar.
     pub backdrop: &'a str,
+    /// The frosted panel's sheet, from the baker; `None` before it has one, when the panel is not painted.
+    pub sheet: Option<Sheet>,
 }
 
-/// Draws the shell's text, icons and buttons over the pictures of `wants` (from [`wants`] for this frame).
-/// A press on the sidebar button flips `sidebar_shown`; the new layout is drawn from the next frame on.
+/// Paints the frosted panel and draws the shell's text, icons and buttons over it and over the pictures of
+/// `wants` (from [`wants`] for this frame and `sidebar_shown`). A press on the sidebar button flips
+/// `sidebar_shown`; the new layout is drawn from the next frame on.
 pub fn draw(ui: &mut Ui, wants: &[Want], sidebar_shown: &mut bool, shown: Shown<'_>) {
     let palette = theme::palette(shown.mode);
     let at = |id: &str| wants.iter().find(|want| want.id == id).map(|want| want.rect);
-    let (Some(toggle), Some(panel), Some(status)) = (at(SIDEBAR_TOGGLE), at(PANEL), at(STATUS)) else { return };
+    let (Some(toggle), Some(status)) = (at(SIDEBAR_TOGGLE), at(STATUS)) else { return };
     let window = ui.ctx().content_rect();
+    let panel = panel_rect(window.size(), *sidebar_shown);
+    // Painted first, so everything else lies over it; over the window as the baker's wallpaper lies.
+    if let Some(sheet) = &shown.sheet {
+        frost::paint(ui.painter(), Rect::from_min_size(Pos2::ZERO, window.size()), panel, RADIUS_PANEL, sheet);
+    }
 
     // The empty part of the top row moves the window, as the title bar it replaces did; drawn first, so the
     // buttons over it take their own presses.
@@ -303,23 +329,38 @@ mod tests {
         assert_eq!(by("sidebar").rect, egui::Rect::from_min_size(egui::pos2(12.0, 12.0), egui::vec2(256.0, 876.0)));
         assert_eq!((by("sidebar").radius, by("sidebar").surface), (20.0, Surface::Sidebar));
         assert_eq!(by("status").rect, egui::Rect::from_min_size(egui::pos2(280.0, 856.0), egui::vec2(1148.0, 32.0)));
-        assert_eq!(by("panel").rect.min, egui::pos2(280.0, 60.0));
-        assert_eq!(by("panel").rect.max, egui::pos2(1428.0, 844.0));
-        assert_eq!((by("panel").radius, by("panel").surface), (16.0, Surface::Panel));
         assert_eq!(by("sidebar-toggle").rect, egui::Rect::from_min_size(egui::pos2(280.0, 12.0), egui::vec2(36.0, 36.0)));
+        let panel = panel_rect(egui::vec2(1440.0, 900.0), true);
+        assert_eq!(panel.min, egui::pos2(280.0, 60.0));
+        assert_eq!(panel.max, egui::pos2(1428.0, 844.0));
+    }
+
+    #[test]
+    fn the_shell_wants_its_glass_panes_only() {
+        for shown in [true, false] {
+            let wants = wants(egui::vec2(1440.0, 900.0), shown);
+            assert!(wants.iter().all(|w| w.surface.is_glass()), "{wants:?}");
+            assert!(wants.iter().all(|w| w.id != "panel"));
+            assert_eq!(wants.len(), if shown { 3 } else { 2 });
+        }
     }
 
     #[test]
     fn without_the_sidebar_the_content_takes_its_room() {
         let wants = wants(egui::vec2(1440.0, 900.0), false);
         assert!(wants.iter().all(|w| w.id != "sidebar"));
-        assert_eq!(wants.iter().find(|w| w.id == "panel").unwrap().rect.min.x, 12.0);
+        assert_eq!(panel_rect(egui::vec2(1440.0, 900.0), false).min.x, 12.0);
+        assert_eq!(panel_rect(egui::vec2(1440.0, 900.0), false).max, panel_rect(egui::vec2(1440.0, 900.0), true).max);
     }
 
     #[test]
     fn a_tiny_window_gives_no_pane_with_negative_size() {
         for size in [egui::vec2(0.0, 0.0), egui::vec2(100.0, 40.0)] {
             assert!(wants(size, true).iter().all(|w| w.rect.width() > 0.0 && w.rect.height() > 0.0));
+            for shown in [true, false] {
+                let panel = panel_rect(size, shown);
+                assert!(panel.width() > 0.0 && panel.height() > 0.0, "{panel:?} in {size:?}");
+            }
         }
     }
 }

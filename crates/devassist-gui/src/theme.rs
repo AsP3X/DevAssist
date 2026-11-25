@@ -41,18 +41,9 @@ pub const ICON: f32 = 16.0;
 pub const BACKDROP_BLUR: f32 = 24.0;
 /// How strong the quiet text colour is, of the full text colour.
 pub const QUIET_OPACITY: f32 = 0.74;
-/// How long the window must be left alone after a resize before its glass is redrawn at the new size.
-pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 /// How far up from the window's bottom the veil keeps its lower strength, as a share of the height; above, it
 /// rises evenly to its strength at the top.
 pub const VEIL_KNEE: f32 = 0.45;
-/// How many pixels of a blurred picture one standard deviation of its blur spans: a blurred picture holds no
-/// detail finer than its blur, so it is made only this fine.
-pub const COARSE_SIGMA_PX: f32 = 4.0;
-/// The fewest pixels a coarse picture has along the window's shorter side.
-pub const COARSE_LEAST_PIXELS: f32 = 8.0;
-/// A pane's picture that no frame has wanted for this many frames is dropped.
-pub const PICTURE_KEEP_FRAMES: u64 = 120;
 /// The width of one of the window's own caption buttons.
 pub const CAPTION_BUTTON: f32 = 40.0;
 /// The room kept at the left of the top bar for the traffic lights on macOS.
@@ -89,9 +80,22 @@ pub const TITLE_ROOM: f32 = 472.0;
 pub const PANEL_TEXT_INSET: f32 = 8.0;
 /// The room at either end of the status bar before its text.
 pub const STATUS_PADDING: f32 = 16.0;
+
+// Tuning, not design: how fine, how long and when the window makes and keeps its pictures. These set the work
+// and memory the glass takes, not the design's look.
+
+/// How many pixels of a blurred picture one standard deviation of its blur spans: a blurred picture holds no
+/// detail finer than its blur, so it is made only this fine.
+pub const COARSE_SIGMA_PX: f32 = 4.0;
+/// The fewest pixels a coarse picture has along the window's shorter side.
+pub const COARSE_LEAST_PIXELS: f32 = 8.0;
+/// A pane's picture that no frame has wanted for this many frames is dropped.
+pub const PICTURE_KEEP_FRAMES: u64 = 120;
 /// How many frames a `--screenshot` run draws before it takes the picture (fonts, layout and the glass have
 /// settled by then).
 pub const FRAMES_BEFORE_SHOT: u64 = 120;
+/// How long the window must be left alone after a resize before its glass is redrawn at the new size.
+pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 
 /// Whether the window is drawn light or dark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -139,8 +143,6 @@ pub struct Palette {
     pub danger_tint: Color32,
     /// Text that reports success.
     pub ok: Color32,
-    /// The colour the backdrop's wash starts from.
-    pub wash_base: Color32,
     /// The colour of the veil laid over the backdrop.
     pub veil: Color32,
 }
@@ -163,7 +165,6 @@ pub fn palette(mode: Mode) -> Palette {
             danger: rgb(0xb3, 0x26, 0x1e),
             danger_tint: rgba(0xb3, 0x26, 0x1e, 0x1a),
             ok: rgb(0x1c, 0x6b, 0x3a),
-            wash_base: rgb(0xdf, 0xe8, 0xf5),
             veil: rgb(0xff, 0xff, 0xff),
         },
         Mode::Dark => Palette {
@@ -178,7 +179,6 @@ pub fn palette(mode: Mode) -> Palette {
             danger: rgb(0xff, 0xb9, 0xb1),
             danger_tint: rgba(0x6b, 0x1d, 0x18, 0xcc),
             ok: rgb(0x77, 0xdb, 0xa0),
-            wash_base: rgb(0x0b, 0x14, 0x22),
             veil: rgb(0x06, 0x0d, 0x18),
         },
     }
@@ -228,6 +228,21 @@ pub enum Surface {
     Panel,
 }
 
+impl Surface {
+    /// Every surface.
+    pub const ALL: [Surface; 4] = [Surface::Sidebar, Surface::Capsule, Surface::StatusBar, Surface::Panel];
+
+    /// Whether the surface is glass, whose panes are baked into pictures of their own; a frosted one is drawn
+    /// from the baker's sheet instead ([`crate::frost`]).
+    #[must_use]
+    pub fn is_glass(self) -> bool {
+        match self {
+            Surface::Sidebar | Surface::Capsule | Surface::StatusBar => true,
+            Surface::Panel => false,
+        }
+    }
+}
+
 /// The material of `surface` in `mode`, as the design document writes it.
 fn material_value(surface: Surface, mode: Mode) -> Value {
     let appearance = match mode {
@@ -275,8 +290,6 @@ mod tests {
         assert_eq!(dark.danger, Color32::from_rgb(0xff, 0xb9, 0xb1));
         assert_eq!(light.ok, Color32::from_rgb(0x1c, 0x6b, 0x3a));
         assert_eq!(dark.ok, Color32::from_rgb(0x77, 0xdb, 0xa0));
-        assert_eq!(light.wash_base, Color32::from_rgb(0xdf, 0xe8, 0xf5));
-        assert_eq!(dark.wash_base, Color32::from_rgb(0x0b, 0x14, 0x22));
         assert_eq!(light.veil, Color32::from_rgb(0xff, 0xff, 0xff));
         assert_eq!(dark.veil, Color32::from_rgb(0x06, 0x0d, 0x18));
         assert_eq!(light.selection, Color32::from_rgba_unmultiplied(0, 0, 0, 0x1f));
@@ -319,11 +332,21 @@ mod tests {
         assert!(!params(Surface::Panel, Mode::Light, (1148.0, 600.0)).glass);
         assert!(params(Surface::Sidebar, Mode::Dark, size).dark);
         assert!(!params(Surface::Sidebar, Mode::Light, size).dark);
-        for surface in [Surface::Sidebar, Surface::Capsule, Surface::StatusBar, Surface::Panel] {
+        for surface in Surface::ALL {
             for mode in [Mode::Light, Mode::Dark] {
                 assert!(Material::read(&material_value(surface, mode)).is_some(), "{surface:?} {mode:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_surface_is_baked_exactly_when_its_material_is_glass() {
+        for surface in Surface::ALL {
+            for mode in [Mode::Light, Mode::Dark] {
+                assert_eq!(surface.is_glass(), params(surface, mode, (300.0, 200.0)).glass, "{surface:?} {mode:?}");
+            }
+        }
+        assert!(!Surface::Panel.is_glass());
     }
 
     #[test]

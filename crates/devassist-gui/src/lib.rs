@@ -4,6 +4,7 @@
 pub mod app;
 pub mod assets;
 pub mod baker;
+pub mod frost;
 pub mod launch;
 pub mod logger;
 pub mod screenshot;
