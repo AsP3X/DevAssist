@@ -8,8 +8,8 @@
 
 ## Checklist
 
-- [ ] `cargo fmt --check` passes
-- [ ] `cargo clippy --all-targets --locked -- -D warnings` passes
-- [ ] `cargo test --locked` passes
+- [ ] `cargo fmt --all --check` passes
+- [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings` passes
+- [ ] `cargo test --workspace --locked` passes
 - [ ] Tests cover the change
 - [ ] `CHANGELOG.md` has a line under "Unreleased", if users will notice the change
