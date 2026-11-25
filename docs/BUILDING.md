@@ -6,9 +6,9 @@
 - [Git](https://git-scm.com/) on your `PATH`. The app runs `git`, and so do
   the tests.
 
-Everything else comes from crates.io, apart from the window's forks (below). One crate (`ring`, for TLS) compiles C
-code, which uses the C compiler the Rust toolchain already requires: the MSVC
-build tools on Windows.
+Everything else comes from crates.io, apart from the window's forks (below).
+One crate (`ring`, for TLS) compiles C code, which uses the C compiler the
+Rust toolchain already requires: the MSVC build tools on Windows.
 
 ## Build and run
 
@@ -37,10 +37,12 @@ installers or the release downloads.
 cargo run -p devassist-gui
 ```
 
-The first build fetches the window's dependencies. They include forks from
-GitHub, one of the egui crates and one of winit, pinned by commit in the
-`[patch.crates-io]` table of the root `Cargo.toml`. The glass needs a GPU
-adapter. Without one, the window draws frosted panes instead.
+The first build fetches the window's dependencies. They include two fork
+repositories from GitHub, a fork of egui (eight crates) and a fork of winit,
+pinned by commit in the `[patch.crates-io]` table of the root `Cargo.toml`.
+The window draws through wgpu and needs a wgpu adapter to open at all.
+When the glass shader cannot run on it, the window draws its glass panes
+frosted instead.
 
 | Option | What it does |
 |---|---|
@@ -54,7 +56,10 @@ adapter. Without one, the window draws frosted panes instead.
 At start the window reads `theme`, `backdrop` and `blur` from the settings
 file. It cannot change them yet. A settings file with a mistake makes the
 window print one line on standard error and open with the default look. A
-wrong option prints the usage line.
+wrong option prints the usage line. Warnings and errors, such as the glass
+falling back to frost or a `--screenshot` that could not be written, go to
+standard error. Set `DEVASSIST_LOG=info` to see the info lines too, such as
+how long each bake of the glass took.
 
 To make a picture of the window, give it a file name. This opens the window
 off screen for a moment and then ends:

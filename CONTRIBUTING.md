@@ -69,9 +69,10 @@ core do not change.
   reason = "...")]` on one item. Never silence `dead_code`.
 - No `unwrap`, `expect` or `panic!` outside tests.
 - Every public item has a doc comment.
-- Every dependency these crates add has an exact version pin (`=x.y.z`). The
-  egui crates and winit come from the forks named in the root `Cargo.toml`,
-  and `wgpu` stays at the version eframe uses.
+- Every dependency these crates add has an exact version pin (`=x.y.z`),
+  except the forked egui crates, which are pinned by commit. The egui crates
+  and winit come from the forks named in the root `Cargo.toml`, and `wgpu`
+  stays at the version eframe uses.
 - `crates/devassist-gui/src/theme.rs` holds every colour, radius, size and
   duration. A number that is a design decision does not belong in another
   file.

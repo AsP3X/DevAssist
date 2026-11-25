@@ -81,6 +81,10 @@ What changed in each version of DevAssist. The format follows
   file.
 - Internal: the logic is a crate of its own, `devassist-core`, as the base for
   a window.
+- A settings file that is a link (to a dotfiles folder, say) stays a link
+  when DevAssist saves: the file it points to is written. A link into a folder
+  DevAssist may not write to now makes the save fail, where before the link
+  was replaced by a file.
 
 ## [0.6.0] - 2026-11-24
 
