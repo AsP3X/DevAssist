@@ -512,8 +512,10 @@ name = "devassist-gui"
 version = "0.6.0"
 dependencies = [
  "devassist-core",
+ "devassist-glass",
  "egui",
  "image",
+ "serde_json",
 ]
 
 [[package]]

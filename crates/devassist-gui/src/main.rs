@@ -1,8 +1,8 @@
 //! The `DevAssist` window.
 
-mod assets;
-
 use std::process::ExitCode;
+
+use devassist_gui::assets;
 
 fn main() -> ExitCode {
     match assets::check() {
