@@ -29,6 +29,8 @@ pub const OPEN_LIMIT: usize = 8;
 /// How long the progress dialog stays after a run that went well.
 #[doc(hidden)]
 pub const JOB_LINGER: Duration = Duration::from_millis(1200);
+/// What the status line says when held work was asked for (see `Repos::hold_work`).
+pub const HELD: &str = "This is a demo. Nothing is run or changed.";
 /// How the status line starts while an automatic pull runs.
 const WATCH_LABEL: &str = "Auto-pull: checking";
 
@@ -577,8 +579,9 @@ pub struct Repos {
     /// When the next automatic pull is due.
     #[doc(hidden)]
     pub watch_due: Instant,
-    /// No automatic pull starts, whatever is due: set by `reading`.
-    watch_held: bool,
+    /// Nothing runs and nothing is written: set by `hold_work`, and by
+    /// `reading` once its first read has started.
+    work_held: bool,
     /// What the status line said before an automatic pull took it over.
     /// A pull that brings nothing puts it back.
     watch_status: Option<(String, bool)>,
@@ -632,9 +635,37 @@ impl Repos {
     /// of the window.
     pub fn reading(settings: Settings) -> Self {
         let mut app = Self::empty(settings);
-        app.watch_held = true;
+        // The first read runs as it always did, then everything is held.
         app.reload_lists(false, false);
+        app.hold_work();
         app
+    }
+
+    /// Holds all work from now on, for a run that only shows: nothing is
+    /// started or queued, nothing is fetched or pulled, GitHub is not
+    /// asked, no folder, page or clipboard is touched, and the settings
+    /// file is not written. What was asked for says `HELD` on the status
+    /// line. Menus, dialogs, ticks, the highlight, sort, filter, folding
+    /// and groups work as always, and the local read of the rows goes on.
+    pub fn hold_work(&mut self) {
+        self.work_held = true;
+        self.queue.clear();
+        self.lookup_due = None;
+        self.fetch_after_read = false;
+    }
+
+    /// Whether `hold_work` holds all work.
+    pub fn work_held(&self) -> bool {
+        self.work_held
+    }
+
+    /// When work is held, says so on the status line and returns true:
+    /// the caller then does nothing.
+    fn held(&mut self) -> bool {
+        if self.work_held {
+            self.notice(HELD, false);
+        }
+        self.work_held
     }
 
     /// A tool that reads no folder and calls no network.
@@ -701,7 +732,7 @@ impl Repos {
             pull_requests: settings.pull_requests,
             // The first pull runs as soon as the startup check is done.
             watch_due: Instant::now(),
-            watch_held: false,
+            work_held: false,
             watch_status: None,
             pulls: HashMap::new(),
             pulls_generation: 0,
@@ -1164,6 +1195,9 @@ impl Repos {
 
     /// Opens the folder with the files of the highlighted fork.
     pub fn open_fork_folder(&mut self) {
+        if self.held() {
+            return;
+        }
         let Some((fork, dest)) = self
             .forks
             .as_ref()
@@ -1189,6 +1223,9 @@ impl Repos {
     }
 
     pub fn open_fork_on_github(&mut self) {
+        if self.held() {
+            return;
+        }
         let Some(fork) = self.forks.as_ref().and_then(|view| view.chosen().cloned()) else {
             return;
         };
@@ -1258,7 +1295,7 @@ impl Repos {
     /// Space can be pressed again. On a group's header it ticks the whole
     /// group, or unticks it when all of it is ticked.
     pub fn toggle_list_mark(&mut self) {
-        let names = self.current_names();
+        let names = self.list_names();
         let Some(row) = self
             .selected
             .clone()
@@ -1277,7 +1314,7 @@ impl Repos {
     /// whole group, or unticks it when all of it is ticked. A key that is
     /// not a row changes nothing.
     pub fn toggle_mark_of(&mut self, row: &str) {
-        if !self.current_names().iter().any(|name| name == row) {
+        if !self.list_names().iter().any(|name| name == row) {
             return;
         }
         if let Some(group) = row.strip_prefix(GROUP_KEY) {
@@ -1307,7 +1344,7 @@ impl Repos {
     /// group's key). Only a row the list shows can be picked: an unknown
     /// key, or one the filter or a folded group hides, changes nothing.
     pub fn pick(&mut self, key: &str) {
-        if self.current_names().iter().any(|name| name == key) {
+        if self.list_names().iter().any(|name| name == key) {
             self.selected = Some(key.to_string());
         }
     }
@@ -1613,6 +1650,9 @@ impl Repos {
     }
 
     fn open_on_github(&mut self) {
+        if self.held() {
+            return;
+        }
         let pages: Vec<String> = self
             .chosen_repos()
             .into_iter()
@@ -1646,6 +1686,9 @@ impl Repos {
 
     /// Puts the paths of the chosen repositories on the clipboard, one a line.
     fn copy_paths(&mut self) {
+        if self.held() {
+            return;
+        }
         let paths: Vec<String> = self
             .chosen_repos()
             .into_iter()
@@ -1961,6 +2004,10 @@ impl Repos {
         let checkouts = &self.checkouts;
         self.watched
             .retain(|path| checkouts.iter().any(|known| paths::same_path(known, path)));
+        // Held, what changed stays in memory; nobody asked for this write.
+        if self.work_held {
+            return;
+        }
         let saved = self.saved();
         if let Err(err) = self.write_settings(&self.config_path.clone(), saved) {
             self.notice(err, true);
@@ -2255,12 +2302,19 @@ impl Repos {
         }
     }
 
+    /// The keys of the list that is on screen: Add's ids, or the
+    /// overview's rows.
     fn current_names(&self) -> Vec<String> {
         if self.mode == Mode::Add {
             self.add_list().into_iter().map(|repo| repo.id()).collect()
         } else {
-            self.rows().iter().map(Row::key).collect()
+            self.list_names()
         }
+    }
+
+    /// The keys of the overview's rows, whatever is open over it.
+    fn list_names(&self) -> Vec<String> {
+        self.rows().iter().map(Row::key).collect()
     }
 
     pub fn ensure_selection(&mut self) {
@@ -2286,7 +2340,7 @@ impl Repos {
                     None => self.installed.iter().any(|repo| &repo.folder == name),
                 });
         if !still_here {
-            self.selected = self.current_names().into_iter().next();
+            self.selected = self.list_names().into_iter().next();
         }
     }
 
@@ -2300,7 +2354,7 @@ impl Repos {
     }
 
     fn snap_visible_selection(&mut self) {
-        let names = self.current_names();
+        let names = self.list_names();
         list::snap(&mut self.selected, &names);
     }
 
@@ -2334,6 +2388,9 @@ impl Repos {
     /// its repositories are already at hand.
     fn plan_lookup(&mut self) {
         self.lookup_due = None;
+        if self.work_held {
+            return;
+        }
         let Some(query) = self.add_query() else {
             return;
         };
@@ -2366,6 +2423,9 @@ impl Repos {
     }
 
     fn start_lookup(&mut self, owner: String) {
+        if self.work_held {
+            return;
+        }
         let key = owner.to_ascii_lowercase();
         self.lookup_running = Some(key.clone());
         self.worker.spawn(move |tx| {
@@ -2432,6 +2492,9 @@ impl Repos {
     }
 
     pub fn save_settings(&mut self) {
+        if self.held() {
+            return;
+        }
         let Some(form) = self.form.as_mut() else {
             return;
         };
@@ -2494,6 +2557,9 @@ impl Repos {
     }
 
     pub fn open_selected(&mut self) {
+        if self.held() {
+            return;
+        }
         let folders = self.chosen();
         if folders.is_empty() {
             self.notice("Select a repository first.", true);
@@ -2820,6 +2886,9 @@ impl Repos {
     /// When all of them are watched already it stops; otherwise the rest
     /// join, and everything watched is pulled right away.
     pub fn toggle_watch(&mut self) {
+        if self.held() {
+            return;
+        }
         let repos: Vec<(String, PathBuf)> = self
             .chosen_repos()
             .iter()
@@ -2861,7 +2930,7 @@ impl Repos {
     /// line says what came in.
     fn start_due_watch(&mut self) -> bool {
         if self.watched.is_empty()
-            || self.watch_held
+            || self.work_held
             || self.busy
             || self.fetching
             || self.status_pending > 0
@@ -3370,6 +3439,9 @@ impl Repos {
 
     /// Runs `task` now, or queues it behind whatever is running.
     fn submit(&mut self, task: Queued) {
+        if self.held() {
+            return;
+        }
         if !(self.busy || self.fetching) && self.queue.is_empty() {
             self.dialog_hidden = false;
             self.begin(task);
@@ -3403,7 +3475,7 @@ impl Repos {
     /// failed stays on screen first: the queue waits until its dialog is
     /// closed.
     pub fn start_queued(&mut self) -> bool {
-        if self.busy || self.fetching || self.queue.is_empty() {
+        if self.work_held || self.busy || self.fetching || self.queue.is_empty() {
             return false;
         }
         let failed_on_screen = self.mode == Mode::Progress
@@ -3516,6 +3588,8 @@ impl Repos {
     }
 
     pub fn reload_lists(&mut self, keep_status: bool, fetch: bool) {
+        // Held, it only reads what is on disk.
+        let fetch = fetch && !self.work_held;
         if self.busy || self.fetching {
             self.notice("Wait for the current Git command to finish.", true);
             return;
@@ -3545,6 +3619,7 @@ impl Repos {
     /// nothing else is going on.
     fn startup_fetch_due(&mut self) -> bool {
         std::mem::take(&mut self.fetch_after_read)
+            && !self.work_held
             && !self.busy
             && !self.installed.is_empty()
             && !process::was_cancelled()
@@ -3580,6 +3655,9 @@ impl Repos {
     /// repository has, by state. Needs a sign-in; without one the column
     /// stays empty.
     fn reload_pull_counts(&mut self) {
+        if self.work_held {
+            return;
+        }
         let mut repos: Vec<(String, String)> = Vec::new();
         for repo in &self.installed {
             if repo.owner.is_empty() || repo.repo.is_empty() {
@@ -3615,6 +3693,9 @@ impl Repos {
     }
 
     fn reload_github_only(&mut self) {
+        if self.work_held {
+            return;
+        }
         self.remote_generation += 1;
         self.remotes_state = RemoteState::Loading;
         let generation = self.remote_generation;
@@ -3630,6 +3711,8 @@ impl Repos {
     }
 
     fn spawn_status(&mut self, generation: u64, fetch: bool) {
+        // Held, every status read is a local one.
+        let fetch = fetch && !self.work_held;
         let repos: Vec<(String, PathBuf)> = self
             .installed
             .iter()
@@ -4893,5 +4976,181 @@ mod tests {
         // A finished run is not busy any more.
         app.job.as_mut().unwrap().finish(Ok("done".into()), false);
         assert_eq!(app.job_share_of("api"), None);
+    }
+
+    #[test]
+    fn the_overview_keeps_its_own_list_while_add_is_open() {
+        let mut app = Repos::empty(test_settings());
+        for name in ["api", "web"] {
+            app.installed.push(installed("acme", name));
+        }
+        // Add lists ids of its own: "acme/web" is no row of the overview.
+        app.remotes = vec![remote("acme", "web"), remote("acme", "api")];
+        app.remotes_state = RemoteState::Ready;
+        app.selected = Some("api".into());
+        app.open_add();
+        assert!(app.mode == Mode::Add);
+        app.pick("web");
+        assert_eq!(app.selected.as_deref(), Some("web"));
+        app.toggle_mark_of("api");
+        assert!(app.is_marked_local("api"));
+        app.pick("api");
+        app.set_list_filter("we");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some("web"),
+            "a row key, never an id"
+        );
+        // Add's own highlight is Add's.
+        app.pick("acme/web");
+        assert_eq!(app.selected.as_deref(), Some("web"));
+    }
+
+    /// A temporary folder that stands for a checkout, and a settings file
+    /// beside it that must not be written.
+    fn held_app(name: &str) -> (Repos, PathBuf) {
+        let root = scratch(name);
+        let path = root.join("tool");
+        std::fs::create_dir_all(&path).unwrap();
+        let settings = Settings {
+            config_path: root.join("devassist.toml"),
+            ..test_settings()
+        };
+        let mut app = Repos::empty(settings);
+        let mut repo = installed("acme", "tool");
+        repo.path = path.clone();
+        app.checkouts.push(path.clone());
+        app.installed.push(repo);
+        app.watched = vec![path.clone()];
+        app.watch_due = Instant::now();
+        app.selected = Some("tool".into());
+        app.remotes_state = RemoteState::Ready;
+        app.hold_work();
+        (app, root)
+    }
+
+    #[test]
+    fn held_work_starts_nothing_and_says_so() {
+        let (mut app, root) = held_app("held");
+        assert!(app.work_held());
+        assert!(!Repos::empty(test_settings()).work_held());
+        let idle = |app: &Repos, what: &str| {
+            assert!(!app.busy, "{what}: busy");
+            assert!(app.queue.is_empty(), "{what}: queued");
+            assert!(!app.fetching, "{what}: fetching");
+            assert!(app.lookup_due.is_none() && app.lookup_running.is_none());
+            assert!(!app.waiting(), "{what}: waiting");
+        };
+        /// What a person asks for, by name.
+        type Call = (&'static str, fn(&mut Repos));
+        let calls: Vec<Call> = vec![
+            ("update_all", Repos::update_all),
+            ("update_chosen", Repos::update_chosen),
+            ("update_one", Repos::update_one),
+            ("refresh", Repos::refresh),
+            ("toggle_watch", Repos::toggle_watch),
+            ("open_selected", Repos::open_selected),
+            ("copy_paths", |app| app.run_menu(MenuItem::CopyPath)),
+            ("open_on_github", |app| app.run_menu(MenuItem::Github)),
+            ("pull requests", |app| app.run_menu(MenuItem::PullRequests)),
+            ("forks", |app| app.run_menu(MenuItem::Forks)),
+            ("remove", |app| {
+                app.begin_remove();
+                assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
+                app.confirm_remove();
+            }),
+            ("import", |app| {
+                app.open_import();
+                let dir = app.clone_dir.clone();
+                app.use_folder(dir);
+            }),
+            ("move", |app| {
+                app.run_migrate(MigrateItem::Folder);
+                assert!(app.mode == Mode::Path);
+                app.use_folder(std::env::temp_dir());
+            }),
+            ("clone", |app| {
+                app.prompt =
+                    Some(Purpose::Clone(vec![remote("acme", "new")]).prompt(&app.clone_dir));
+                app.use_folder(std::env::temp_dir().join("devassist-held-clone"));
+            }),
+            ("service", |app| {
+                app.run_migrate(MigrateItem::Service);
+                assert!(app.mode == Mode::Service);
+                app.service_prompt.as_mut().unwrap().input =
+                    "https://example.invalid/acme/tool.git".into();
+                app.accept_service();
+            }),
+            ("save_settings", |app| {
+                app.open_settings(false);
+                app.save_settings();
+                assert!(app.form.is_some(), "the dialog stays open");
+                app.close_settings();
+            }),
+            ("run Refresh", |app| app.run(Action::Refresh)),
+        ];
+        for (what, call) in calls {
+            app.notice("before", false);
+            call(&mut app);
+            assert_eq!(app.status, HELD, "{what}");
+            assert!(!app.status_error, "{what}");
+            idle(&app, what);
+        }
+        // The watch is as it was, and nothing pulls it, though it is due.
+        assert_eq!(app.watched_count(), 1);
+        app.notice("before", false);
+        assert!(!app.drain());
+        assert!(!app.start_due_watch());
+        assert_eq!(app.status, "before", "the held watch says nothing");
+        // Typing in Add asks GitHub nothing.
+        app.open_add();
+        app.add_filter = "someone/".into();
+        app.note_add_filter_changed();
+        app.retry_add();
+        idle(&app, "add");
+        assert!(app.installed[0].path.exists(), "the folder is still there");
+        assert!(app.job.is_none());
+        assert!(
+            !root.join("devassist.toml").exists(),
+            "the settings file is not written"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn held_work_still_opens_and_closes_what_a_person_looks_at() {
+        let (mut app, root) = held_app("held-looks");
+        app.enter_row();
+        assert!(app.mode == Mode::Menu);
+        app.close_menu();
+        assert!(app.mode == Mode::List);
+        app.begin_remove();
+        assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
+        app.run(Action::Cancel);
+        assert!(app.mode == Mode::List);
+        app.toggle_mark_of("tool");
+        assert!(app.is_marked_local("tool"));
+        app.clear_marks();
+        app.toggle_sort();
+        app.open_group_prompt();
+        assert!(app.mode == Mode::Group);
+        app.group_prompt.as_mut().unwrap().input = "Tools".into();
+        app.accept_group();
+        assert_eq!(app.installed[0].group, "Tools");
+        assert_eq!(app.status, "tool is in Tools now.");
+        app.toggle_group("Tools");
+        assert_eq!(app.rows().len(), 1, "folded");
+        app.open_settings(false);
+        assert!(app.mode == Mode::Settings);
+        app.close_settings();
+        app.open_add();
+        assert!(app.mode == Mode::Add);
+        app.run(Action::Cancel);
+        assert!(app.mode == Mode::List);
+        assert!(
+            !root.join("devassist.toml").exists(),
+            "the settings file is not written"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
