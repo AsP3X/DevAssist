@@ -220,6 +220,8 @@ pub enum MenuItem {
     PullRequests,
     /// Clone every fork of the repositories into a folder beside each.
     Forks,
+    /// The overview of the forks that were cloned of one repository.
+    ShowForks,
     /// Bring every fork folder that is there up to date, whatever is
     /// selected.
     AllForks,
@@ -264,7 +266,7 @@ pub struct ServicePrompt {
 }
 
 impl MenuItem {
-    pub const ALL: [MenuItem; 11] = [
+    pub const ALL: [MenuItem; 12] = [
         MenuItem::Update,
         MenuItem::Open,
         MenuItem::Github,
@@ -272,6 +274,7 @@ impl MenuItem {
         MenuItem::CopyPath,
         MenuItem::Watch,
         MenuItem::PullRequests,
+        MenuItem::ShowForks,
         MenuItem::Forks,
         MenuItem::AllForks,
         MenuItem::Migrate,
@@ -285,6 +288,7 @@ impl MenuItem {
             (MenuItem::Watch, _) => "Auto-pull on or off",
             (MenuItem::PullRequests, _) => "Fetch the pull requests",
             (MenuItem::Forks, _) => "Clone the forks",
+            (MenuItem::ShowForks, _) => "Show the forks",
             (MenuItem::AllForks, _) => "Update all cloned forks",
             (MenuItem::Migrate, _) => "Migrate ▸",
             (MenuItem::Open, false) => "Open the folder",
@@ -304,7 +308,8 @@ impl MenuItem {
             MenuItem::Update => 'u',
             MenuItem::Watch => 'w',
             MenuItem::PullRequests => 'p',
-            MenuItem::Forks => 'f',
+            MenuItem::Forks => 'n',
+            MenuItem::ShowForks => 'f',
             MenuItem::AllForks => 'a',
             MenuItem::Migrate => 't',
             MenuItem::Open => 'o',
@@ -313,6 +318,103 @@ impl MenuItem {
             MenuItem::CopyPath => 'c',
             MenuItem::Remove => 'd',
         }
+    }
+}
+
+/// How the fork overview is sorted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkSort {
+    /// Forks with commits of their own first, the one furthest ahead on
+    /// top.
+    Changed,
+    /// By the date of the newest commit.
+    Newest,
+    Name,
+}
+
+impl ForkSort {
+    pub fn label(self) -> &'static str {
+        match self {
+            ForkSort::Changed => "most changes first",
+            ForkSort::Newest => "newest commit first",
+            ForkSort::Name => "by name",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            ForkSort::Changed => ForkSort::Newest,
+            ForkSort::Newest => ForkSort::Name,
+            ForkSort::Name => ForkSort::Changed,
+        }
+    }
+}
+
+/// The overview of the forks of one repository, which takes the place
+/// of the list of repositories while it is open.
+pub struct ForksView {
+    /// The repository they are forks of, by row name.
+    pub repo: String,
+    /// Where that repository is checked out.
+    path: PathBuf,
+    /// It on GitHub, as `owner/name`.
+    pub original: String,
+    /// The folder the forks are in.
+    pub dest: PathBuf,
+    pub forks: Vec<gitops::ForkInfo>,
+    /// The folder is being read.
+    pub loading: bool,
+    pub error: Option<String>,
+    /// The highlighted fork, by owner.
+    pub selected: Option<String>,
+    pub scroll: usize,
+    pub sort: ForkSort,
+    pub filter: String,
+    /// The filter is being typed.
+    pub filtering: bool,
+    /// Only forks with commits of their own are shown.
+    pub changed_only: bool,
+}
+
+impl ForksView {
+    /// The forks the list shows, in its order.
+    pub fn rows(&self) -> Vec<&gitops::ForkInfo> {
+        let filter = self.filter.trim().to_lowercase();
+        let mut rows: Vec<&gitops::ForkInfo> = self
+            .forks
+            .iter()
+            .filter(|fork| !self.changed_only || fork.folder)
+            .filter(|fork| {
+                filter.is_empty()
+                    || fork.owner.to_lowercase().contains(&filter)
+                    || fork.name.to_lowercase().contains(&filter)
+            })
+            .collect();
+        let name = |fork: &gitops::ForkInfo| fork.owner.to_lowercase();
+        match self.sort {
+            ForkSort::Name => rows.sort_by_key(|fork| name(fork)),
+            ForkSort::Newest => {
+                rows.sort_by_key(|fork| (std::cmp::Reverse(fork.date), name(fork)));
+            }
+            ForkSort::Changed => rows.sort_by_key(|fork| {
+                (
+                    !fork.folder,
+                    std::cmp::Reverse(if fork.folder { fork.ahead } else { None }),
+                    std::cmp::Reverse(fork.date),
+                    name(fork),
+                )
+            }),
+        }
+        rows
+    }
+
+    /// The highlighted fork, or the first one when none is.
+    pub fn chosen(&self) -> Option<&gitops::ForkInfo> {
+        let rows = self.rows();
+        self.selected
+            .as_ref()
+            .and_then(|owner| rows.iter().find(|fork| &fork.owner == owner).copied())
+            .or_else(|| rows.first().copied())
     }
 }
 
@@ -366,6 +468,11 @@ enum Msg {
         /// The ones that could not be pulled, each with the reason.
         failed: Vec<(String, String)>,
     },
+    /// The fork folder of the open fork overview was read.
+    Forks {
+        generation: u64,
+        result: Result<gitops::ForkList, String>,
+    },
     /// A clone landed here, or a checkout that was already here was found.
     Cloned(PathBuf),
     JobFinished(Result<String, String>),
@@ -411,6 +518,9 @@ pub struct App {
     pub service_prompt: Option<ServicePrompt>,
     /// The open actions menu.
     pub menu: Option<Menu>,
+    /// The open fork overview. It stays under the dialogs opened from it.
+    pub forks: Option<ForksView>,
+    forks_generation: u64,
     pub title: String,
     pub custom_title: Option<String>,
     pub config_path: PathBuf,
@@ -531,6 +641,8 @@ impl App {
             group_prompt: None,
             service_prompt: None,
             menu: None,
+            forks: None,
+            forks_generation: 0,
             title: settings.title,
             custom_title: settings.custom_title,
             config_path: settings.config_path,
@@ -983,7 +1095,190 @@ impl App {
             Mode::Menu => self.on_menu_key(key),
             Mode::Add => self.on_add_key(key, ctrl),
             Mode::Filter => self.on_filter_key(key),
+            Mode::List if self.forks.is_some() => self.on_forks_key(key),
             Mode::List => self.on_list_key(key, ctrl),
+        }
+    }
+
+    /// Opens the overview of the forks of the highlighted repository,
+    /// read from the folder they were cloned into.
+    fn open_forks(&mut self) {
+        self.mode = Mode::List;
+        let repo = self
+            .selected
+            .as_ref()
+            .filter(|_| self.marked.len() <= 1)
+            .and_then(|folder| {
+                let folder = self.marked.first().unwrap_or(folder);
+                self.installed.iter().find(|repo| &repo.folder == folder)
+            });
+        let Some(repo) = repo else {
+            self.notice("Highlight one repository to see its forks.", true);
+            return;
+        };
+        if !gitops::forks_cloned(&repo.path) {
+            self.notice(
+                format!(
+                    "The forks of {} are not cloned yet. Enter, then n clones them.",
+                    repo.folder
+                ),
+                true,
+            );
+            return;
+        }
+        self.forks = Some(ForksView {
+            repo: repo.folder.clone(),
+            path: repo.path.clone(),
+            original: format!("{}/{}", repo.owner, repo.repo),
+            dest: gitops::forks_folder(&repo.path).unwrap_or_default(),
+            forks: Vec::new(),
+            loading: false,
+            error: None,
+            selected: None,
+            scroll: 0,
+            sort: ForkSort::Changed,
+            filter: String::new(),
+            filtering: false,
+            changed_only: false,
+        });
+        self.load_forks();
+    }
+
+    /// Reads the fork folder of the open overview again, in the background.
+    fn load_forks(&mut self) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        view.loading = true;
+        view.error = None;
+        self.forks_generation += 1;
+        let generation = self.forks_generation;
+        let path = view.path.clone();
+        self.worker.spawn(move |tx| {
+            let result = gitops::list_forks(&path);
+            let _ = tx.send(Msg::Forks { generation, result });
+        });
+    }
+
+    fn close_forks(&mut self) {
+        self.forks = None;
+        self.forks_generation += 1;
+        self.mode = Mode::List;
+    }
+
+    fn on_forks_key(&mut self, key: KeyEvent) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        if view.filtering {
+            match key.code {
+                KeyCode::Esc => {
+                    view.filter.clear();
+                    view.filtering = false;
+                }
+                KeyCode::Enter | KeyCode::Down | KeyCode::Up => view.filtering = false,
+                KeyCode::Backspace => {
+                    view.filter.pop();
+                }
+                KeyCode::Char(ch) => view.filter.push(ch),
+                _ => {}
+            }
+            view.scroll = 0;
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_fork(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_fork(1),
+            KeyCode::PageUp => self.move_fork(-10),
+            KeyCode::PageDown => self.move_fork(10),
+            KeyCode::Home => self.move_fork(isize::MIN / 2),
+            KeyCode::End => self.move_fork(isize::MAX / 2),
+            KeyCode::Enter | KeyCode::Char('o') | KeyCode::Char('O') => self.open_fork_folder(),
+            KeyCode::Char('g') | KeyCode::Char('G') => self.open_fork_on_github(),
+            KeyCode::Char('u') | KeyCode::Char('U') => self.update_shown_forks(),
+            KeyCode::Char('r') | KeyCode::F(5) => self.load_forks(),
+            KeyCode::Char('l') | KeyCode::Char('L') => self.show_job(),
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                view.sort = view.sort.next();
+                view.scroll = 0;
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                view.changed_only = !view.changed_only;
+                view.scroll = 0;
+            }
+            KeyCode::Char('/') => {
+                view.filter.clear();
+                view.filtering = true;
+            }
+            KeyCode::Esc if !view.filter.is_empty() => view.filter.clear(),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Backspace | KeyCode::Char('q') => {
+                self.close_forks()
+            }
+            _ => {}
+        }
+    }
+
+    fn move_fork(&mut self, delta: isize) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        let names: Vec<String> = view
+            .rows()
+            .into_iter()
+            .map(|fork| fork.owner.clone())
+            .collect();
+        let delta = delta.clamp(-(names.len() as isize), names.len() as isize);
+        list::move_by(&mut view.selected, &names, delta);
+    }
+
+    /// Opens the folder with the files of the highlighted fork.
+    fn open_fork_folder(&mut self) {
+        let Some((fork, dest)) = self
+            .forks
+            .as_ref()
+            .and_then(|view| Some((view.chosen()?.clone(), view.dest.clone())))
+        else {
+            return;
+        };
+        if !fork.folder {
+            self.notice(
+                format!(
+                    "{} has no commits of its own, so it has no folder. g opens it on GitHub.",
+                    fork.owner
+                ),
+                true,
+            );
+            return;
+        }
+        let folder = dest.join(&fork.owner);
+        match open::folder(&folder) {
+            Ok(()) => self.notice(format!("Opened {}.", folder.display()), false),
+            Err(err) => self.notice(err, true),
+        }
+    }
+
+    fn open_fork_on_github(&mut self) {
+        let Some(fork) = self.forks.as_ref().and_then(|view| view.chosen().cloned()) else {
+            return;
+        };
+        if fork.gone {
+            self.notice(
+                format!("{}/{} is no longer on GitHub.", fork.owner, fork.name),
+                true,
+            );
+            return;
+        }
+        let page = format!("https://github.com/{}/{}", fork.owner, fork.name);
+        match open::url(&page) {
+            Ok(()) => self.notice(format!("Opened {page}."), false),
+            Err(err) => self.notice(err, true),
+        }
+    }
+
+    /// Fetches the forks of the repository whose overview is open.
+    fn update_shown_forks(&mut self) {
+        if let Some(repo) = self.forks.as_ref().map(|view| view.repo.clone()) {
+            self.submit(Queued::Forks(vec![repo]));
         }
     }
 
@@ -1001,6 +1296,7 @@ impl App {
             KeyCode::Left => self.fold_selected(true),
             KeyCode::Right => self.fold_selected(false),
             KeyCode::Char('m') | KeyCode::Char('M') => self.open_group_prompt(),
+            KeyCode::Char('f') | KeyCode::Char('F') => self.open_forks(),
             KeyCode::Char('a') => self.open_add(),
             KeyCode::Char('u') => self.update_chosen(),
             KeyCode::Char('U') => self.update_all(),
@@ -1379,6 +1675,7 @@ impl App {
             MenuItem::Watch => self.toggle_watch(),
             MenuItem::PullRequests => self.fetch_pull_requests_chosen(),
             MenuItem::Forks => self.clone_forks_chosen(),
+            MenuItem::ShowForks => self.open_forks(),
             MenuItem::AllForks => self.update_all_forks(),
             MenuItem::Migrate => {}
             MenuItem::Open => self.open_selected(),
@@ -1976,6 +2273,8 @@ impl App {
     fn wheel(&mut self, delta: isize) {
         if self.mode == Mode::Progress {
             self.scroll_job(-delta);
+        } else if self.forks.is_some() && self.mode == Mode::List {
+            self.move_fork(delta);
         } else {
             self.move_by(delta);
         }
@@ -2042,6 +2341,18 @@ impl App {
                 && now.duration_since(*at) < Duration::from_millis(400)
         });
         self.last_click = Some((name.clone(), now));
+        if self.mode == Mode::List
+            && let Some(view) = self.forks.as_mut()
+        {
+            if let Some(owner) = name.strip_prefix("fork:") {
+                view.selected = Some(owner.to_string());
+                view.filtering = false;
+                if double {
+                    self.open_fork_folder();
+                }
+            }
+            return;
+        }
         if self.mode == Mode::Menu {
             let index = name
                 .strip_prefix("menu:")
@@ -2087,6 +2398,15 @@ impl App {
     }
 
     pub fn run(&mut self, action: Action) {
+        // The buttons under the fork overview.
+        if self.forks.is_some() && self.mode == Mode::List {
+            match action {
+                Action::Cancel => return self.close_forks(),
+                Action::UpdateOne => return self.update_shown_forks(),
+                Action::Refresh => return self.load_forks(),
+                _ => {}
+            }
+        }
         match action {
             Action::Add => self.open_add(),
             Action::UpdateOne => self.update_chosen(),
@@ -2604,6 +2924,7 @@ impl App {
             let token = github::token();
             let mut fetched = 0;
             let mut kept = 0;
+            let mut gone = 0;
             let mut missed = 0;
             let mut failed = Vec::new();
             let mut last = None;
@@ -2616,14 +2937,18 @@ impl App {
                     Ok(None) => send(tx, JobEvent::Done(index, "no forks".into())),
                     Ok(Some((dest, saved))) => {
                         fetched += saved.fetched;
-                        kept += saved.unchanged;
+                        kept += saved.unchanged + saved.gone;
+                        gone += saved.gone;
                         missed += saved.failed.len();
                         let mut note = format!(
                             "{} forks, {} fetched, {} with a folder",
-                            saved.fetched + saved.unchanged,
+                            saved.fetched + saved.unchanged + saved.gone,
                             saved.fetched,
                             saved.folders
                         );
+                        if saved.gone > 0 {
+                            note.push_str(&format!(", {} gone from GitHub", saved.gone));
+                        }
                         if !saved.failed.is_empty() {
                             note.push_str(&format!(", {} not fetched", saved.failed.len()));
                         }
@@ -2646,15 +2971,20 @@ impl App {
                     failed.join(", ")
                 ));
             }
-            let missed = match missed {
+            let mut missed = match missed {
                 0 => String::new(),
                 count => format!(" {count} could not be fetched."),
             };
+            if gone > 0 {
+                missed.push_str(&format!(
+                    " {gone} are no longer on GitHub and were left as they are."
+                ));
+            }
             Ok(match (&last, work.len()) {
                 (None, _) => format!("{named} has no forks."),
                 (Some((dest, saved)), 1) => format!(
                     "Forks of {named}: {} in {}, {} fetched now, {} with changes and a folder. {} branches, {} pull requests.{missed}",
-                    saved.fetched + saved.unchanged,
+                    saved.fetched + saved.unchanged + saved.gone,
                     dest.display(),
                     saved.fetched,
                     saved.folders,
@@ -3651,6 +3981,22 @@ impl App {
                     self.pulls = counts.into_iter().collect();
                 }
             }
+            Msg::Forks { generation, result } => {
+                if generation != self.forks_generation {
+                    return;
+                }
+                if let Some(view) = self.forks.as_mut() {
+                    view.loading = false;
+                    match result {
+                        Ok(list) => {
+                            view.original = list.original;
+                            view.dest = list.dest;
+                            view.forks = list.forks;
+                        }
+                        Err(err) => view.error = Some(err),
+                    }
+                }
+            }
             Msg::Cloned(path) => {
                 if paths::push_path(&mut self.checkouts, path) {
                     self.save_config();
@@ -3677,6 +4023,8 @@ impl App {
                 self.load_rows();
                 self.prune_marks();
                 self.spawn_status(self.generation, false);
+                // A run may have fetched the forks that are on screen.
+                self.load_forks();
             }
         }
     }
@@ -4803,7 +5151,7 @@ mod tests {
         // A click on a line runs it too.
         app.selected = Some("web".into());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.click_row("menu:10".into());
+        app.click_row("menu:11".into());
         assert!(matches!(app.mode, Mode::ConfirmRemove { .. }));
     }
 
@@ -5085,10 +5433,105 @@ mod tests {
         app.busy = true;
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.mode == Mode::Menu);
-        press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+        press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
         assert!(app.mode == Mode::List);
         assert_eq!(labels(&app), ["fetch the forks of api"]);
         app.drop_queue();
+    }
+
+    fn fork(owner: &str, ahead: u32, date: i64, folder: bool) -> gitops::ForkInfo {
+        gitops::ForkInfo {
+            owner: owner.to_string(),
+            name: "web".to_string(),
+            branches: 2,
+            pulls: 1,
+            ahead: Some(ahead),
+            date,
+            folder,
+            gone: false,
+        }
+    }
+
+    #[test]
+    fn f_opens_the_overview_of_the_forks_and_esc_goes_back() {
+        let root = std::env::temp_dir().join(format!("devassist-forkview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = grouped_app();
+        app.selected = Some("web".into());
+        // Nothing is cloned: there is nothing to show.
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+        assert!(app.forks.is_none());
+        assert!(app.status.contains("not cloned yet"), "{}", app.status);
+
+        let web = app
+            .installed
+            .iter_mut()
+            .find(|repo| repo.folder == "web")
+            .unwrap();
+        web.path = root.join("web");
+        std::fs::create_dir_all(root.join("web-fork").join(".git")).unwrap();
+        press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+        let view = app.forks.as_ref().expect("the overview is open");
+        assert!(view.loading);
+        assert_eq!(view.repo, "web");
+        // What an earlier read found is not taken.
+        app.on_msg(Msg::Forks {
+            generation: app.forks_generation - 1,
+            result: Err("old".into()),
+        });
+        assert!(app.forks.as_ref().unwrap().loading);
+        app.on_msg(Msg::Forks {
+            generation: app.forks_generation,
+            result: Ok(gitops::ForkList {
+                original: "ada/web".into(),
+                dest: root.join("web-fork"),
+                forks: vec![
+                    fork("amy", 0, 50, false),
+                    fork("bob", 3, 10, true),
+                    fork("cy", 9, 20, true),
+                ],
+            }),
+        });
+        let owners = |app: &App| -> Vec<String> {
+            let view = app.forks.as_ref().unwrap();
+            view.rows().iter().map(|fork| fork.owner.clone()).collect()
+        };
+        let chosen = |app: &App| app.forks.as_ref().unwrap().chosen().unwrap().owner.clone();
+        assert!(!app.forks.as_ref().unwrap().loading);
+        // The forks with changes come first, the one furthest ahead on top.
+        assert_eq!(owners(&app), ["cy", "bob", "amy"]);
+        assert_eq!(chosen(&app), "cy");
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(chosen(&app), "bob");
+        press(&mut app, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(chosen(&app), "amy");
+        // A fork without changes has no folder to open.
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.status.contains("no folder"), "{}", app.status);
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(owners(&app), ["amy", "cy", "bob"]);
+        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(owners(&app), ["amy", "bob", "cy"]);
+        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+        assert_eq!(owners(&app), ["bob", "cy"]);
+        press(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_text(&mut app, "cy");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(owners(&app), ["cy"]);
+        // Esc first clears the filter, then goes back to the repositories.
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(owners(&app), ["bob", "cy"]);
+        // u fetches the forks of this repository, whatever is ticked.
+        app.busy = true;
+        press(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(labels(&app), ["fetch the forks of web"]);
+        assert!(app.forks.is_some());
+        app.drop_queue();
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.forks.is_none());
+        assert!(app.mode == Mode::List);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&app.config_path);
     }
 
     #[test]

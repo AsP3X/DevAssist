@@ -240,7 +240,7 @@ descriptions, comments and reviews are not.
 
 ## Cloning the forks
 
-**Clone the forks** in the actions menu (`Enter`, then `f`) asks GitHub for
+**Clone the forks** in the actions menu (`Enter`, then `n`) asks GitHub for
 every fork of the highlighted repository, and for the forks of those forks,
 and fetches them all into a folder beside the checkout: its name with `-fork`
 added. The forks of `D:\code\api` go into `D:\code\api-fork`. With several
@@ -312,6 +312,40 @@ A fork that could not be fetched is tried again every time. A pull request
 opened on a fork from a third repository is seen with the fork's next push
 or pull request.
 
+A fork that GitHub still lists but no longer has, because it was deleted or
+made private, is left out from then on: the run says so once and does not
+try it again. What was fetched from it stays, its branches and its folder
+too. Should it come back and change, it is fetched again.
+
+### Looking at the forks
+
+`f` on a repository opens the overview of its forks, once they are cloned.
+**Show the forks** in the actions menu does the same. It takes the place of
+the list of repositories and is read from the `-fork` folder, without asking
+GitHub.
+
+Each fork has a line: its owner and name, how many branches and pull requests
+were fetched from it, how many commits its furthest branch is ahead of the
+original's main branch, the date of its newest commit, and its state. The
+state is `changes, folder` for a fork with commits of its own, `no changes`
+for one that has none, and `gone from GitHub` for one that is no longer
+there. The heading counts them.
+
+| Key | What it does |
+|---|---|
+| `↑` `↓`, `j` `k`, `PgUp` `PgDn`, `Home` `End` | move |
+| `Enter`, `o` | open the folder with the fork's files |
+| `g` | open the fork on GitHub |
+| `u` | fetch the forks of this repository |
+| `s` | sort: most changes first, newest commit first, by name |
+| `c` | show only the forks with changes, or all again |
+| `/` | filter by owner or name |
+| `r` | read the folder again |
+| `Esc`, `←` | back to the repositories |
+
+A double-click opens the folder too. After a fetch the overview reads the
+folder again by itself.
+
 A limit or a timeout does not end the run. Without a sign-in GitHub answers
 only 60 requests an hour, enough to list about 6,000 forks. When that limit
 is reached, the run pauses until GitHub resets it, at most an hour later, and
@@ -337,6 +371,7 @@ ticked, update, remove, open and move-to-group act on all of them.
 - Copy the path
 - Auto-pull on or off
 - Fetch the pull requests
+- Show the forks
 - Clone the forks
 - Update all cloned forks
 - Migrate, which opens a submenu

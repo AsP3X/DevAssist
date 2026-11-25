@@ -995,6 +995,9 @@ pub struct ForksSaved {
     /// Forks left alone: GitHub says they are as they were the last time
     /// they were fetched.
     pub unchanged: u32,
+    /// Forks GitHub still lists but no longer has. They are not tried
+    /// again; what was fetched from them stays.
+    pub gone: u32,
     /// Forks that could not be fetched, as `owner/name`.
     pub failed: Vec<String>,
     /// Forks that have commits of their own, each with a folder of its
@@ -1067,12 +1070,163 @@ fn write_stamps(dest: &Path, stamps: &std::collections::HashMap<String, String>)
     }
 }
 
+/// How the stamp of a fork starts that GitHub no longer has. What
+/// follows is the stamp it had when that was found: with another stamp
+/// the fork is back and is fetched again.
+const GONE: &str = "gone ";
+
+/// Whether a failed fetch says that the repository is not there, as
+/// GitHub does for one that was deleted or made private.
+fn says_gone(err: &str) -> bool {
+    let err = err.to_ascii_lowercase();
+    err.contains("repository") && err.contains("not found")
+}
+
+/// One fork in the collection, as the fork overview shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkInfo {
+    /// The account it belongs to, which is also the name of its remote.
+    pub owner: String,
+    /// What its repository is called.
+    pub name: String,
+    pub branches: u32,
+    pub pulls: u32,
+    /// The most commits one of its branches has that the main branch of
+    /// the original lacks. None when that could not be counted.
+    pub ahead: Option<u32>,
+    /// When its newest commit was made, in seconds since 1970. 0 for a
+    /// fork nothing was fetched from.
+    pub date: i64,
+    /// It has commits of its own, and with them a folder of its files.
+    pub folder: bool,
+    /// GitHub no longer has it.
+    pub gone: bool,
+}
+
+/// The forks a collection holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkList {
+    /// The repository they are forks of, as `owner/name`.
+    pub original: String,
+    /// The folder of the collection.
+    pub dest: PathBuf,
+    /// By owner, in the order of the alphabet.
+    pub forks: Vec<ForkInfo>,
+}
+
+/// Reads the forks that were cloned beside the checkout `path`: what is
+/// on disk, without asking GitHub.
+pub fn list_forks(path: &Path) -> Result<ForkList, String> {
+    use std::collections::BTreeMap;
+    let dest = forks_folder(path).ok_or("has no folder name")?;
+    if !dest.join(".git").is_dir() {
+        return Err("The forks are not cloned yet.".into());
+    }
+    let original = git_lines(&dest, &["config", "--get", FORKS_KEY])
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+        .ok_or_else(|| format!("{} does not hold forks", dest.display()))?;
+    let first = original.split('/').next().unwrap_or_default().to_string();
+    let stamps = read_stamps(&dest);
+    let mut forks: BTreeMap<String, ForkInfo> = BTreeMap::new();
+    for line in
+        git_lines(&dest, &["config", "--get-regexp", r"^remote\..*\.url$"]).unwrap_or_default()
+    {
+        let Some((key, url)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(owner) = key
+            .strip_prefix("remote.")
+            .and_then(|rest| rest.strip_suffix(".url"))
+        else {
+            continue;
+        };
+        if owner.eq_ignore_ascii_case(&first) {
+            continue;
+        }
+        let url = url.trim();
+        let name = github_owner_repo(url).map_or_else(
+            || {
+                let last = url.trim_end_matches(['/', '\\']);
+                let last = last.rsplit(['/', '\\']).next().unwrap_or_default();
+                last.strip_suffix(".git").unwrap_or(last).to_string()
+            },
+            |(_, name)| name,
+        );
+        forks.insert(
+            owner.to_string(),
+            ForkInfo {
+                owner: owner.to_string(),
+                name,
+                branches: 0,
+                pulls: 0,
+                ahead: None,
+                date: 0,
+                folder: dest.join(owner).join(".git").exists(),
+                gone: stamps
+                    .get(owner)
+                    .is_some_and(|stamp| stamp.starts_with(GONE)),
+            },
+        );
+    }
+    // Every branch with its date and, where this Git can count it, how
+    // far it is ahead of the main branch of the original.
+    let counted = format!(
+        "--format=%(refname) %(committerdate:unix) %(ahead-behind:refs/remotes/{first}/HEAD)"
+    );
+    let plain = "--format=%(refname) %(committerdate:unix)";
+    let branches = git_lines(&dest, &["for-each-ref", &counted, "refs/remotes"])
+        .or_else(|_| git_lines(&dest, &["for-each-ref", plain, "refs/remotes"]))?;
+    for line in branches {
+        let mut parts = line.split_whitespace();
+        let (Some(name), date, ahead) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let Some((owner, branch)) = name
+            .strip_prefix("refs/remotes/")
+            .and_then(|rest| rest.split_once('/'))
+        else {
+            continue;
+        };
+        if branch == "HEAD" {
+            continue;
+        }
+        let Some(fork) = forks.get_mut(owner) else {
+            continue;
+        };
+        fork.branches += 1;
+        fork.date = fork
+            .date
+            .max(date.and_then(|date| date.parse().ok()).unwrap_or(0));
+        if let Some(ahead) = ahead.and_then(|ahead| ahead.parse::<u32>().ok()) {
+            fork.ahead = Some(fork.ahead.unwrap_or(0).max(ahead));
+        }
+    }
+    for name in
+        git_lines(&dest, &["for-each-ref", "--format=%(refname)", "refs/pull"]).unwrap_or_default()
+    {
+        let owner = name
+            .strip_prefix("refs/pull/")
+            .and_then(|rest| rest.split_once('/'));
+        if let Some(fork) = owner.and_then(|(owner, _)| forks.get_mut(owner)) {
+            fork.pulls += 1;
+        }
+    }
+    Ok(ForkList {
+        original,
+        dest,
+        forks: forks.into_values().collect(),
+    })
+}
+
 /// What a run does with one fork.
 #[derive(Clone, Copy)]
 enum ForkPlan {
     Fetch,
     /// As it was when it was last fetched.
     Unchanged,
+    /// GitHub did not have it the last time, and lists it as it was then.
+    Gone,
     /// It cannot be a remote.
     Skip,
 }
@@ -1255,7 +1409,12 @@ pub fn save_forks(
             ForkPlan::Skip
         } else {
             let url = url_of(name, &fork.name);
+            let gone = stamps
+                .get(name)
+                .and_then(|stamp| stamp.strip_prefix(GONE))
+                .is_some_and(|stamp| stamp == fork.stamp);
             match known.get(name) {
+                _ if gone => ForkPlan::Gone,
                 Some(old) if *old == url => {
                     if !fork.stamp.is_empty() && stamps.get(name) == Some(&fork.stamp) {
                         ForkPlan::Unchanged
@@ -1332,6 +1491,10 @@ pub fn save_forks(
                         saved.unchanged += 1;
                         Ok(false)
                     }
+                    ForkPlan::Gone => {
+                        saved.gone += 1;
+                        Ok(false)
+                    }
                     ForkPlan::Fetch => {
                         on_line(&format!("Fetching {full}."), false);
                         job_tx
@@ -1381,6 +1544,21 @@ pub fn save_forks(
                             }
                         }
                         Err(_) if process::was_cancelled() => cancelled = true,
+                        Err(err) if says_gone(&err) => {
+                            // Not an error to report every time: it is
+                            // left out from now on, and what it brought
+                            // before stays.
+                            on_line(
+                                &format!(
+                                    "{}/{} is no longer on GitHub. What was fetched from it stays.",
+                                    fork.owner, fork.name
+                                ),
+                                false,
+                            );
+                            saved.gone += 1;
+                            stamps.insert(fork.owner.clone(), format!("{GONE}{}", fork.stamp));
+                            unsaved += 1;
+                        }
                         Err(_) => {
                             let full = format!("{}/{}", fork.owner, fork.name);
                             on_line(&format!("{full} was not fetched."), false);
@@ -1406,6 +1584,15 @@ pub fn save_forks(
             &format!(
                 "{} forks are as they were when they were last fetched.",
                 saved.unchanged
+            ),
+            false,
+        );
+    }
+    if saved.gone > 0 {
+        on_line(
+            &format!(
+                "{} forks are no longer on GitHub and were left as they are.",
+                saved.gone
             ),
             false,
         );
@@ -3553,7 +3740,53 @@ refs/remotes/fork/dev\tiii\t\t
             tip(&bob, "main")
         );
         assert!(dest.join(&owners[0]).join("more").exists());
+
+        // GitHub no longer has one of them: it is left out, and what it
+        // brought stays. With another stamp it is back and fetched.
+        let mut stamps = read_stamps(&dest);
+        stamps.insert(owners[1].clone(), format!("{GONE}monday 0"));
+        write_stamps(&dest, &stamps);
+        let left = save_forks(&api, &dest, &original, &forks, &url_of, None, |_, _| {}).unwrap();
+        assert_eq!((left.fetched, left.unchanged, left.gone), (0, count - 1, 1));
+        assert!(tip(&dest, &format!("refs/remotes/{}/main", owners[1])).is_some());
+        forks[1].stamp = "friday 0".to_string();
+        let back = save_forks(&api, &dest, &original, &forks, &url_of, None, |_, _| {}).unwrap();
+        assert_eq!((back.fetched, back.unchanged, back.gone), (1, count - 1, 0));
+        forks[1].stamp = "monday 0".to_string();
+        write_stamps(&dest, &stamps);
+
+        // What the fork overview reads from the folder.
+        let list = list_forks(&api).unwrap();
+        assert_eq!(list.original, "ada/api");
+        assert_eq!(list.dest, dest);
+        assert_eq!(list.forks.len(), owners.len() + 1);
+        let of = |owner: &str| list.forks.iter().find(|fork| fork.owner == owner).unwrap();
+        let bobs = of(&owners[0]);
+        assert_eq!((bobs.branches, bobs.folder, bobs.gone), (1, true, false));
+        assert_eq!(bobs.ahead, Some(2), "{bobs:?}");
+        assert!(bobs.date > 0);
+        let quiet = of(&owners[2]);
+        assert_eq!((quiet.branches, quiet.folder), (1, false));
+        assert_eq!(quiet.ahead, Some(0));
+        assert!(of(&owners[1]).gone);
+        let never = of("gone");
+        assert_eq!((never.branches, never.date, never.folder), (0, 0, false));
+        assert!(list_forks(&root.join("ada")).is_err());
         let _ = remove_tree(&root);
+    }
+
+    #[test]
+    fn a_repository_that_is_not_found_counts_as_gone() {
+        assert!(says_gone(
+            "fatal: repository 'https://github.com/bob/api.git/' not found"
+        ));
+        assert!(says_gone("ERROR: Repository not found."));
+        assert!(!says_gone(
+            "fatal: unable to access: Could not resolve host"
+        ));
+        assert!(!says_gone(
+            "fatal: 'x' does not appear to be a git repository"
+        ));
     }
 
     #[test]

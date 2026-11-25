@@ -24,6 +24,7 @@ enter          actions for the selection · on a group: fold it
 u              update the selection
 U              update every repository
 w              pull the selection automatically on a timer, or stop that
+f              the forks of the repository, once they are cloned
 a              add any GitHub repository, into a folder you choose
 i              import clones you already have, from any folder
 d, Delete      delete the selection, or only take it off the list
@@ -72,7 +73,8 @@ impl Feature for app::App {
     }
 
     fn modal(&self) -> bool {
-        self.mode != app::Mode::List
+        // The fork overview has keys of its own, such as its filter.
+        self.mode != app::Mode::List || self.forks.is_some()
     }
 
     fn help(&self) -> &'static str {

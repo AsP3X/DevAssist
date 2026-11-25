@@ -8,7 +8,7 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
-- **The forks of a repository can be cloned.** **Clone the forks** (`f`) in
+- **The forks of a repository can be cloned.** **Clone the forks** (`n`) in
   the actions menu fetches every fork of a repository on GitHub, and the forks
   of those, into a folder beside the checkout: `api-fork` for `api`. Every
   fork that has commits of its own gets a folder with its files in there,
@@ -23,7 +23,16 @@ What changed in each version of DevAssist. The format follows
   (`a`) in the actions menu brings every `-fork` folder up to date, whatever
   is selected. A fork that GitHub reports as not pushed to since it was last
   fetched is skipped, and the rest are fetched eight at a time, so an update
-  of hundreds of forks takes about as long as listing them.
+  of hundreds of forks takes about as long as listing them. A fork that
+  GitHub lists but no longer has is left out of later updates, and what was
+  fetched from it stays.
+- **The forks of a repository have an overview of their own.** `f` on a
+  repository, or **Show the forks** in the actions menu, lists the forks that
+  were cloned: owner and name, branches, pull requests, commits ahead of the
+  original, the date of the newest commit, and whether the fork has changes
+  and a folder or is gone from GitHub. It sorts, filters, opens a fork's
+  folder or its page on GitHub and fetches the forks. `Esc` goes back to the
+  repositories.
 - **The overview shows where each repository is on disk.** A `path` column
   holds the folder of the checkout, in full where the window has the room:
   the other columns are now only as wide as their longest entry. A path that

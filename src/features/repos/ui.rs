@@ -14,9 +14,10 @@ use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::features::repos::app::{
-    Action, App, MenuItem, MigrateItem, Mode, Purpose, RemoteState, Row, clone_target, group_key,
+    Action, App, ForksView, MenuItem, MigrateItem, Mode, Purpose, RemoteState, Row, clone_target,
+    group_key,
 };
-use crate::features::repos::gitops::LocalRepo;
+use crate::features::repos::gitops::{self, ForkInfo, LocalRepo};
 use crate::features::repos::gitprogress::{self, split_progress};
 use crate::features::repos::settings::{Field, PROTOCOLS};
 
@@ -42,9 +43,14 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    draw_header(frame, app, pieces[0]);
-    draw_columns(frame, app, pieces[1]);
-    draw_installed(frame, app, pieces[2]);
+    if app.forks.is_some() {
+        // The fork overview takes the place of the repositories.
+        draw_forks(frame, app, pieces[0], pieces[1], pieces[2]);
+    } else {
+        draw_header(frame, app, pieces[0]);
+        draw_columns(frame, app, pieces[1]);
+        draw_installed(frame, app, pieces[2]);
+    }
     draw_activity(frame, app, pieces[3]);
     draw_footer(frame, app, pieces[4]);
 
@@ -148,6 +154,257 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ))
     };
     frame.render_widget(Paragraph::new(vec![title, meta, third]), area);
+}
+
+/// "2026-11-24" for a time in seconds since 1970, in UTC.
+fn day(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400) + 719_468;
+    let era = days.div_euclid(146_097);
+    let of_era = days.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// What the state column says about a fork.
+fn fork_state(fork: &ForkInfo) -> &'static str {
+    match (fork.gone, fork.folder, fork.branches) {
+        (true, _, _) => "gone from GitHub",
+        (false, true, _) => "changes, folder",
+        (false, false, 0) => "not fetched",
+        (false, false, _) => "no changes",
+    }
+}
+
+/// The columns of the fork overview: the mark, the fork, its branches,
+/// its pull requests, how far it is ahead, its newest commit, its state.
+/// On a narrow screen the state goes first, then the date.
+fn fork_widths(total: u16) -> [usize; 7] {
+    let total = total as usize;
+    let mut widths = [2, 0, 10, 7, 8, 13, 18];
+    let rest = |widths: &[usize; 7]| total.saturating_sub(widths.iter().sum());
+    if rest(&widths) < 24 {
+        widths[6] = 0;
+    }
+    if rest(&widths) < 20 {
+        widths[5] = 0;
+    }
+    widths[1] = rest(&widths);
+    widths
+}
+
+/// What the line under the status says about the highlighted fork.
+fn fork_detail(view: &ForksView) -> String {
+    if let Some(err) = &view.error {
+        return err.clone();
+    }
+    let Some(fork) = view.chosen() else {
+        return String::new();
+    };
+    let mut text = format!("{}/{}", fork.owner, fork.name);
+    let count = |count: u32, one: &str, many: &str| match count {
+        1 => format!("1 {one}"),
+        _ => format!("{count} {many}"),
+    };
+    text.push_str(&format!(
+        "  ·  {}, {}",
+        count(fork.branches, "branch", "branches"),
+        count(fork.pulls, "pull request", "pull requests")
+    ));
+    if fork.gone {
+        text.push_str("  ·  no longer on GitHub: it is not updated, what was fetched stays");
+    }
+    if fork.folder {
+        if let Some(ahead) = fork.ahead.filter(|ahead| *ahead > 0) {
+            text.push_str(&format!(
+                "  ·  {} ahead of the original",
+                count(ahead, "commit", "commits")
+            ));
+        }
+        text.push_str(&format!("  ·  {}", view.dest.join(&fork.owner).display()));
+    } else if !fork.gone {
+        text.push_str("  ·  no commits of its own, so no folder");
+    }
+    text
+}
+
+/// The overview of the forks of one repository: its heading, the names
+/// of the columns and the forks.
+fn draw_forks(frame: &mut Frame, app: &mut App, header: Rect, columns: Rect, list: Rect) {
+    let Some(view) = app.forks.as_ref() else {
+        return;
+    };
+    let width = header.width as usize;
+
+    // The heading: whose forks, where they are, and what there is.
+    let badge = format!(" Forks of {} ", view.original);
+    let room = width.saturating_sub(UnicodeWidthStr::width(badge.as_str()) + 2);
+    let title = Line::from(vec![
+        Span::styled(
+            badge,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {}", fit_end(&view.dest.display().to_string(), room)),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    let rows = view.rows();
+    let changed = view.forks.iter().filter(|fork| fork.folder).count();
+    let gone = view.forks.iter().filter(|fork| fork.gone).count();
+    let branches: u32 = view.forks.iter().map(|fork| fork.branches).sum();
+    let pulls: u32 = view.forks.iter().map(|fork| fork.pulls).sum();
+    let mut meta = match view.forks.len() {
+        1 => "  1 fork".to_string(),
+        count => format!("  {count} forks"),
+    };
+    if rows.len() != view.forks.len() {
+        meta.push_str(&format!(" · {} shown", rows.len()));
+    }
+    meta.push_str(&format!(" · {changed} with changes"));
+    if gone > 0 {
+        meta.push_str(&format!(" · {gone} gone from GitHub"));
+    }
+    meta.push_str(&format!(
+        " · {branches} branches · {pulls} pull requests · {}",
+        view.sort.label()
+    ));
+    if view.changed_only {
+        meta.push_str(" · only forks with changes");
+    }
+    let third = if view.filtering || !view.filter.is_empty() {
+        let mut spans = vec![
+            Span::styled("  filter ", Style::default().fg(Color::DarkGray)),
+            Span::styled(view.filter.clone(), Style::default().fg(Color::White)),
+        ];
+        if view.filtering {
+            spans.push(Span::styled("▌", Style::default().fg(Color::Cyan)));
+        }
+        spans.push(Span::styled(
+            "   esc clears",
+            Style::default().fg(Color::DarkGray),
+        ));
+        Line::from(spans)
+    } else {
+        Line::from(Span::styled(
+            fit(
+                "  arrows move · enter opens the folder · g GitHub · u update · s sort · c only changed · / filter · esc back",
+                width,
+            ),
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    let meta = Line::from(Span::styled(
+        fit(&meta, width),
+        Style::default().fg(Color::Gray),
+    ));
+    frame.render_widget(Paragraph::new(vec![title, meta, third]), header);
+
+    let widths = fork_widths(list.width);
+    let names = padded_row(
+        &[
+            "",
+            "fork",
+            "branches",
+            "pulls",
+            "ahead",
+            "last commit",
+            "state",
+        ],
+        &widths,
+        columns.width as usize,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(names, Style::default().fg(Color::DarkGray))),
+        columns,
+    );
+
+    if rows.is_empty() {
+        let text = if view.loading {
+            "  Reading the forks…"
+        } else if view.error.is_some() {
+            "  The forks could not be read. r tries again."
+        } else if view.forks.is_empty() {
+            "  No fork is in the folder yet. u fetches them."
+        } else {
+            "  No fork matches. esc clears the filter, c shows the forks without changes."
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray))),
+            list,
+        );
+        return;
+    }
+    let selected = view
+        .selected
+        .as_ref()
+        .and_then(|owner| rows.iter().position(|fork| &fork.owner == owner))
+        .unwrap_or(0);
+    let height = list.height as usize;
+    let mut scroll = view.scroll;
+    align_scroll(&mut scroll, selected, rows.len(), height);
+    let clickable = app.mode == Mode::List;
+    let mut hits = Vec::new();
+    for (offset, fork) in rows.iter().enumerate().skip(scroll).take(height) {
+        let rect = Rect {
+            x: list.x,
+            y: list.y + (offset - scroll) as u16,
+            width: list.width,
+            height: 1,
+        };
+        let chosen = offset == selected;
+        let ahead = match fork.ahead {
+            Some(ahead) if fork.folder && ahead > 0 => ahead.to_string(),
+            _ => String::new(),
+        };
+        let date = if fork.date > 0 {
+            day(fork.date)
+        } else {
+            String::new()
+        };
+        let cells = [
+            if chosen { "▌ " } else { "  " }.to_string(),
+            format!("{}/{}", fork.owner, fork.name),
+            fork.branches.to_string(),
+            fork.pulls.to_string(),
+            ahead,
+            date,
+            fork_state(fork).to_string(),
+        ];
+        let cells: Vec<&str> = cells.iter().map(String::as_str).collect();
+        let line = padded_row(&cells, &widths, list.width as usize);
+        let style = if chosen {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if fork.gone {
+            Style::default().fg(Color::DarkGray)
+        } else if fork.folder {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(line, style)), rect);
+        if clickable {
+            hits.push((rect, format!("fork:{}", fork.owner)));
+        }
+    }
+    app.hits.rows.extend(hits);
+    if let Some(view) = app.forks.as_mut() {
+        view.scroll = scroll;
+    }
 }
 
 /// Where the checkouts are: the folder they share, or how many folders.
@@ -403,6 +660,8 @@ fn draw_activity(frame: &mut Frame, app: &App, area: Rect) {
             None => String::new(),
         };
         format!("{doing}  ·  l shows progress")
+    } else if let Some(view) = &app.forks {
+        fork_detail(view)
     } else if let Some(group) = app.selected_group() {
         // A group's header: what the keys do with the whole group.
         if group.is_empty() {
@@ -444,6 +703,9 @@ fn draw_activity(frame: &mut Frame, app: &App, area: Rect) {
                     }
                     id.push_str(&format!("  ·  {} to fetch: enter, p", waiting.join(", ")));
                 }
+                if gitops::forks_cloned(&repo.path) {
+                    id.push_str("  ·  f shows its forks");
+                }
                 if let Some(warning) = &repo.warning {
                     format!("{id}  {warning}")
                 } else if let Some(err) = &repo.error {
@@ -477,16 +739,25 @@ fn draw_footer(frame: &mut Frame, app: &mut App, area: Rect) {
         0 => label.to_string(),
         _ => format!("{label} {ticked}"),
     };
-    let buttons = [
-        ("Add".to_string(), "a", Action::Add),
-        (counted("Update"), "u", Action::UpdateOne),
-        ("Update all".to_string(), "U", Action::UpdateAll),
-        (counted("Remove"), "d", Action::Remove),
-        ("Refresh".to_string(), "r", Action::Refresh),
-        ("Settings".to_string(), "c", Action::Settings),
-        ("Quit".to_string(), "q", Action::Quit),
-        ("Import".to_string(), "i", Action::Import),
-    ];
+    let viewing_forks = app.forks.is_some();
+    let buttons = if viewing_forks {
+        vec![
+            ("Back".to_string(), "esc", Action::Cancel),
+            ("Update the forks".to_string(), "u", Action::UpdateOne),
+            ("Read again".to_string(), "r", Action::Refresh),
+        ]
+    } else {
+        vec![
+            ("Add".to_string(), "a", Action::Add),
+            (counted("Update"), "u", Action::UpdateOne),
+            ("Update all".to_string(), "U", Action::UpdateAll),
+            (counted("Remove"), "d", Action::Remove),
+            ("Refresh".to_string(), "r", Action::Refresh),
+            ("Settings".to_string(), "c", Action::Settings),
+            ("Quit".to_string(), "q", Action::Quit),
+            ("Import".to_string(), "i", Action::Import),
+        ]
+    };
     let y = area.y;
     let mut x = area.x + 1;
     let modal = !matches!(app.mode, Mode::List | Mode::Filter);
@@ -523,10 +794,12 @@ fn draw_footer(frame: &mut Frame, app: &mut App, area: Rect) {
         width: area.width,
         height: 1,
     };
-    let text = fit(
-        "  drag copies text · double-click updates · r fetches · w auto-pull · l last run · esc cancels",
-        hint.width as usize,
-    );
+    let text = if viewing_forks {
+        "  double-click opens the folder · o opens it too · l last run · esc goes back to the repositories"
+    } else {
+        "  drag copies text · double-click updates · r fetches · w auto-pull · l last run · esc cancels"
+    };
+    let text = fit(text, hint.width as usize);
     frame.render_widget(
         Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray))),
         hint,
@@ -2297,6 +2570,92 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    #[test]
+    fn the_fork_overview_lists_the_forks_of_a_repository() {
+        use crate::features::repos::app::ForkSort;
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        assert_eq!(day(0), "1970-01-01");
+        assert_eq!(day(1_795_596_570), "2026-11-25");
+        assert_eq!(day(951_782_400), "2000-02-29");
+
+        let root = std::env::temp_dir().join(format!("devassist-forkui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("api-fork").join(".git")).unwrap();
+        let mut app = app(false);
+        let mut api = local("api", false);
+        api.path = root.join("api");
+        api.owner = "ada".into();
+        api.repo = "api".into();
+        app.installed = vec![api];
+        app.selected = Some("api".into());
+        // The repository says that its forks can be shown.
+        assert!(render(&mut app, 140, 20).contains("f shows its forks"));
+        app.on_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+        let text = render(&mut app, 120, 20);
+        assert!(text.contains(" Forks of ada/api "), "{text}");
+        assert!(text.contains("Reading the forks"), "{text}");
+        let fork = |owner: &str, folder: bool, gone: bool| ForkInfo {
+            owner: owner.into(),
+            name: "api".into(),
+            branches: 3,
+            pulls: 2,
+            ahead: Some(7),
+            date: 1_795_596_570,
+            folder,
+            gone,
+        };
+        let view = app.forks.as_mut().unwrap();
+        view.loading = false;
+        view.forks = vec![
+            fork("bob", true, false),
+            fork("cy", false, false),
+            fork("dee", false, true),
+        ];
+        let text = render(&mut app, 120, 20);
+        for expected in [
+            "3 forks · 1 with changes · 1 gone from GitHub · 9 branches · 6 pull requests",
+            "fork",
+            "last commit",
+            "▌ bob/api",
+            "2026-11-25",
+            "changes, folder",
+            "cy/api",
+            "no changes",
+            "dee/api",
+            "gone from GitHub",
+            "7 commits ahead of the original",
+            " Back esc ",
+            " Update the forks u ",
+        ] {
+            assert!(text.contains(expected), "{expected}\n{text}");
+        }
+        // The repositories are not under it.
+        assert!(!text.contains(" Add a "), "{text}");
+        let bob = text.lines().find(|line| line.contains("bob/api")).unwrap();
+        assert!(bob.contains(" 7 "), "{bob}");
+        // Only a fork with changes says how far it is ahead.
+        let cy = text.lines().find(|line| line.contains("cy/api")).unwrap();
+        assert!(!cy.contains(" 7 "), "{cy}");
+
+        // A narrow screen keeps the forks and their numbers.
+        let narrow = render(&mut app, 60, 20);
+        assert!(narrow.contains("bob/api"), "{narrow}");
+        assert!(!narrow.contains("changes, folder"), "{narrow}");
+
+        let view = app.forks.as_mut().unwrap();
+        view.sort = ForkSort::Name;
+        view.changed_only = true;
+        view.selected = Some("dee".into());
+        let text = render(&mut app, 160, 20);
+        assert!(text.contains("1 shown"), "{text}");
+        assert!(text.contains("only forks with changes"), "{text}");
+        assert!(!text.contains("cy/api"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
