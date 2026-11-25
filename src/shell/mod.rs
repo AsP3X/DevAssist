@@ -4,7 +4,7 @@
 //! program's own update.
 
 mod chrome;
-pub mod config;
+pub use devassist_core::config;
 mod help;
 mod home;
 pub mod keys;
@@ -286,7 +286,7 @@ impl Shell {
             self.on_dialog_key(key);
             return;
         }
-        if !self.modal() && self.palette_key.matches(key) {
+        if !self.modal() && keys::matches(&self.palette_key, key) {
             self.open_palette();
             return;
         }
@@ -348,7 +348,7 @@ impl Shell {
             },
             Dialog::Tools(menu) => {
                 // The key that opened the palette closes it again.
-                if self.palette_key.matches(key) {
+                if keys::matches(&self.palette_key, key) {
                     self.dialog = Dialog::None;
                     return;
                 }
