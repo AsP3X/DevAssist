@@ -1,6 +1,8 @@
 //! The small pieces the table is drawn with, painted as the shell paints (text and icons through a [`Painter`]),
 //! not egui's stock widgets: a checkbox, and text cut to the room it has.
 
+use std::hash::Hash;
+
 use egui::{Align2, Color32, FontFamily, FontId, Painter, Pos2, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, pos2};
 
 use crate::assets::{self, Icon};
@@ -23,9 +25,10 @@ pub enum Tick {
 
 /// Draws a checkbox in `state` for the hit area `rect` and returns what the pointer did to it. The box, a
 /// [`CHECKBOX`] square, sits at the left of `rect`, centred on its height, as the design's check column holds it;
-/// all of `rect` takes the press. `label` is what a screen reader says.
-pub fn checkbox(ui: &mut Ui, rect: Rect, state: Tick, palette: Palette, label: &str) -> Response {
-    let response = ui.interact(rect, ui.scope_id().with(("checkbox", label)), Sense::click());
+/// all of `rect` that is inside the `ui`'s clip takes the press. `id_source` tells this checkbox from the others
+/// (the key of what it ticks); `label` is what a screen reader says.
+pub fn checkbox(ui: &mut Ui, rect: Rect, id_source: impl Hash + std::fmt::Debug, state: Tick, palette: Palette, label: &str) -> Response {
+    let response = ui.interact(rect, ui.scope_id().with(("checkbox", id_source)), Sense::click());
     response.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, state == Tick::On, label));
     let shape = box_rect(rect);
     let painter = ui.painter();
@@ -196,7 +199,7 @@ pub(crate) mod tests {
             let ctx = context();
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 400.0))), ..Default::default() };
             let output = ctx.run_ui(input, |ui| {
-                checkbox(ui, hit, state, palette, "Select api");
+                checkbox(ui, hit, "api", state, palette, "Select api");
             });
             let count = output.shapes.len();
             output.drop_without_applying_deltas();

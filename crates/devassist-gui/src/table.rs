@@ -5,8 +5,10 @@
 //! The lines are of two heights and are placed by hand ([`in_view`]); only those in view are drawn, so a table of
 //! a thousand repositories costs a frame no more than one of twelve. The wheel over the table moves it.
 
+use std::f32::consts::{FRAC_PI_2, PI};
+
 use egui::epaint::CornerRadiusF32;
-use egui::{Align2, Color32, FontFamily, Painter, Pos2, Rect, Role, Sense, Ui, WidgetInfo, pos2, vec2};
+use egui::{Align2, Color32, FontFamily, Painter, Pos2, Rect, Role, Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2};
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
@@ -16,8 +18,8 @@ use crate::repos_view::{Changes, GroupLine, Line, Origin, Pulls, RepoLine, Tone}
 use crate::theme::{
     self, CELL_ICON_GAP, GROUP_FILL_OPACITY, GROUP_HEIGHT, GROUP_ROW_GAP, HAIRLINE, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, ICON, ICON_SMALL,
     LINE_OPACITY, Mode, NAME_ICON_GAP, PROGRESS_HEIGHT, PROGRESS_LEAST, PROGRESS_TRACK_OPACITY, PULL_GAP, PULL_ICON_GAP, Palette, RADIUS_PANEL,
-    ROW_HEIGHT, RULE_BAR, RULE_BAR_TOP, RULE_BREAK_END, RULE_BREAK_GAP, RULE_FIFTH_OPACITY, RULE_HEIGHT, RULE_LABEL_GAP, RULE_LEGEND_GAP, RULE_TICK,
-    RULE_TICK_FIFTH, RULE_TICK_OPACITY, RULE_WIDTH, TEXT, TEXT_SMALL,
+    ROW_HEIGHT, ROW_PAD_RIGHT, RULE_BAR, RULE_BAR_TOP, RULE_BREAK_END, RULE_BREAK_GAP, RULE_FIFTH_OPACITY, RULE_HEIGHT, RULE_LABEL_GAP,
+    RULE_LEGEND_GAP, RULE_TICK, RULE_TICK_FIFTH, RULE_TICK_OPACITY, RULE_WIDTH, TEXT, TEXT_SMALL,
 };
 use crate::widgets::{self, Tick, draw_icon, font};
 
@@ -122,21 +124,22 @@ pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Pal
     ui.set_clip_rect(rect.intersect(outer_clip));
     let head = head_rect(rect);
     draw_head(ui, head, &columns, palette);
-    if widgets::checkbox(ui, tick_rect(head, &columns), head_tick(lines), palette, SELECT_ALL).clicked() {
+    if widgets::checkbox(ui, tick_rect(head, &columns), SELECT_ALL, head_tick(lines), palette, SELECT_ALL).clicked() {
         did = Did::TickedAll;
     }
 
+    // The lines are clipped to the body, and their fills and lines also to the panel's round corners.
     ui.set_clip_rect(body.intersect(outer_clip));
     for (index, row) in placed(body, &heights, *scroll) {
-        let under_line = index + 1 < lines.len();
         let shown = row.intersect(body);
+        let fill = Fill { row, shown, panel: rect, under_line: index + 1 < lines.len(), hovered: ui.rect_contains_pointer(shown) };
         match &lines[index] {
             Line::Group(group) => {
                 let response = ui.interact(shown, ui.scope_id().with(("table-group", &group.key)), Sense::click());
                 response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &group.name));
-                let fill = if group.chosen { theme::selected_fill(mode) } else { soft(palette, GROUP_FILL_OPACITY) };
-                draw_fill(ui.painter(), row, fill, under_line, palette, ui.rect_contains_pointer(shown));
-                draw_group(ui.painter(), row, &columns, group, palette);
+                let highlight = if group.chosen { palette.selection } else { Color32::TRANSPARENT };
+                draw_fill(ui.painter(), &fill, &[soft(palette, GROUP_FILL_OPACITY), highlight], palette);
+                draw_group(ui, row, &columns, group, palette);
                 if response.clicked() {
                     did = Did::Folded(group.key.clone());
                 }
@@ -144,11 +147,12 @@ pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Pal
             Line::Repo(repo) => {
                 let response = ui.interact(shown, ui.scope_id().with(("table-row", &repo.key)), Sense::click());
                 response.widget_info(|| WidgetInfo::labeled(Role::Row, true, &repo.name));
-                let fill = if repo.chosen { theme::selected_fill(mode) } else { Color32::TRANSPARENT };
-                draw_fill(ui.painter(), row, fill, under_line, palette, ui.rect_contains_pointer(shown));
+                draw_fill(ui.painter(), &fill, &[repo_fill(repo, palette, mode)], palette);
                 draw_repo(ui, row, &columns, repo, palette);
                 let tick = if repo.ticked { Tick::On } else { Tick::Off };
-                if widgets::checkbox(ui, tick_rect(row, &columns).intersect(body), tick, palette, &select(&repo.name)).clicked() {
+                // Placed on the whole row, so the box keeps to the row's centre line; the clip keeps its press to the
+                // part shown.
+                if widgets::checkbox(ui, tick_rect(row, &columns), &repo.key, tick, palette, &select(&repo.name)).clicked() {
                     did = Did::Ticked(repo.key.clone());
                 } else if response.clicked() {
                     did = Did::Picked(repo.key.clone());
@@ -244,20 +248,112 @@ fn cell(row: Rect, span: Span) -> Rect {
     Rect::from_min_max(pos2(row.left() + span.left, row.top()), pos2(row.left() + span.right(), row.bottom()))
 }
 
-/// Paints a line's fill, the hover's over it when `hovered`, and the line under it when `under_line`.
-fn draw_fill(painter: &Painter, row: Rect, fill: Color32, under_line: bool, palette: Palette, hovered: bool) {
-    painter.rect_filled(row, 0.0, fill);
-    if hovered {
-        painter.rect_filled(row, 0.0, soft(palette, HOVER_OPACITY));
+/// A repository row's fill: the ticked rows filled as the drawing fills them, the highlighted one (the keyboard's
+/// place) in the selection colour; a row that is both shows the ticked fill.
+fn repo_fill(repo: &RepoLine, palette: Palette, mode: Mode) -> Color32 {
+    if repo.ticked {
+        theme::selected_fill(mode)
+    } else if repo.chosen {
+        palette.selection
+    } else {
+        Color32::TRANSPARENT
     }
-    if under_line {
-        draw_line_under(painter, row, palette);
+}
+
+/// Where a line's fill goes.
+struct Fill {
+    /// The whole row.
+    row: Rect,
+    /// The part of it shown.
+    shown: Rect,
+    /// The panel, whose round corners the fill keeps inside.
+    panel: Rect,
+    /// A line is drawn along the row's bottom.
+    under_line: bool,
+    /// The pointer is over it.
+    hovered: bool,
+}
+
+/// Paints a line's fills, one over the other, the hover's over them, and the line under it; each cut to the
+/// panel's round corners.
+fn draw_fill(painter: &Painter, fill: &Fill, fills: &[Color32], palette: Palette) {
+    let hover = if fill.hovered { soft(palette, HOVER_OPACITY) } else { Color32::TRANSPARENT };
+    for &colour in fills.iter().chain([&hover]) {
+        fill_inside(painter, fill.shown, fill.panel, colour);
+    }
+    if fill.under_line {
+        let line = Rect::from_min_max(pos2(fill.row.left(), fill.row.bottom() - HAIRLINE), fill.row.max).intersect(fill.shown);
+        fill_inside(painter, line, fill.panel, soft(palette, LINE_OPACITY));
     }
 }
 
 /// Paints the line along the bottom of `row`.
 fn draw_line_under(painter: &Painter, row: Rect, palette: Palette) {
     painter.rect_filled(Rect::from_min_max(pos2(row.left(), row.bottom() - HAIRLINE), row.max), 0.0, soft(palette, LINE_OPACITY));
+}
+
+/// Paints the part of `shape` that is inside the panel at `panel` with its round corners in `colour`.
+fn fill_inside(painter: &Painter, shape: Rect, panel: Rect, colour: Color32) {
+    if colour == Color32::TRANSPARENT || !shape.is_positive() {
+        return;
+    }
+    let outline = inside_panel(shape, panel);
+    if outline.len() >= 3 {
+        painter.add(Shape::convex_polygon(outline, colour, Stroke::NONE));
+    }
+}
+
+/// The outline of the part of `shape` inside the panel at `panel` with its corners round at [`RADIUS_PANEL`]: a
+/// convex polygon whose corners lie on or inside the panel's outline; empty when nothing of `shape` is inside.
+fn inside_panel(shape: Rect, panel: Rect) -> Vec<Pos2> {
+    let mut points = vec![shape.left_top(), shape.right_top(), shape.right_bottom(), shape.left_bottom()];
+    let outline = panel_outline(panel);
+    let centre = panel.center();
+    for (index, &from) in outline.iter().enumerate() {
+        let to = outline[(index + 1) % outline.len()];
+        // Which side of the edge from `from` to `to` a point is on; the panel's centre is inside.
+        let side = |p: Pos2| (to.x - from.x) * (p.y - from.y) - (to.y - from.y) * (p.x - from.x);
+        let inside = |p: Pos2| side(p) * side(centre) >= 0.0;
+        let mut kept = Vec::with_capacity(points.len() + 1);
+        for (at, &here) in points.iter().enumerate() {
+            let next = points[(at + 1) % points.len()];
+            if inside(here) {
+                kept.push(here);
+            }
+            if inside(here) != inside(next) {
+                let part = side(here) / (side(here) - side(next));
+                kept.push(here + (next - here) * part);
+            }
+        }
+        points = kept;
+        if points.is_empty() {
+            break;
+        }
+    }
+    points
+}
+
+/// The outline of the panel at `panel`, clockwise: its four round corners, each cut into [`theme::CORNER_STEPS`]
+/// straight pieces whose ends lie on a round [`theme::CORNER_SLACK`] wider than the panel's, so that the pieces
+/// stay inside the panel as egui paints it (its own round is cut into pieces too, and its edge is softened).
+fn panel_outline(panel: Rect) -> Vec<Pos2> {
+    let radius = (RADIUS_PANEL + theme::CORNER_SLACK).min(panel.width() / 2.0).min(panel.height() / 2.0).max(0.0);
+    let corners = [
+        (pos2(panel.right() - radius, panel.top() + radius), -FRAC_PI_2),
+        (pos2(panel.right() - radius, panel.bottom() - radius), 0.0),
+        (pos2(panel.left() + radius, panel.bottom() - radius), FRAC_PI_2),
+        (pos2(panel.left() + radius, panel.top() + radius), PI),
+    ];
+    let steps = f32::from(theme::CORNER_STEPS);
+    corners
+        .into_iter()
+        .flat_map(|(centre, start)| {
+            (0..=theme::CORNER_STEPS).map(move |step| {
+                let angle = start + FRAC_PI_2 * f32::from(step) / steps;
+                centre + vec2(angle.cos(), angle.sin()) * radius
+            })
+        })
+        .collect()
 }
 
 /// Paints the head row's fill, its line and its words (its checkbox is drawn by the caller).
@@ -284,18 +380,22 @@ fn draw_head(ui: &Ui, head: Rect, columns: &Columns, palette: Palette) {
 }
 
 /// Paints a group's header: its fold arrow, its name and its note.
-fn draw_group(painter: &Painter, row: Rect, columns: &Columns, group: &GroupLine, palette: Palette) {
+/// The name keeps to the name column; the note has what is left of the row after it.
+fn draw_group(ui: &Ui, row: Rect, columns: &Columns, group: &GroupLine, palette: Palette) {
+    let painter = ui.painter();
     let y = row.center().y;
     let arrow = if group.collapsed { Icon::ChevronRight } else { Icon::ChevronDown };
     draw_icon(painter, pos2(row.left() + columns.check.left + ICON / 2.0, y), arrow, ICON, palette.on_glass);
-    let name = painter.text(
-        pos2(row.left() + columns.check.right() + GROUP_ROW_GAP, y),
-        Align2::LEFT_CENTER,
-        &group.name,
-        font(TEXT, assets::medium_family()),
-        palette.on_glass,
-    );
-    painter.text(pos2(name.right() + GROUP_ROW_GAP, y), Align2::LEFT_CENTER, &group.note, font(TEXT_SMALL, FontFamily::Proportional), palette.quiet);
+    let medium = font(TEXT, assets::medium_family());
+    let left = row.left() + columns.check.right() + GROUP_ROW_GAP;
+    let name = widgets::ellipsis(&group.name, &medium, row.left() + columns.name.right() - left, ui);
+    let right = draw_text(painter, left, y, name, true, palette.on_glass);
+    let small = font(TEXT_SMALL, FontFamily::Proportional);
+    let note_left = right + GROUP_ROW_GAP;
+    let note = widgets::ellipsis(&group.note, &small, row.right() - ROW_PAD_RIGHT - note_left, ui);
+    if !note.is_empty() {
+        painter.text(pos2(note_left, y), Align2::LEFT_CENTER, note, small, palette.quiet);
+    }
 }
 
 /// Paints `text` at the left of `x`, centred on `y`, unless it is empty; gives back where its right end is.
@@ -364,7 +464,7 @@ fn draw_pulls(painter: &Painter, left: f32, y: f32, pulls: Pulls, palette: Palet
             x = draw_text(painter, x, y, format!("{mark}{count}"), true, palette.warning) + PULL_GAP;
         }
     }
-    let none = pulls.open + pulls.merged + pulls.closed + pulls.new + pulls.changed == 0;
+    let none = [pulls.open, pulls.merged, pulls.closed, pulls.new, pulls.changed].iter().all(|&count| count == 0);
     if pulls.known && none {
         draw_text(painter, left, y, NO_PULLS.to_owned(), false, palette.quiet);
     }
@@ -433,6 +533,8 @@ mod tests {
     use egui::{Event, FullOutput, PointerButton, RawInput, Stroke, TextureId};
 
     use super::*;
+    use devassist_glass::raster::Bitmap;
+
     use crate::baker::{Scene, sheet_picture};
     use crate::picture;
     use crate::repos_view::{self, RepoLine};
@@ -500,8 +602,13 @@ mod tests {
 
     /// What the table says to a press and release at `at`, after the pointer has come there.
     fn click(lines: &[Line], at: Pos2) -> Vec<Did> {
+        click_scrolled(lines, at, 0.0)
+    }
+
+    /// What the table, its lines moved up by `scroll`, says to a press and release at `at`.
+    fn click_scrolled(lines: &[Line], at: Pos2, scroll: f32) -> Vec<Did> {
         let ctx = context();
-        let mut scroll = 0.0;
+        let mut scroll = scroll;
         let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::default() };
         [Vec::new(), vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], Vec::new()]
             .into_iter()
@@ -515,8 +622,13 @@ mod tests {
 
     /// The row of the line at `index` in the table at `table_rect`, unscrolled.
     fn row_of(lines: &[Line], index: usize) -> Rect {
+        row_at(lines, index, 0.0)
+    }
+
+    /// The row of the line at `index` in the table at `table_rect`, its lines moved up by `scroll`.
+    fn row_at(lines: &[Line], index: usize, scroll: f32) -> Rect {
         let heights: Vec<f32> = lines.iter().map(height).collect();
-        placed(body_rect(table_rect()), &heights, 0.0).into_iter().find(|(at, _)| *at == index).map(|(_, row)| row).unwrap()
+        placed(body_rect(table_rect()), &heights, scroll).into_iter().find(|(at, _)| *at == index).map(|(_, row)| row).unwrap()
     }
 
     /// The only thing said among `said`, when it is said once on the release and nothing on the other frames.
@@ -660,45 +772,128 @@ mod tests {
         assert_eq!(bar_pieces(81.0, 80.0, true, false), [(81.0, 60.0), (147.0, 14.0)]);
     }
 
-    /// Draws a table of `lines` where the design has it, over the lake in `mode`, with the pointer at `pointer`, and
-    /// writes the picture to `target/shots/{name}`.
-    fn draw_picture(lines: &[Line], pointer: Option<Pos2>, mode: Mode, name: &str) {
+    /// What a picture shows over the wallpaper.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Drawn {
+        /// Nothing: the bare wallpaper.
+        Nothing,
+        /// The frosted panel alone, without the table on it.
+        Panel,
+        /// The whole table.
+        Table,
+    }
+
+    /// A picture of the window over the lake in `mode` at one pixel a point, with `drawn` where the design has the
+    /// table: `lines` moved up by `scroll`, the pointer at `pointer`.
+    fn render(lines: &[Line], pointer: Option<Pos2>, mode: Mode, scroll: f32, drawn: Drawn) -> Bitmap {
         let scene = Scene { size: WINDOW, pixels_per_point: 1.0, mode, backdrop: "lake".to_owned(), blur: true };
         let (wall, mut bitmap) = picture::wallpaper_window(&scene);
+        if drawn == Drawn::Nothing {
+            return bitmap;
+        }
         let panel = sheet_picture(&wall, &scene, Surface::Panel).unwrap();
         let sheet = Sheet { texture: TextureId::User(1), uv: panel.uv, edge: panel.edge };
         let ctx = context();
         let mut textures = HashMap::from([(sheet.texture, panel.bitmap.image())]);
-        let mut scroll = 0.0;
+        let mut scroll = scroll;
         let mut shapes = Vec::new();
         // The first frame lays the faces out; the second is the one painted.
         for _ in 0..2 {
             let events = pointer.map(Event::PointerMoved).into_iter().collect();
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), events, ..Default::default() };
             let mut output = ctx.run_ui(input, |ui| {
-                show(ui, table_rect(), lines, &sheet, theme::palette(mode), mode, &mut scroll);
+                if drawn == Drawn::Table {
+                    show(ui, table_rect(), lines, &sheet, theme::palette(mode), mode, &mut scroll);
+                } else {
+                    let window = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
+                    frost::paint(ui.painter(), window, table_rect(), RADIUS_PANEL, &sheet);
+                }
             });
             picture::take_textures(std::mem::take(&mut output.textures_delta), &mut textures);
             shapes = std::mem::take(&mut output.shapes);
         }
         picture::paint(&mut bitmap, &ctx.tessellate(shapes, 1.0), &textures);
+        bitmap
+    }
+
+    /// Writes `bitmap` to `target/shots/{name}`.
+    fn write(bitmap: &Bitmap, name: &str) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots").join(name);
         crate::screenshot::write_png(&path, &bitmap.image()).unwrap();
         eprintln!("wrote {}", path.display());
     }
 
+    /// Draws a table of `lines` where the design has it, over the lake in `mode`, with the pointer at `pointer`, and
+    /// writes the picture to `target/shots/{name}`.
+    fn draw_picture(lines: &[Line], pointer: Option<Pos2>, mode: Mode, name: &str) {
+        write(&render(lines, pointer, mode, 0.0, Drawn::Table), name);
+    }
+
+    /// The demo's lines again and again, moved up so that the bottom of the ticked `api` of the second round is
+    /// `above_bottom` points over the panel's bottom edge (below it when negative), with the pointer over the
+    /// panel's last points: (lines, scroll, pointer).
+    fn overflowing(above_bottom: f32) -> (Vec<Line>, f32, Pos2) {
+        let lines = many(100);
+        let index = 16 + lines.iter().position(|line| matches!(line, Line::Repo(repo) if repo.name == "api")).unwrap();
+        let Line::Repo(api) = &lines[index] else { unreachable!() };
+        assert!(api.ticked);
+        let bottom_of_api = body_rect(table_rect()).top() + lines[..=index].iter().map(height).sum::<f32>();
+        let scroll = bottom_of_api - (table_rect().bottom() - above_bottom);
+        let pointer = pos2(table_rect().left() + RADIUS_PANEL * 3.0, table_rect().bottom() - 2.0);
+        (lines, scroll, pointer)
+    }
+
+    /// Whether two pixels are exactly the same.
+    fn same(a: [f32; 4], b: [f32; 4]) -> bool {
+        a.map(f32::to_bits) == b.map(f32::to_bits)
+    }
+
+    #[test]
+    fn nothing_of_the_table_shows_outside_the_panels_round_corners() {
+        let rect = table_rect();
+        let wall = render(&[], None, Mode::Light, 0.0, Drawn::Nothing);
+        let panel = render(&[], None, Mode::Light, 0.0, Drawn::Panel);
+        // The ticked row across the edge with its line 6 points above it (the row below 6 points high, under the
+        // pointer), and the ticked row's fill reaching 8 points past the edge.
+        for above_bottom in [6.0, 12.5, -8.0] {
+            let (lines, scroll, pointer) = overflowing(above_bottom);
+            let table = render(&lines, Some(pointer), Mode::Light, scroll, Drawn::Table);
+            let (mut outside, mut changed) = (0, Vec::new());
+            for corner_left in [rect.left(), rect.right() - RADIUS_PANEL] {
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels of a 1440 by 900 window")]
+                let (x0, y0) = ((corner_left - 2.0) as usize, (rect.bottom() - RADIUS_PANEL - 2.0) as usize);
+                for y in y0..y0 + 20 {
+                    for x in x0..x0 + 20 {
+                        let at = y * wall.w + x;
+                        // Outside the panel's outline: where the panel alone leaves the wallpaper as it is.
+                        if same(panel.px[at], wall.px[at]) {
+                            outside += 1;
+                            if !same(table.px[at], wall.px[at]) {
+                                changed.push((x, y));
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(outside > 50, "only {outside} pixels outside the corners were looked at");
+            assert!(changed.is_empty(), "{above_bottom}: the table painted outside the panel at {changed:?}");
+        }
+    }
+
     #[test]
     #[ignore = "writes pictures for a person to look at; run by hand"]
     fn draw_the_demo_table_to_pictures() {
+        let (lines, scroll, pointer) = overflowing(6.0);
+        write(&render(&lines, Some(pointer), Mode::Light, scroll, Drawn::Table), "table-overflow-light.png");
         draw_picture(&demo(), None, Mode::Light, "table-light.png");
         draw_picture(&demo(), None, Mode::Dark, "table-dark.png");
-        // The states the demo does not show: a chosen row, the pointer over another, a fetch running, bars past the
+        // The states the demo does not show: a highlighted row, the pointer over another, a fetch running, bars past the
         // scale, GitHub knowing no pull requests, a folded group.
         let states: Vec<Line> = demo()
             .into_iter()
             .map(|line| match line {
                 Line::Repo(repo) => Line::Repo(match repo.name.as_str() {
-                    "web" => RepoLine { chosen: true, ..repo },
+                    "portal" => RepoLine { chosen: true, ..repo },
                     "customer-portal-i18n" => RepoLine { origin: Origin::Busy { share: 0.5, text: "Receiving, 50%".to_owned() }, ..repo },
                     "DevAssist" => RepoLine {
                         origin: Origin::Measured { behind: 25, ahead: 12, text: "12 ahead, 25 behind".to_owned(), tone: Tone::Plain },
@@ -715,6 +910,117 @@ mod tests {
         let pointer = row_of(&states, 2).center();
         draw_picture(&states, Some(pointer), Mode::Light, "table-states-light.png");
         draw_picture(&states, Some(pointer), Mode::Dark, "table-states-dark.png");
+    }
+
+    #[test]
+    fn a_fill_is_cut_to_the_panels_round_corners_only_where_it_reaches_them() {
+        let panel = table_rect();
+        let inner = Rect::from_min_max(pos2(panel.left(), panel.top() + 100.0), pos2(panel.right(), panel.top() + 144.0));
+        let outline = inside_panel(inner, panel);
+        assert_eq!(outline.len(), 4);
+        for corner in [inner.left_top(), inner.right_top(), inner.right_bottom(), inner.left_bottom()] {
+            assert!(outline.iter().any(|p| (*p - corner).length() < 1e-3), "{corner:?} lost: {outline:?}");
+        }
+        // A row across the bottom: every corner of its outline lies inside the panel's round.
+        let bottom = Rect::from_min_max(pos2(panel.left(), panel.bottom() - 30.0), pos2(panel.right(), panel.bottom()));
+        let cut = inside_panel(bottom, panel);
+        assert!(cut.len() > 4, "{cut:?}");
+        for p in &cut {
+            for centre in
+                [pos2(panel.left() + RADIUS_PANEL, panel.bottom() - RADIUS_PANEL), pos2(panel.right() - RADIUS_PANEL, panel.bottom() - RADIUS_PANEL)]
+            {
+                let beyond =
+                    (p.x - centre.x).abs() >= 0.0 && p.y > centre.y && (p.x < panel.left() + RADIUS_PANEL || p.x > panel.right() - RADIUS_PANEL);
+                if beyond && (p.x - centre.x).abs() <= RADIUS_PANEL {
+                    assert!((*p - centre).length() <= RADIUS_PANEL + 1e-3, "{p:?} is outside the corner at {centre:?}");
+                }
+            }
+        }
+        // Nothing of a rectangle below the panel is inside it.
+        assert_eq!(inside_panel(Rect::from_min_size(pos2(panel.left(), panel.bottom() + 1.0), vec2(100.0, 10.0)), panel), Vec::<Pos2>::new());
+    }
+
+    #[test]
+    fn the_ticked_rows_are_filled_and_the_highlighted_one_has_the_selection() {
+        let Some(Line::Repo(api)) = demo().into_iter().find(|line| matches!(line, Line::Repo(repo) if repo.name == "api")) else { panic!("no api") };
+        for mode in [Mode::Light, Mode::Dark] {
+            let palette = theme::palette(mode);
+            assert_eq!(repo_fill(&RepoLine { ticked: true, chosen: false, ..api.clone() }, palette, mode), theme::selected_fill(mode));
+            assert_eq!(repo_fill(&RepoLine { ticked: false, chosen: true, ..api.clone() }, palette, mode), palette.selection);
+            assert_eq!(repo_fill(&RepoLine { ticked: true, chosen: true, ..api.clone() }, palette, mode), theme::selected_fill(mode));
+            assert_eq!(repo_fill(&RepoLine { ticked: false, chosen: false, ..api.clone() }, palette, mode), Color32::TRANSPARENT);
+        }
+    }
+
+    #[test]
+    fn a_row_half_under_the_head_keeps_its_box_on_its_centre_line() {
+        let lines = many(100);
+        let columns = columns::columns(table_rect().width());
+        // The first repository, dotfiles, half under the head row.
+        let scroll = GROUP_HEIGHT + ROW_HEIGHT / 2.0;
+        let row = row_at(&lines, 1, scroll);
+        assert_eq!(row.center().y, body_rect(table_rect()).top());
+        let ctx = context();
+        let mut moved = scroll;
+        frame(&ctx, table_rect(), &lines, Vec::new(), &mut moved).1.drop_without_applying_deltas();
+        let (_, output) = frame(&ctx, table_rect(), &lines, Vec::new(), &mut moved);
+        let boxes: Vec<Rect> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(shape) if shape.rect.size() == vec2(theme::CHECKBOX, theme::CHECKBOX) => Some(shape.rect),
+                _ => None,
+            })
+            // Below the head's own box: the boxes whose centre is in the row's shown half.
+            .filter(|found| {
+                (found.left() - (row.left() + columns.check.left)).abs() < 1e-3
+                    && found.center().y >= row.center().y
+                    && found.center().y < row.bottom()
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+        assert_eq!(boxes.len(), 1, "{boxes:?}");
+        assert_eq!(boxes[0].center().y, row.center().y, "the box left the row's centre line");
+        // A click on the hidden half of its name does nothing; on the hidden half of its box it is the head's box.
+        let hidden = row.top() + ROW_HEIGHT / 4.0;
+        let name = pos2(row.left() + columns.name.left + columns.name.width / 2.0, hidden);
+        assert!(click_scrolled(&lines, name, scroll).iter().all(|did| *did == Did::None));
+        let tick = pos2(row.left() + columns.check.left + theme::CHECKBOX / 2.0, hidden);
+        assert_eq!(said_once(&click_scrolled(&lines, tick, scroll)), Did::TickedAll);
+        // The shown half of the box ticks it.
+        let shown = pos2(tick.x, row.center().y + theme::CHECKBOX / 4.0);
+        assert_eq!(said_once(&click_scrolled(&lines, shown, scroll)), Did::Ticked("dotfiles".to_owned()));
+    }
+
+    #[test]
+    fn a_long_group_name_and_note_are_cut_inside_the_row() {
+        let long = GroupLine {
+            key: "group::long".to_owned(),
+            name: "a-group-whose-name-goes-on-and-on-".repeat(8),
+            note: "a note that says a great deal more than it needs to, ".repeat(8),
+            collapsed: false,
+            chosen: false,
+        };
+        let lines = vec![Line::Group(long)];
+        let ctx = context();
+        let mut scroll = 0.0;
+        frame(&ctx, table_rect(), &lines, Vec::new(), &mut scroll).1.drop_without_applying_deltas();
+        let (_, output) = frame(&ctx, table_rect(), &lines, Vec::new(), &mut scroll);
+        let texts: Vec<(String, f32)> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.pos.x + text.galley.size().x)),
+                _ => None,
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+        let columns = columns::columns(table_rect().width());
+        let name = texts.iter().find(|(text, _)| text.starts_with("a-group")).unwrap();
+        let note = texts.iter().find(|(text, _)| text.starts_with("a note")).unwrap();
+        assert!(name.0.ends_with('…') && note.0.ends_with('…'), "{name:?} {note:?}");
+        assert!(name.1 <= table_rect().left() + columns.name.right() + 0.5, "the name runs past its column: {name:?}");
+        assert!(note.1 <= table_rect().right() - theme::ROW_PAD_RIGHT + 0.5, "the note runs past the row: {note:?}");
     }
 
     #[test]

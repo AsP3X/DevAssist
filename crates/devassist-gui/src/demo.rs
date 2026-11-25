@@ -31,6 +31,10 @@ const NOT_FOUND: &str = "Not found on GitHub";
 /// A repository's pull requests: open, merged, closed without a merge, new to the clone, changed since saved.
 type Pulls = (u32, u32, u32, u32, u32);
 
+/// What GitHub says of a repository without pull requests: counts of zero, which the table reads as "None". Every
+/// repository of the drawing but the one GitHub does not know has counts.
+const NO_PULLS: Pulls = (0, 0, 0, 0, 0);
+
 /// One repository of the drawing.
 struct Entry {
     name: &'static str,
@@ -52,7 +56,20 @@ struct Entry {
 
 impl Entry {
     const fn new(name: &'static str, group: &'static str, path: &'static str, branch: &'static str) -> Entry {
-        Entry { name, group, path, branch, ahead: 0, behind: 0, dirty: false, fresh: None, error: None, watched: false, ticked: false, pulls: None }
+        Entry {
+            name,
+            group,
+            path,
+            branch,
+            ahead: 0,
+            behind: 0,
+            dirty: false,
+            fresh: None,
+            error: None,
+            watched: false,
+            ticked: false,
+            pulls: Some(NO_PULLS),
+        }
     }
 }
 
@@ -68,7 +85,7 @@ const ENTRIES: [Entry; 12] = [
     Entry { ahead: 1, behind: 2, pulls: Some((0, 9, 1, 0, 0)), ..Entry::new("DevAssist", "Tools", "D:\\code\\DevAssist", "master") },
     Entry { pulls: Some((1, 6, 0, 0, 0)), ..Entry::new("release-scripts", "Tools", "D:\\code\\tools\\release-scripts", "main") },
     Entry { ahead: 1, ..Entry::new("notes", "", "D:\\code\\notes", "main") },
-    Entry { error: Some(NOT_FOUND), ..Entry::new("old-blog", "", "E:\\archive\\old-blog", "main") },
+    Entry { error: Some(NOT_FOUND), pulls: None, ..Entry::new("old-blog", "", "E:\\archive\\old-blog", "main") },
     Entry { dirty: true, ..Entry::new("sandbox", "", "D:\\code\\sandbox", "experiment/wasm") },
 ];
 
@@ -178,7 +195,11 @@ mod tests {
         assert_eq!(repos.pull_counts(by("api")), Some(PullCounts { open: 2, merged: 14, closed: 3 }));
         assert_eq!(repos.pending_pulls(by("api")), PendingPulls { new: 2, changed: 0 });
         assert_eq!(repos.pending_pulls(by("portal")), PendingPulls { new: 0, changed: 1 });
-        assert_eq!(repos.pull_counts(by("notes")), None);
+        // Zeros where the drawing says "None"; no counts only for the one GitHub does not know.
+        assert_eq!(repos.pull_counts(by("notes")), Some(PullCounts::default()));
+        assert_eq!(repos.pull_counts(by("homelab")), Some(PullCounts::default()));
+        assert_eq!(repos.pull_counts(by("old-blog")), None);
+        assert_eq!(repos.installed.iter().filter(|r| repos.pull_counts(r).is_none()).count(), 1);
         assert!(!repos.pending_pulls(by("web")).any());
         assert!(!repos.waiting());
         assert_eq!(repos.groups(), ["home", "Tools", "Work"]);

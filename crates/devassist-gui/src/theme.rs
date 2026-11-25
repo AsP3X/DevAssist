@@ -213,6 +213,13 @@ const fn rule_width() -> f32 {
 pub const COARSE_SIGMA_PX: f32 = 4.0;
 /// The fewest pixels a coarse picture has along the window's shorter side.
 pub const COARSE_LEAST_PIXELS: f32 = 8.0;
+/// How many straight pieces a quarter of the panel's round corner is cut into where a row's fill or line is cut
+/// to the panel's outline: their corners lie on the round, so the fill stays inside it.
+pub const CORNER_STEPS: u16 = 8;
+/// How much wider than the panel's own the round is that a row's fill or line is cut to at the panel's corners, in
+/// points: egui paints the panel's round as straight pieces too and softens its edge, and the fill must not reach
+/// past what it paints.
+pub const CORNER_SLACK: f32 = 0.5;
 /// A pane's picture that no frame has wanted for this many frames is dropped.
 pub const PICTURE_KEEP_FRAMES: u64 = 120;
 /// How many frames a `--screenshot` run draws before it takes the picture (fonts, layout and the glass have
