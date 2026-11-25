@@ -18,7 +18,11 @@ fn main() -> ExitCode {
         complain(&format!("DevAssist's built-in files are not usable: {message}"));
         return ExitCode::FAILURE;
     }
-    match app::run(launch) {
+    let settings = app::load_settings(&launch);
+    if let Some(warning) = app::settings_warning(&settings) {
+        complain(&warning);
+    }
+    match app::run(launch, settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             complain(&message);

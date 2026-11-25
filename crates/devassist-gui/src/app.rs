@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use devassist_core::config;
+use devassist_core::config::{self, Settings};
 use devassist_glass::gpu;
 use egui::{Color32, LayerId, Mesh};
 
@@ -18,11 +18,31 @@ const TITLE: &str = "DevAssist";
 /// The app's id to the system (Wayland and the like).
 const APP_ID: &str = "dev.devassist.desktop";
 
-/// Opens the window for `launch` and runs it until it is closed.
+/// The settings the window opens with: the file `--config` names, else the ones a start of the terminal app
+/// without options reads (taking over settings from older versions).
+///
+/// # Errors
+/// A sentence saying why the settings file could not be read.
+pub fn load_settings(launch: &Launch) -> Result<Settings, String> {
+    match &launch.config {
+        Some(path) => config::load(path),
+        None => config::load_default(),
+    }
+}
+
+/// The line to tell the user when `settings` could not be read, the window then opening in the default look;
+/// `None` when they were read.
+#[must_use]
+pub fn settings_warning(settings: &Result<Settings, String>) -> Option<String> {
+    settings.as_ref().err().map(|e| format!("devassist-gui: {e}; opening with the default look"))
+}
+
+/// Opens the window for `launch`, in the look of `settings` (from [`load_settings`]), and runs it until it is
+/// closed.
 ///
 /// # Errors
 /// A sentence saying why the window could not be opened.
-pub fn run(launch: Launch) -> Result<(), String> {
+pub fn run(launch: Launch, settings: Result<Settings, String>) -> Result<(), String> {
     let mut viewport =
         egui::ViewportBuilder::default().with_title(TITLE).with_app_id(APP_ID).with_inner_size(theme::WINDOW).with_min_inner_size(theme::MIN_WINDOW);
     if cfg!(target_os = "macos") {
@@ -38,7 +58,7 @@ pub fn run(launch: Launch) -> Result<(), String> {
         viewport = viewport.with_window_level(egui::WindowLevel::AlwaysOnBottom).with_active(false);
     }
     let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Wgpu, ..Default::default() };
-    eframe::run_native(TITLE, options, Box::new(move |cc| Ok(Box::new(App::new(cc, launch)))))
+    eframe::run_native(TITLE, options, Box::new(move |cc| Ok(Box::new(App::new(cc, &launch, settings)))))
         .map_err(|e| format!("DevAssist couldn't open its window: {e}"))
 }
 
@@ -60,26 +80,19 @@ pub struct App {
 
 impl App {
     /// The window's state, with the faces installed and the window's GPU lent to the glass.
-    fn new(cc: &eframe::CreationContext<'_>, launch: Launch) -> App {
+    fn new(cc: &eframe::CreationContext<'_>, launch: &Launch, settings: Result<Settings, String>) -> App {
         assets::install_fonts(&cc.egui_ctx);
         // The glass shader runs on the same GPU device the window is drawn with.
         if let Some(state) = &cc.wgpu_render_state {
             gpu::install(state.device.clone(), state.queue.clone());
         }
-        let settings = match &launch.config {
-            Some(path) => config::load(path),
-            None => config::load_default(),
-        };
-        if let Err(e) = &settings {
-            log::warn!("settings: {e}; the window opens in the default look");
-        }
-        let looks = [launch::look(settings.clone(), &launch, false), launch::look(settings, &launch, true)];
+        let looks = [launch::look(settings.clone(), launch, false), launch::look(settings, launch, true)];
         App {
             looks,
             sidebar_shown: !launch.sidebar_hidden,
             baker: Baker::new(),
             visuals: None,
-            shot: launch.screenshot.map(screenshot::Job::new),
+            shot: launch.screenshot.clone().map(screenshot::Job::new),
             start: Instant::now(),
         }
     }
@@ -100,6 +113,9 @@ impl eframe::App for App {
         let (mode, backdrop, blur) = self.looks[usize::from(system_dark)].clone();
         if self.visuals != Some(mode) {
             self.visuals = Some(mode);
+            // egui follows the system's theme by default; pinned to the window's mode, its own defaults match
+            // what the window draws, whatever the system does. Pinned first, as the visuals are set for it.
+            ctx.set_theme(if mode == Mode::Dark { egui::Theme::Dark } else { egui::Theme::Light });
             let mut visuals = if mode == Mode::Dark { egui::Visuals::dark() } else { egui::Visuals::light() };
             // The baked pictures are the window's background; egui's panels must not cover them.
             visuals.panel_fill = Color32::TRANSPARENT;
@@ -187,6 +203,17 @@ mod tests {
     use egui::{ResizeDirection as To, pos2};
 
     use super::*;
+
+    #[test]
+    fn a_settings_file_that_could_not_be_read_is_said() {
+        let broken = Err("line 1: theme is light, dark or system".to_owned());
+        assert_eq!(
+            settings_warning(&broken).as_deref(),
+            Some("devassist-gui: line 1: theme is light, dark or system; opening with the default look")
+        );
+        let read = Ok(Settings::for_folder(Vec::new(), std::path::PathBuf::from("devassist.toml")));
+        assert_eq!(settings_warning(&read), None);
+    }
 
     #[test]
     fn a_press_near_an_edge_or_corner_resizes_that_way() {
