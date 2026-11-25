@@ -104,6 +104,40 @@ pub struct Settings {
     pub unsaved: bool,
 }
 
+impl Settings {
+    /// Every field at its default, for the given checkouts. For tests.
+    pub fn for_folder(checkouts: Vec<PathBuf>, config_path: PathBuf) -> Settings {
+        let saved = saved_from(&ParsedConfig::default());
+        let clone_dir = checkouts
+            .first()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."));
+        Settings {
+            title: default_title(),
+            custom_title: None,
+            owners: Vec::new(),
+            owners_explicit: false,
+            pinned: Vec::new(),
+            protocol: saved.protocol,
+            doctor: false,
+            checkouts,
+            clone_dir,
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+            update_check: saved.update_check,
+            watched: Vec::new(),
+            watch_interval: saved.watch_interval,
+            pull_requests: saved.pull_requests,
+            shell: saved.shell,
+            look: saved.look,
+            update_check_now: saved.update_check,
+            config_path,
+            first_run: false,
+            unsaved: false,
+        }
+    }
+}
+
 /// The settings of the shell: they are about no tool in particular.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShellPrefs {
@@ -219,6 +253,28 @@ pub fn startup() -> Result<Startup, String> {
         }
     }
     let loaded = load_file(&flags)?;
+    Ok(Startup::Run(Box::new(settings_from(&flags, loaded))))
+}
+
+/// Where the settings file is when no `--config` is given.
+pub fn default_path() -> Result<PathBuf, String> {
+    Ok(user_config_path())
+}
+
+/// The settings in the file at `path`, with every default resolved as for a
+/// start with no options. A file that does not exist gives the defaults.
+/// It reads no arguments and prints nothing.
+pub fn load(path: &Path) -> Result<Settings, String> {
+    let flags = Flags {
+        config: Some(path.to_path_buf()),
+        ..Flags::default()
+    };
+    let loaded = load_file(&flags)?;
+    Ok(settings_from(&flags, loaded))
+}
+
+/// Turns the file as found, and the options given, into the settings.
+fn settings_from(flags: &Flags, loaded: Loaded) -> Settings {
     let first_run = loaded.file.is_none() && !flags.owners_explicit && !flags.no_owner;
     let stored = saved_from(loaded.file.as_ref().unwrap_or(&ParsedConfig::default()));
     let mut checkouts = stored.checkouts;
@@ -260,8 +316,8 @@ pub fn startup() -> Result<Startup, String> {
     let shell = stored.shell;
     let look = stored.look;
     let discovered = discovered_owners(&checkouts);
-    let resolved = resolve(&flags, loaded.file, &discovered);
-    Ok(Startup::Run(Box::new(Settings {
+    let resolved = resolve(flags, loaded.file, &discovered);
+    Settings {
         title: resolved.title,
         custom_title: resolved.custom_title,
         owners: resolved.owners,
@@ -283,7 +339,7 @@ pub fn startup() -> Result<Startup, String> {
         config_path: loaded.path,
         first_run,
         unsaved,
-    })))
+    }
 }
 
 pub fn print_help() {
@@ -1729,6 +1785,51 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ))
+    }
+
+    /// A settings file of its own with the given text in it.
+    fn file_with(name: &str, text: &str) -> PathBuf {
+        let path = temp_file(name);
+        fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn settings_load_from_a_file_without_a_command_line() {
+        let path = file_with(
+            "load",
+            "theme = dark\nbackdrop = night\nwatch_interval = 30\n",
+        );
+        let settings = load(&path).unwrap();
+        assert_eq!(
+            settings.look,
+            Look {
+                theme: Theme::Dark,
+                backdrop: "night".into(),
+                blur: true
+            }
+        );
+        assert_eq!(settings.watch_interval, 30);
+        assert_eq!(settings.config_path, path);
+        assert!(!settings.first_run);
+    }
+
+    #[test]
+    fn a_missing_settings_file_loads_as_the_defaults() {
+        let path = std::env::temp_dir().join("devassist-load-missing.toml");
+        let _ = fs::remove_file(&path);
+        let settings = load(&path).unwrap();
+        assert_eq!(settings.look, Look::default());
+        assert!(settings.first_run);
+    }
+
+    #[test]
+    fn a_settings_file_with_a_mistake_does_not_load() {
+        let path = file_with("load-bad", "theme = purple\n");
+        assert_eq!(
+            load(&path).unwrap_err(),
+            format!("{}: line 1: theme is light, dark or system", path.display())
+        );
     }
 
     /// One checkout in no group, watched every five minutes.

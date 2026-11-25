@@ -34,26 +34,12 @@ fn git(dir: &Path, args: &[&str]) {
 fn settings(root: &Path, checkout: PathBuf) -> Settings {
     Settings {
         title: "Test".into(),
-        custom_title: None,
-        owners: Vec::new(),
         owners_explicit: true,
-        pinned: Vec::new(),
         protocol: Protocol::Https,
-        doctor: false,
-        checkouts: vec![checkout],
         clone_dir: root.to_path_buf(),
-        placement: Vec::new(),
-        collapsed: Vec::new(),
         update_check: false,
-        watched: Vec::new(),
-        watch_interval: 5,
-        pull_requests: false,
-        shell: Default::default(),
-        look: Default::default(),
         update_check_now: false,
-        config_path: root.join("devassist.toml"),
-        first_run: false,
-        unsaved: false,
+        ..Settings::for_folder(vec![checkout], root.join("devassist.toml"))
     }
 }
 
