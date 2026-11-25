@@ -1253,6 +1253,19 @@ impl Repos {
         else {
             return;
         };
+        self.toggle_mark_of(&row);
+        self.selected = Some(row);
+        self.move_by(1);
+    }
+
+    /// Ticks or unticks the row with this key (a repository's folder or a
+    /// group's key) without moving the highlight. A group's key ticks the
+    /// whole group, or unticks it when all of it is ticked. A key that is
+    /// not a row changes nothing.
+    pub fn toggle_mark_of(&mut self, row: &str) {
+        if !self.current_names().iter().any(|name| name == row) {
+            return;
+        }
         if let Some(group) = row.strip_prefix(GROUP_KEY) {
             let members = self.group_members(group);
             if members.iter().all(|name| self.marked.contains(name)) {
@@ -1264,13 +1277,25 @@ impl Repos {
                     }
                 }
             }
-        } else if let Some(index) = self.marked.iter().position(|marked| *marked == row) {
+        } else if let Some(index) = self.marked.iter().position(|marked| marked == row) {
             self.marked.remove(index);
         } else {
-            self.marked.push(row.clone());
+            self.marked.push(row.to_string());
         }
-        self.selected = Some(row);
-        self.move_by(1);
+    }
+
+    /// Unticks everything.
+    pub fn clear_marks(&mut self) {
+        self.marked.clear();
+    }
+
+    /// Highlights the row with this key (a repository's folder or a
+    /// group's key). Only a row the list shows can be picked: an unknown
+    /// key, or one the filter or a folded group hides, changes nothing.
+    pub fn pick(&mut self, key: &str) {
+        if self.current_names().iter().any(|name| name == key) {
+            self.selected = Some(key.to_string());
+        }
     }
 
     /// Ticks every repository the list shows. When they all are ticked
@@ -1851,6 +1876,17 @@ impl Repos {
     pub fn note_list_filter_changed(&mut self) {
         self.list_scroll = 0;
         self.snap_visible_selection();
+    }
+
+    /// Sets the filter of the installed list to `text` in one step, without
+    /// opening the filter mode, and does what typing into it does. The same
+    /// text again does nothing.
+    pub fn set_list_filter(&mut self, text: &str) {
+        if self.list_filter == text {
+            return;
+        }
+        self.list_filter = text.to_string();
+        self.note_list_filter_changed();
     }
 
     pub fn open_import(&mut self) {
@@ -2744,6 +2780,22 @@ impl Repos {
         self.watched
             .iter()
             .any(|known| paths::same_path(known, path))
+    }
+
+    /// How many repositories are watched, for the automatic pull.
+    pub fn watched_count(&self) -> usize {
+        self.watched.len()
+    }
+
+    /// For a repository the running job has an item for: how far it is, from
+    /// 0 to 1, and its state in a few words, as the progress dialog shows
+    /// them. None when no job is running (a finished one is not) or the job
+    /// has no item for the repository.
+    pub fn job_share_of(&self, folder: &str) -> Option<(f32, String)> {
+        let job = self.job.as_ref().filter(|job| job.running())?;
+        let item = job.items.iter().find(|item| item.name == folder)?;
+        let share = item.bar_fill().unwrap_or(0.0).clamp(0.0, 1.0) as f32;
+        Some((share, item.short_state()))
     }
 
     fn watch_every(&self) -> Duration {
@@ -4645,5 +4697,98 @@ mod tests {
         wait(&mut app);
         assert_eq!(app.status, "1 installed.");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_row_is_picked_by_its_key_and_an_unknown_key_changes_nothing() {
+        let mut app = grouped_app();
+        app.pick("docs");
+        assert_eq!(app.selected.as_deref(), Some("docs"));
+        app.pick("nope");
+        assert_eq!(app.selected.as_deref(), Some("docs"));
+        // A repository the filter hides is not a row, so it is not picked.
+        app.list_filter = "web".into();
+        app.pick("api");
+        assert_eq!(app.selected.as_deref(), Some("docs"));
+        app.pick("web");
+        assert_eq!(app.selected.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn a_repository_is_ticked_without_moving_the_highlight() {
+        let mut app = grouped_app();
+        app.toggle_mark_of("docs");
+        assert_eq!(app.selected.as_deref(), Some("api"));
+        assert_eq!(app.marked, ["docs"]);
+        app.toggle_mark_of("docs");
+        assert_eq!(app.selected.as_deref(), Some("api"));
+        assert!(app.marked.is_empty());
+        // What is not a row is not ticked.
+        app.toggle_mark_of("nope");
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn ticking_a_group_ticks_its_repositories() {
+        let mut app = grouped_app();
+        app.installed[0].group = "work".into();
+        app.installed[1].group = "work".into();
+        app.toggle_mark_of(&group_key("work"));
+        assert_eq!(app.marked, ["api", "docs"]);
+        assert_eq!(app.selected.as_deref(), Some("api"));
+        app.toggle_mark_of(&group_key("work"));
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn clearing_the_ticks_unticks_everything() {
+        let mut app = grouped_app();
+        app.toggle_mark_of("api");
+        app.toggle_mark_of("web");
+        assert_eq!(app.marked.len(), 2);
+        app.clear_marks();
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn the_filter_is_set_in_one_step_and_the_highlight_stays_on_a_shown_row() {
+        let mut app = Repos::empty(test_settings());
+        for name in ["api", "portal", "poll"] {
+            app.installed.push(installed("acme", name));
+        }
+        app.selected = Some("api".into());
+        app.set_list_filter("po");
+        assert!(app.mode == Mode::List, "no filter mode is opened");
+        assert_eq!(app.list_filter, "po");
+        let keys: Vec<String> = app.rows().iter().map(Row::key).collect();
+        assert_eq!(keys, ["portal", "poll"]);
+        assert!(keys.contains(app.selected.as_ref().unwrap()));
+        // The same text again does nothing, not even the scroll.
+        app.list_scroll = 3;
+        app.set_list_filter("po");
+        assert_eq!(app.list_scroll, 3);
+        app.set_list_filter("");
+        assert_eq!(app.rows().len(), 3);
+    }
+
+    #[test]
+    fn a_running_job_says_how_far_each_repository_is() {
+        let mut app = grouped_app();
+        assert_eq!(app.job_share_of("api"), None, "no job");
+        app.job = Some(Job::new("Updating", vec!["api".into(), "docs".into()], 0));
+        let job = app.job.as_mut().unwrap();
+        job.on(JobEvent::Start(0));
+        job.on(JobEvent::Steps(3, 4));
+        let (share, text) = app.job_share_of("api").unwrap();
+        assert!((share - 0.75).abs() < 1e-6);
+        assert_eq!(text, "3/4");
+        // Waiting is at the start; a repository outside the job has nothing.
+        let (share, text) = app.job_share_of("docs").unwrap();
+        assert!(share.abs() < 1e-6);
+        assert_eq!(text, "waiting");
+        assert_eq!(app.job_share_of("web"), None);
+        // A finished run is not busy any more.
+        app.job.as_mut().unwrap().finish(Ok("done".into()), false);
+        assert_eq!(app.job_share_of("api"), None);
     }
 }

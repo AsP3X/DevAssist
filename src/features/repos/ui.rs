@@ -2058,19 +2058,7 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
         let label_width = (rows_area.width as usize).saturating_sub(short_width + 4);
         for (offset, item) in job.items.iter().enumerate().skip(first).take(rows) {
             let (icon, icon_style) = progress::icon(item.state, tick);
-            let short = match item.state {
-                ItemState::Waiting if item.note.is_empty() => "waiting".to_string(),
-                ItemState::Waiting => item.note.clone(),
-                ItemState::Running => match (item.steps, item.percent()) {
-                    (Some((done, total)), _) if total > 0 => format!("{done}/{total}"),
-                    (_, Some(percent)) => format!("{percent}%"),
-                    _ => "working".to_string(),
-                },
-                ItemState::Done if item.note.is_empty() => "done".to_string(),
-                ItemState::Done => item.note.clone(),
-                ItemState::Failed if item.note == "cancelled" => "cancelled".to_string(),
-                ItemState::Failed => "failed".to_string(),
-            };
+            let short = item.short_state();
             let picked = many && offset == shown;
             let name_style = match item.state {
                 ItemState::Failed => Style::default().fg(Color::Red),
@@ -2154,7 +2142,6 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
             // An update counts branches: done, out of those with news.
             let steps_text = gitprogress::steps_label(item.steps).unwrap_or_default();
             let steps = item.steps.filter(|(_, total)| *total > 0);
-            let part = steps.map(|(done, total)| f64::from(done) / f64::from(total));
             let (status, status_style, detail_line, detail_style) = match item.state {
                 ItemState::Waiting if item.note.is_empty() => {
                     ("waiting for its turn".to_string(), dim, String::new(), dim)
@@ -2205,11 +2192,12 @@ fn draw_progress(frame: &mut Frame, app: &mut App, screen: Rect) {
                 Span::raw(" ".repeat(gap)),
                 Span::styled(took, dim),
             ]));
-            let (fill, color) = match item.state {
-                ItemState::Waiting => (Some(0.0), Color::DarkGray),
-                ItemState::Running => (item.fraction(), Color::Cyan),
-                ItemState::Done => (Some(part.unwrap_or(1.0)), Color::Green),
-                ItemState::Failed => (Some(part.unwrap_or(1.0)), Color::Red),
+            let fill = item.bar_fill();
+            let color = match item.state {
+                ItemState::Waiting => Color::DarkGray,
+                ItemState::Running => Color::Cyan,
+                ItemState::Done => Color::Green,
+                ItemState::Failed => Color::Red,
             };
             // Right of the bar: branches done of branches due, else git's percentage.
             let tag = match (steps, item.percent()) {

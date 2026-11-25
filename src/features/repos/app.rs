@@ -399,7 +399,7 @@ impl App {
                 self.clone_selected();
             }
         } else if matches!(self.mode, Mode::List | Mode::Filter) {
-            self.selected = Some(name.clone());
+            self.pick(&name);
             // A click on a group's header folds or unfolds it.
             if let Some(group) = name.strip_prefix(GROUP_KEY) {
                 self.toggle_group(group);

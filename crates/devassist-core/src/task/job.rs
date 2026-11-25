@@ -64,6 +64,39 @@ impl Item {
         }
     }
 
+    /// A few words for the item's state, as the progress dialog's list
+    /// shows them.
+    pub fn short_state(&self) -> String {
+        match self.state {
+            ItemState::Waiting if self.note.is_empty() => "waiting".to_string(),
+            ItemState::Waiting => self.note.clone(),
+            ItemState::Running => match (self.steps, self.percent()) {
+                (Some((done, total)), _) if total > 0 => format!("{done}/{total}"),
+                (_, Some(percent)) => format!("{percent}%"),
+                _ => "working".to_string(),
+            },
+            ItemState::Done if self.note.is_empty() => "done".to_string(),
+            ItemState::Done => self.note.clone(),
+            ItemState::Failed if self.note == "cancelled" => "cancelled".to_string(),
+            ItemState::Failed => "failed".to_string(),
+        }
+    }
+
+    /// How full the item's bar is, as the progress dialog draws it: empty
+    /// while waiting, as far as it is while running (None when that is not
+    /// known), and the steps done, or full, once it has ended.
+    pub fn bar_fill(&self) -> Option<f64> {
+        let part = self
+            .steps
+            .filter(|(_, total)| *total > 0)
+            .map(|(done, total)| f64::from(done) / f64::from(total));
+        match self.state {
+            ItemState::Waiting => Some(0.0),
+            ItemState::Running => self.fraction(),
+            ItemState::Done | ItemState::Failed => Some(part.unwrap_or(1.0)),
+        }
+    }
+
     pub fn elapsed(&self) -> Option<Duration> {
         let started = self.started?;
         Some(
