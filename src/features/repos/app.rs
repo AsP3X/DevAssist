@@ -179,7 +179,7 @@ impl App {
             KeyCode::Char('q') => self.quit(),
             KeyCode::Char('/') => self.open_filter(),
             KeyCode::Esc if self.busy || self.fetching => self.cancel_work(),
-            KeyCode::Esc => self.marked.clear(),
+            KeyCode::Esc => self.clear_marks(),
             _ => {}
         }
     }

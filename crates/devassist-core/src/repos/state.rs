@@ -577,6 +577,8 @@ pub struct Repos {
     /// When the next automatic pull is due.
     #[doc(hidden)]
     pub watch_due: Instant,
+    /// No automatic pull starts, whatever is due: set by `reading`.
+    watch_held: bool,
     /// What the status line said before an automatic pull took it over.
     /// A pull that brings nothing puts it back.
     watch_status: Option<(String, bool)>,
@@ -621,6 +623,17 @@ impl Repos {
                 });
             }
         }
+        app
+    }
+
+    /// Reads the checkouts as they are on disk and changes none of them:
+    /// no fetch, no automatic pull, no settings dialog, and the settings
+    /// file is not written. For a run that only looks, such as a picture
+    /// of the window.
+    pub fn reading(settings: Settings) -> Self {
+        let mut app = Self::empty(settings);
+        app.watch_held = true;
+        app.reload_lists(false, false);
         app
     }
 
@@ -688,6 +701,7 @@ impl Repos {
             pull_requests: settings.pull_requests,
             // The first pull runs as soon as the startup check is done.
             watch_due: Instant::now(),
+            watch_held: false,
             watch_status: None,
             pulls: HashMap::new(),
             pulls_generation: 0,
@@ -2847,6 +2861,7 @@ impl Repos {
     /// line says what came in.
     fn start_due_watch(&mut self) -> bool {
         if self.watched.is_empty()
+            || self.watch_held
             || self.busy
             || self.fetching
             || self.status_pending > 0
@@ -4700,6 +4715,73 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_start_fetches_nothing_pulls_nothing_and_writes_nothing() {
+        let root = scratch("reading");
+        let origin = root.join("origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("one"), "one").unwrap();
+        git(&origin, &["add", "one"]);
+        git(&origin, &["commit", "-q", "-m", "one"]);
+        git(&root, &["clone", "-q", origin.to_str().unwrap(), "tool"]);
+        let clone = root.join("tool");
+        // The origin moves on after the clone: a fetch or a pull would show.
+        std::fs::write(origin.join("two"), "two").unwrap();
+        git(&origin, &["add", "two"]);
+        git(&origin, &["commit", "-q", "-m", "two"]);
+        let tip = |dir: &Path, rev: &str| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", rev])
+                .output()
+                .expect("git runs");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let known = tip(&clone, "origin/main");
+
+        let settings = Settings {
+            checkouts: vec![clone.clone()],
+            watched: vec![clone.clone()],
+            owners: Vec::new(),
+            // Checkouts taken over at startup would be written by a normal start.
+            unsaved: true,
+            first_run: true,
+            config_path: root.join("devassist.toml"),
+            ..test_settings()
+        };
+        let mut app = Repos::reading(settings);
+        assert!(app.form.is_none(), "no settings dialog");
+        let until = Instant::now() + Duration::from_secs(60);
+        while app.waiting() {
+            assert!(!app.fetching, "nothing is fetched");
+            assert!(Instant::now() < until, "the read did not finish");
+            app.drain();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Idle now: a normal start would fetch, then pull the watched one.
+        for _ in 0..20 {
+            app.drain();
+            assert!(
+                !app.busy && !app.fetching,
+                "nothing starts once the read is done"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.installed.len(), 1);
+        assert_eq!(app.installed[0].branch, "main");
+        assert_eq!(app.watched_count(), 1);
+        assert_eq!(tip(&clone, "origin/main"), known, "not fetched");
+        assert!(!clone.join("two").exists(), "not pulled");
+        assert!(
+            !root.join("devassist.toml").exists(),
+            "the settings file is not written"
+        );
+        app.quit();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_row_is_picked_by_its_key_and_an_unknown_key_changes_nothing() {
         let mut app = grouped_app();
         app.pick("docs");
@@ -4712,6 +4794,27 @@ mod tests {
         assert_eq!(app.selected.as_deref(), Some("docs"));
         app.pick("web");
         assert_eq!(app.selected.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn a_groups_header_is_picked_and_a_member_of_a_folded_group_is_not() {
+        let mut app = grouped_app();
+        app.placement = vec![
+            (PathBuf::from("/srv/code/api"), "Work".into()),
+            (PathBuf::from("/srv/code/web"), "Work".into()),
+        ];
+        app.assign_groups();
+        app.pick("group::Work");
+        assert_eq!(app.selected.as_deref(), Some("group::Work"));
+        app.pick("web");
+        assert_eq!(app.selected.as_deref(), Some("web"));
+        // Folded, the group hides its members: they are no rows to pick.
+        app.collapsed = vec!["Work".into()];
+        app.pick("group::Work");
+        app.pick("api");
+        assert_eq!(app.selected.as_deref(), Some("group::Work"));
+        app.pick("docs");
+        assert_eq!(app.selected.as_deref(), Some("docs"));
     }
 
     #[test]
