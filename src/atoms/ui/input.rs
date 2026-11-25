@@ -1,6 +1,7 @@
 //! Typing into one line of text. Text is added and removed at its end;
 //! there is no cursor to move.
 
+use devassist_core::edit::delete_word;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What a character typed with Alt held does.
@@ -30,30 +31,6 @@ pub fn edit(text: &mut String, key: KeyEvent, alt: Alt) -> bool {
         _ => return false,
     }
     true
-}
-
-fn delete_word(text: &mut String) {
-    while text
-        .chars()
-        .next_back()
-        .is_some_and(|ch| ch.is_whitespace())
-    {
-        text.pop();
-    }
-    while text
-        .chars()
-        .next_back()
-        .is_some_and(|ch| !ch.is_whitespace())
-    {
-        text.pop();
-    }
-    while text
-        .chars()
-        .next_back()
-        .is_some_and(|ch| ch.is_whitespace())
-    {
-        text.pop();
-    }
 }
 
 #[cfg(test)]

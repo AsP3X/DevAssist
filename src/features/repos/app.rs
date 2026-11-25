@@ -2027,7 +2027,7 @@ impl App {
             self.mode = Mode::List;
             return;
         };
-        match prompt.on_key(key) {
+        match pathprompt::on_key(prompt, key) {
             pathprompt::Outcome::Stay => {}
             pathprompt::Outcome::Accept(folder) => self.use_folder(folder),
             pathprompt::Outcome::Close => self.close_path(),
