@@ -16,5 +16,8 @@ log.workspace = true
 png.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+devassist-core = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

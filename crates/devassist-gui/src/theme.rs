@@ -188,6 +188,14 @@ pub const PICTURE_KEEP_FRAMES: u64 = 120;
 pub const FRAMES_BEFORE_SHOT: u64 = 120;
 /// How long the window must be left alone after a resize before its glass is redrawn at the new size.
 pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+/// How long the window may sleep between two looks at the core's workers while the core is busy.
+pub const TICK_BUSY: Duration = Duration::from_millis(50);
+/// How long the window may sleep between two looks at the core while it is idle (the core's own timers, such as
+/// the automatic pull of watched repositories, still run on these looks).
+pub const TICK_IDLE: Duration = Duration::from_secs(1);
+/// How long the demo's repositories are left alone by the core's automatic pull: the demo's folders are not on
+/// any disk, so the pull must not start (30 days).
+pub const DEMO_WATCH_HOLD: Duration = Duration::from_hours(30 * 24);
 
 /// Whether the window is drawn light or dark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

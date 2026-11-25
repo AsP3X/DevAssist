@@ -1,6 +1,6 @@
 //! The `DevAssist` window.
 //!
-//! `devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar]`
+//! `devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar] [--demo]`
 
 use std::process::ExitCode;
 

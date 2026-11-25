@@ -10,6 +10,7 @@ use crate::assets;
 use crate::baker::{Baker, Scene};
 use crate::launch::{self, Launch};
 use crate::screenshot;
+use crate::session::Session;
 use crate::shell::{self, Shown};
 use crate::theme::{self, Mode, RESIZE_SETTLE, Surface};
 
@@ -76,6 +77,8 @@ pub struct App {
     shot: Option<screenshot::Job>,
     /// When the window opened; the baker's clock counts from here.
     start: Instant,
+    /// The repositories, loaded and kept current.
+    session: Session,
 }
 
 impl App {
@@ -86,7 +89,7 @@ impl App {
         if let Some(state) = &cc.wgpu_render_state {
             gpu::install(state.device.clone(), state.queue.clone());
         }
-        let looks = [launch::look(settings.clone(), launch, false), launch::look(settings, launch, true)];
+        let looks = [launch::look(settings.clone(), launch, false), launch::look(settings.clone(), launch, true)];
         App {
             looks,
             sidebar_shown: !launch.sidebar_hidden,
@@ -94,15 +97,24 @@ impl App {
             visuals: None,
             shot: launch.screenshot.clone().map(screenshot::Job::new),
             start: Instant::now(),
+            session: Session::start(settings, launch.demo),
         }
     }
 }
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // What the core's workers sent is taken in once a frame, and the next frame is asked for in time.
+        ctx.request_repaint_after(self.session.tick());
         if let Some(job) = &mut self.shot {
             job.frame(ctx);
         }
+    }
+
+    /// Once, as the window closes, however it was asked to (its own close button, the system's, a signal): stops
+    /// the git the core started.
+    fn on_exit(&mut self) {
+        self.session.close();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

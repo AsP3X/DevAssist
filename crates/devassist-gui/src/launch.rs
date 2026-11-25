@@ -7,7 +7,8 @@ use devassist_core::config::{BACKDROPS, Look, Settings};
 use crate::theme::Mode;
 
 /// How the command line is written.
-pub const USAGE: &str = "usage: devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar]";
+pub const USAGE: &str =
+    "usage: devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar] [--demo]";
 
 /// What the command line asks for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub struct Launch {
     pub no_blur: bool,
     /// The window opens with its sidebar hidden.
     pub sidebar_hidden: bool,
+    /// The window shows the drawing's twelve repositories instead of the real ones, reading no disk and no network.
+    pub demo: bool,
 }
 
 /// Reads the command line `args`, without the program's own name.
@@ -42,6 +45,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Launch, String> {
             "--backdrop" => launch.backdrop = Some(args.next().ok_or_else(|| format!("--backdrop needs a key: {}", BACKDROPS.join(", ")))?),
             "--no-blur" => launch.no_blur = true,
             "--no-sidebar" => launch.sidebar_hidden = true,
+            "--demo" => launch.demo = true,
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
             other => return Err(format!("unexpected argument {other}")),
         }
@@ -80,6 +84,8 @@ mod tests {
     fn the_other_options_are_read_too() {
         let l = parse(["--config", "c.toml", "--light", "--no-sidebar"].map(String::from).into_iter()).unwrap();
         assert_eq!((l.config, l.mode, l.sidebar_hidden, l.no_blur), (Some(PathBuf::from("c.toml")), Some(Mode::Light), true, false));
+        assert!(parse(["--demo".to_string()].into_iter()).unwrap().demo);
+        assert!(!l.demo);
         assert_eq!(parse(std::iter::empty()).unwrap(), Launch::default());
         assert_eq!(parse(["--config".to_string()].into_iter()).unwrap_err(), "--config needs a file name");
         assert!(parse(["--backdrop".to_string()].into_iter()).unwrap_err().starts_with("--backdrop needs a key"));
