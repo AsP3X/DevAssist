@@ -2,8 +2,8 @@ use std::fmt;
 
 use serde::Deserialize;
 
-use crate::atoms::sys::http::{self, Profile};
-use crate::features::repos::gitops;
+use crate::repos::gitops;
+use crate::sys::http::{self, Profile};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSpec {
@@ -693,7 +693,7 @@ pub fn fetch_forks(
         let mut url = Some(forks_url(&owner, &name));
         let mut pages = 0;
         while let Some(next) = url.take() {
-            if crate::atoms::sys::process::was_cancelled() {
+            if crate::sys::process::was_cancelled() {
                 return Err("cancelled".into());
             }
             pages += 1;
@@ -863,7 +863,7 @@ fn gh_cli_token() -> Option<String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .env("GH_PROMPT_DISABLED", "1");
-    crate::atoms::sys::process::quiet(&mut cmd);
+    crate::sys::process::quiet(&mut cmd);
     let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;

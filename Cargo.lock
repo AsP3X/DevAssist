@@ -376,6 +376,8 @@ dependencies = [
 name = "devassist-core"
 version = "0.6.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "ureq",
 ]
 

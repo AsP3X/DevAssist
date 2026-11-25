@@ -2,9 +2,7 @@
 //! updating, grouping and removing them.
 
 pub mod app;
-pub mod github;
-pub mod gitops;
-pub mod gitprogress;
+pub use devassist_core::repos::{github, gitops, gitprogress};
 pub mod settings;
 pub mod ui;
 

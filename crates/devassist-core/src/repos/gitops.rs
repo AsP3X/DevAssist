@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::atoms::sys::paths;
-use crate::atoms::sys::process::{self, RunError};
+use crate::sys::paths;
+use crate::sys::process::{self, RunError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -2782,7 +2782,7 @@ fn auth_header(token: Option<&str>) -> Option<String> {
     raw.extend(token.as_bytes());
     Some(format!(
         "AUTHORIZATION: Basic {}",
-        crate::atoms::sys::encode::base64(&raw)
+        crate::sys::encode::base64(&raw)
     ))
 }
 

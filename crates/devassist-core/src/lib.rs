@@ -3,5 +3,6 @@
 pub mod edit;
 pub mod list;
 pub mod prompt;
+pub mod repos;
 pub mod sys;
 pub mod task;

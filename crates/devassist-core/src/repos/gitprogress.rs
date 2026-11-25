@@ -1,6 +1,6 @@
 //! What git's output says about how far a clone, fetch or update is.
 
-use crate::atoms::task::job::{Job, parse_percent};
+use crate::task::job::{Job, parse_percent};
 
 /// The share of a clone or fetch each of git's phases takes, as the range
 /// it covers from 0 to 1. Receiving is the download and takes most of the
@@ -80,7 +80,7 @@ pub fn steps_label(steps: Option<(u32, u32)>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atoms::task::job::{ItemState, JobEvent};
+    use crate::task::job::{ItemState, JobEvent};
 
     fn job(names: &[&str]) -> Job {
         super::job(
