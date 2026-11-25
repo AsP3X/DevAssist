@@ -2,7 +2,7 @@
 //! the table on the panel or the sentence that says why there is none, the status bar's words, and the keys of
 //! the terminal app. Every change goes through a method of the core's `Repos`.
 
-use devassist_core::repos::state::{GROUP_KEY, Repos, SortMode};
+use devassist_core::repos::state::{GROUP_KEY, Mode as CoreMode, Repos, SortMode};
 use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Sense, Ui, pos2};
 
 use crate::assets::{self, Icon};
@@ -49,12 +49,40 @@ fn selected(count: usize) -> String {
 }
 
 /// What the screen keeps from one frame to the next.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Screen {
     /// How far the table's lines are moved up.
     scroll: f32,
     /// The filter field had the focus at the end of the last frame.
     filter_focused: bool,
+    /// While the row's menu is open: the key of the row it was opened on, and where that row's button is.
+    menu: Option<(String, Rect)>,
+}
+
+#[cfg(test)]
+impl Screen {
+    /// The key of the row the open menu belongs to.
+    pub(crate) fn menu_row(&self) -> Option<&str> {
+        self.menu.as_ref().map(|(key, _)| key.as_str())
+    }
+}
+
+/// Where the button is that the open menu stands under, as the screen placed it in the last frame: the "…" of the
+/// row it was opened on (`table::dots_rect`). `None` while no menu is open, and in the frame one opens, before the
+/// screen has placed it.
+#[must_use]
+pub fn menu_anchor(screen: &Screen) -> Option<Rect> {
+    screen.menu.as_ref().map(|(_, anchor)| *anchor)
+}
+
+/// Opens the menu for the row `key`, as its "…" asks: for that row alone when it is not ticked (the ticks are
+/// cleared first), for every ticked row when it is. The row is highlighted either way.
+pub fn open_menu(repos: &mut Repos, key: &str) {
+    if !repos.is_marked_local(key) {
+        repos.clear_marks();
+    }
+    repos.pick(key);
+    repos.enter_row();
 }
 
 /// Where the toolbar's controls are this frame, and what they say: decided before the bake, so their glass is
@@ -174,6 +202,8 @@ enum Command {
     Fold(bool),
     /// Show the run's progress dialog again.
     ShowRun,
+    /// Open the menu of the highlighted row, or fold the highlighted group.
+    Enter,
 }
 
 /// What the keys among `events` ask, in order, as the terminal app reads them. Letters are read from the typed
@@ -199,6 +229,7 @@ fn commands(events: &[Event]) -> Vec<Command> {
                     Key::F5 => Command::Refresh,
                     Key::ArrowLeft => Command::Fold(true),
                     Key::ArrowRight => Command::Fold(false),
+                    Key::Enter if !modifiers.any() => Command::Enter,
                     _ => continue,
                 };
                 commands.push(command);
@@ -337,6 +368,11 @@ pub fn show(
             frost::paint(ui.painter(), Rect::from_min_size(Pos2::ZERO, ui.ctx().content_rect().size()), layout.panel, RADIUS_PANEL, sheet);
         }
         draw_state(ui, layout.panel, &title, &lines, palette);
+        // No table, no row to stand under.
+        if let Some(repos) = session.repos_mut().filter(|repos| repos.mode == CoreMode::Menu) {
+            repos.close_menu();
+        }
+        screen.menu = None;
         return;
     }
     let (Some(repos), Some(sheet)) = (session.repos_mut(), sheet) else { return };
@@ -347,8 +383,13 @@ pub fn show(
             screen.scroll = follow(&heights, index, screen.scroll, table::body_rect(layout.panel).height());
         }
     }
-    let did = table::show(ui, layout.panel, &lines, sheet, palette, mode, &mut screen.scroll);
+    let open = screen.menu.as_ref().filter(|_| repos.mode == CoreMode::Menu).map(|(key, _)| key.as_str());
+    let did = table::show(ui, layout.panel, &lines, sheet, palette, mode, &mut screen.scroll, open);
     match if keys { did } else { Did::None } {
+        Did::Menu { key, anchor } => {
+            open_menu(repos, &key);
+            screen.menu = Some((key, anchor));
+        }
         Did::Picked(key) => repos.pick(&key),
         Did::Ticked(key) => repos.toggle_mark_of(&key),
         Did::Folded(key) => {
@@ -361,6 +402,23 @@ pub fn show(
         }
         Did::TickedAll => repos.mark_all_visible(),
         Did::None => {}
+    }
+    keep_menu(repos, layout.panel, screen);
+}
+
+/// Keeps the open menu under its row's button: the row it was opened on (the highlighted one when the screen did
+/// not open it: Enter, `--show menu`), placed again each frame. When that row is no longer shown (filtered out,
+/// removed, the list read again without it) the menu closes. No menu, no row.
+fn keep_menu(repos: &mut Repos, panel: Rect, screen: &mut Screen) {
+    if repos.mode != CoreMode::Menu {
+        screen.menu = None;
+        return;
+    }
+    let key = screen.menu.take().map(|(key, _)| key).or_else(|| repos.selected.clone());
+    let lines = repos_view::lines(repos);
+    screen.menu = key.and_then(|key| table::dots_rect(panel, &lines, screen.scroll, &key).map(|anchor| (key, anchor)));
+    if screen.menu.is_none() {
+        repos.close_menu();
     }
 }
 
@@ -395,6 +453,7 @@ fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
             repos.show_job();
             return false;
         }
+        Command::Enter => repos.enter_row(),
         Command::Refresh => {}
     }
     true

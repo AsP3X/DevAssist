@@ -1433,6 +1433,22 @@ impl Repos {
         self.mode = Mode::List;
     }
 
+    /// The menu's line that is highlighted, while the menu is open.
+    pub fn menu_highlight(&self) -> Option<MenuItem> {
+        let menu = self.menu.as_ref()?;
+        MenuItem::ALL.get(menu.selected).copied()
+    }
+
+    /// Highlights the menu's line `item`, for a menu that shows only some
+    /// of its lines. Nothing while the menu is closed.
+    pub fn highlight_menu(&mut self, item: MenuItem) {
+        if let Some(menu) = self.menu.as_mut()
+            && let Some(index) = MenuItem::ALL.iter().position(|known| *known == item)
+        {
+            menu.selected = index;
+        }
+    }
+
     /// Closes the menu and does what a line of the Migrate submenu says.
     pub fn run_migrate(&mut self, item: MigrateItem) {
         self.close_menu();
@@ -5354,6 +5370,27 @@ mod tests {
         );
         app.accept_group();
         assert_eq!(app.installed[0].group, "Tools");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_menu_highlights_the_line_asked_for_and_nothing_while_it_is_closed() {
+        let (mut app, root) = held_app("menu-highlight");
+        app.highlight_menu(MenuItem::Remove);
+        assert!(app.menu.is_none() && app.menu_highlight().is_none());
+        app.enter_row();
+        assert_eq!(
+            app.menu_highlight(),
+            Some(MenuItem::Update),
+            "the first line"
+        );
+        app.highlight_menu(MenuItem::Remove);
+        assert_eq!(app.menu_highlight(), Some(MenuItem::Remove));
+        assert_eq!(app.menu.as_ref().unwrap().selected, MenuItem::ALL.len() - 1);
+        app.highlight_menu(MenuItem::Github);
+        assert_eq!(app.menu_highlight(), Some(MenuItem::Github));
+        app.close_menu();
+        assert!(app.menu_highlight().is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

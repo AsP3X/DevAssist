@@ -108,7 +108,7 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Plan {
     let names: Vec<String> = lines.iter().map(|line| line.name.clone()).collect();
     let header = Header::new(painter, &remove_title(&names), LINE, DIALOG_WIDTH - 2.0 * DIALOG_PAD);
     let places = remove_places(window, header.height(), lines.len());
-    Plan { header, parts: Parts::Remove(places) }
+    Plan { header: Some(header), parts: Parts::Remove(places) }
 }
 
 /// The remove dialog at `places`, with `header`, for `repos`'s chosen folders, on the overlay in `ui`; `scrim` is

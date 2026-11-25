@@ -86,7 +86,7 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Option<Pla
     let job = repos.job.as_ref()?;
     let header = Header::new(painter, &job.title, &job.summary().to_string(), PROGRESS_WIDTH - 2.0 * DIALOG_PAD);
     let places = progress_places(window, header.height(), job.items.len());
-    Some(Plan { header, parts: Parts::Progress(places) })
+    Some(Plan { header: Some(header), parts: Parts::Progress(places) })
 }
 
 /// What a button of the progress dialog does when pressed.

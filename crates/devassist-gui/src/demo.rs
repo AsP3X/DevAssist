@@ -159,7 +159,7 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 3] = [("progress", show_progress), ("remove", show_remove), ("group", show_group)];
+pub const SHOWS: [(&str, Opener); 4] = [("progress", show_progress), ("remove", show_remove), ("group", show_group), ("menu", show_menu)];
 
 /// What sets an overlay up in the demo's repositories.
 pub type Opener = fn(&mut Repos);
@@ -221,6 +221,16 @@ fn show_group(repos: &mut Repos) {
     repos.open_group_prompt();
 }
 
+/// The row's menu, on the first ticked row (api), for both ticked rows, as Enter on that row opens it. (The design
+/// opens it on homelab, which is not ticked, and keeps the ticks; in the window the "…" of a row that is not ticked
+/// clears them.)
+fn show_menu(repos: &mut Repos) {
+    if let Some(first) = repos.marked.first().cloned() {
+        repos.pick(&first);
+    }
+    repos.enter_row();
+}
+
 #[cfg(test)]
 mod tests {
     use devassist_core::repos::state::Mode;
@@ -246,7 +256,7 @@ mod tests {
             repos.drain();
         }
         assert!(repos.mode == Mode::Progress && !repos.waiting());
-        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, not nothing");
+        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, not nothing");
     }
 
     #[test]
@@ -260,6 +270,15 @@ mod tests {
         assert!(repos.mode == Mode::Group);
         let prompt = repos.group_prompt.as_ref().unwrap();
         assert_eq!((prompt.repos.as_slice(), prompt.input.as_str()), (["api".to_owned(), "web".to_owned()].as_slice(), "Work"));
+    }
+
+    #[test]
+    fn the_demo_opens_the_menu_on_its_first_ticked_row_for_both() {
+        let mut repos = repos();
+        show(&mut repos, "menu").unwrap();
+        assert!(repos.mode == Mode::Menu);
+        assert_eq!(repos.selected.as_deref(), Some("api"));
+        assert_eq!(repos.chosen(), ["api", "web"]);
     }
 
     #[test]

@@ -23,12 +23,12 @@ use crate::theme::{Mode, WINDOW};
 use crate::widgets::{self, tests::context};
 
 /// The design's window.
-pub(super) fn window() -> Rect {
+pub(crate) fn window() -> Rect {
     Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))
 }
 
 /// A held run of `names`, the first running at 3 of 4 with `lines` of output each, as the core keeps it.
-pub(super) fn run(names: &[&str], lines: usize) -> Job {
+pub(crate) fn run(names: &[&str], lines: usize) -> Job {
     let mut job = Job::new("Updating 2 repositories", names.iter().map(|name| (*name).to_owned()).collect(), 0);
     for (index, name) in names.iter().enumerate().rev() {
         job.on(JobEvent::Start(index));
@@ -43,7 +43,7 @@ pub(super) fn run(names: &[&str], lines: usize) -> Job {
 }
 
 /// The demo's repositories with `job` as their run, its dialog open.
-pub(super) fn session_with(job: Job) -> Session {
+pub(crate) fn session_with(job: Job) -> Session {
     let mut session = Session::demo(crate::demo::repos());
     let repos = session.repos_mut().unwrap();
     repos.job = Some(job);
@@ -56,24 +56,24 @@ fn sheet() -> Sheet {
 }
 
 /// The window as the app runs it: the dialog placed before the bake, the screen, then the dialog.
-pub(super) struct Window {
-    pub(super) ctx: Context,
-    pub(super) session: Session,
+pub(crate) struct Window {
+    pub(crate) ctx: Context,
+    pub(crate) session: Session,
     screen: Screen,
-    pub(super) dialogs: Dialogs,
-    pub(super) size: [f32; 2],
+    pub(crate) dialogs: Dialogs,
+    pub(crate) size: [f32; 2],
     /// The dialog's plan in the last frame, when it was drawn.
     plan: Option<Plan>,
     /// The last frame baked a dialog's glass (`before` placed one).
-    pub(super) baked: bool,
+    pub(crate) baked: bool,
     /// The last frame painted something on the overlay's layer.
-    pub(super) painted: bool,
+    pub(crate) painted: bool,
     /// The last frame asked for the next one at once.
-    pub(super) repaint: bool,
+    pub(crate) repaint: bool,
 }
 
 impl Window {
-    pub(super) fn new(session: Session) -> Window {
+    pub(crate) fn new(session: Session) -> Window {
         Window {
             ctx: context(),
             session,
@@ -87,25 +87,25 @@ impl Window {
         }
     }
 
-    pub(super) fn frame(&mut self, events: Vec<Event>) {
+    pub(crate) fn frame(&mut self, events: Vec<Event>) {
         self.frame_at(events, None);
     }
 
-    pub(super) fn frame_at(&mut self, events: Vec<Event>, time: Option<f64>) {
+    pub(crate) fn frame_at(&mut self, events: Vec<Event>, time: Option<f64>) {
         let window = Rect::from_min_size(Pos2::ZERO, vec2(self.size[0], self.size[1]));
         let input = RawInput { screen_rect: Some(window), events, time, ..Default::default() };
         let (session, screen, dialogs) = (&mut self.session, &mut self.screen, &mut self.dialogs);
         let (mut plan, mut baked, mut painted) = (None, false, false);
         let output = self.ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
-            let planned = before(&ctx, session.repos(), dialogs);
+            let planned = before(&ctx, session.repos(), repos_screen::menu_anchor(screen), dialogs);
             baked = planned.is_some();
             let layout = shell::layout(window.size(), true, repos_screen::has_toolbar(session));
             let screen_plan = repos_screen::plan(ui.painter(), &layout, session);
             let keys = !overlay::is_open(&ctx);
             repos_screen::show(ui, &layout, screen_plan.as_ref(), session, Some(&sheet()), Mode::Light, screen, keys);
             after(&ctx, planned, session.repos_mut(), &[], Mode::Light, dialogs);
-            plan = super::plan(ui.painter(), window, session.repos());
+            plan = super::plan(ui.painter(), window, session.repos(), repos_screen::menu_anchor(screen));
             painted = ctx.graphics(|layers| layers.get(overlay::layer()).is_some_and(|list| !list.is_empty()));
         });
         self.repaint = output.viewport_output.get(&ViewportId::ROOT).is_some_and(|viewport| viewport.repaint_delay.is_zero());
@@ -114,19 +114,19 @@ impl Window {
     }
 
     /// A click at `at`, over four frames.
-    pub(super) fn click(&mut self, at: Pos2) {
+    pub(crate) fn click(&mut self, at: Pos2) {
         let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
         for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], Vec::new()] {
             self.frame(events);
         }
     }
 
-    pub(super) fn key(&mut self, key: Key) {
+    pub(crate) fn key(&mut self, key: Key) {
         self.frame(vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
         self.frame(Vec::new());
     }
 
-    pub(super) fn typed(&mut self, key: Key, text: &str) {
+    pub(crate) fn typed(&mut self, key: Key, text: &str) {
         self.frame(vec![
             Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
             Event::Text(text.to_owned()),
@@ -134,21 +134,21 @@ impl Window {
         self.frame(Vec::new());
     }
 
-    pub(super) fn repos(&self) -> &Repos {
+    pub(crate) fn repos(&self) -> &Repos {
         self.session.repos().unwrap()
     }
 
-    pub(super) fn job(&self) -> &Job {
+    pub(crate) fn job(&self) -> &Job {
         self.repos().job.as_ref().unwrap()
     }
 
     /// Whether a dialog is open: the core's mode asks for one and the overlay is shown.
-    pub(super) fn open(&self) -> bool {
+    pub(crate) fn open(&self) -> bool {
         which(self.repos()).is_some() && overlay::is_open(&self.ctx)
     }
 
     /// Whether the dialog `dialog` is open.
-    pub(super) fn shows(&self, dialog: Which) -> bool {
+    pub(crate) fn shows(&self, dialog: Which) -> bool {
         which(self.repos()) == Some(dialog) && overlay::is_open(&self.ctx)
     }
 
@@ -158,14 +158,33 @@ impl Window {
     }
 
     /// The places of the buttons in the last frame, with their words.
-    pub(super) fn buttons(&self) -> Vec<(Rect, &'static str)> {
+    pub(crate) fn buttons(&self) -> Vec<(Rect, &'static str)> {
         let (room, words) = match self.parts() {
             Parts::Progress(places) => (places.buttons, progress::button_words(self.job())),
             Parts::Remove(places) => (places.buttons, remove::button_words()),
             Parts::Group(places) => (places.buttons, group::said(self.repos())),
+            Parts::Menu(_) => return Vec::new(),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()
+    }
+
+    /// The menu's pane in the last frame, when the menu was drawn.
+    pub(crate) fn menu_pane(&self) -> Option<Rect> {
+        match self.plan.as_ref()?.parts {
+            Parts::Menu(places) => Some(places.pane),
+            Parts::Progress(_) | Parts::Remove(_) | Parts::Group(_) => None,
+        }
+    }
+
+    /// The window's layout, as its frames lay it out.
+    pub(crate) fn layout(&self) -> shell::Layout {
+        shell::layout(vec2(self.size[0], self.size[1]), true, repos_screen::has_toolbar(&self.session))
+    }
+
+    /// The row whose menu the screen keeps open.
+    pub(crate) fn screen_menu(&self) -> Option<&str> {
+        self.screen.menu_row()
     }
 
     fn button_width(words: &str) -> f32 {
@@ -175,19 +194,19 @@ impl Window {
         width
     }
 
-    pub(super) fn press(&mut self, words: &str) {
+    pub(crate) fn press(&mut self, words: &str) {
         let (place, _) = self.buttons().into_iter().find(|(_, said)| *said == words).unwrap();
         self.click(place.center());
     }
 
     /// The words of the dialog's buttons, from the left.
-    pub(super) fn said(&self) -> Vec<&'static str> {
+    pub(crate) fn said(&self) -> Vec<&'static str> {
         self.buttons().iter().map(|(_, words)| *words).collect()
     }
 }
 
 /// A turn of the wheel by `points`.
-pub(super) fn wheel(points: f32) -> Event {
+pub(crate) fn wheel(points: f32) -> Event {
     Event::MouseWheel {
         unit: MouseWheelUnit::Point,
         delta: vec2(0.0, points),
@@ -210,7 +229,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A temporary folder, removed when dropped: also when a test fails.
-pub(super) struct Temp(pub(super) PathBuf);
+pub(crate) struct Temp(pub(crate) PathBuf);
 
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -220,7 +239,7 @@ impl Drop for Temp {
 
 /// Checkouts `repos` under a fresh temporary folder `name`, each one commit behind its own origin. Gives the
 /// folder (removed when dropped) and the settings that manage them.
-pub(super) fn behind(name: &str, repos: &[&str]) -> (Temp, Settings) {
+pub(crate) fn behind(name: &str, repos: &[&str]) -> (Temp, Settings) {
     let root = Temp(std::env::temp_dir().join(format!("devassist-gui-{name}-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&root.0);
     std::fs::create_dir_all(&root.0).unwrap();
@@ -248,7 +267,7 @@ pub(super) fn behind(name: &str, repos: &[&str]) -> (Temp, Settings) {
 }
 
 /// Runs frames of `window`, taking in what the core's workers sent, until `done` or 30 seconds.
-pub(super) fn until(window: &mut Window, what: &str, done: impl Fn(&Window) -> bool) {
+pub(crate) fn until(window: &mut Window, what: &str, done: impl Fn(&Window) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !done(window) {
         assert!(Instant::now() < deadline, "still not {what} after 30 seconds");
@@ -259,7 +278,7 @@ pub(super) fn until(window: &mut Window, what: &str, done: impl Fn(&Window) -> b
 }
 
 /// A window on the live repositories of `settings`, `count` of them, read and fetched.
-pub(super) fn live(settings: Settings, count: usize) -> Window {
+pub(crate) fn live(settings: Settings, count: usize) -> Window {
     let mut window = Window::new(Session::Live(Box::new(Repos::new(settings))));
     until(&mut window, "read and fetched", |window| !window.repos().waiting() && window.repos().installed.len() == count);
     assert!(!window.open());

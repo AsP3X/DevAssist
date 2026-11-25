@@ -65,6 +65,18 @@ not stored). The file is long, so it was read in four successive parts of that o
 `group` (`e464`, the group dialog's field) was read on 2026-11-25 from the bundled `lucide.ttf` itself: its `post`
 table names the glyph `group` and its `cmap` maps `e464` to it; the same reading gives `folder-git-2` as `e40a`.
 
+The row menu's icons were read on 2026-11-26 the same way, from the bundled `lucide.ttf` (its `post` glyph names and
+its format 4 `cmap`, read with a short script of the standard library; nothing was downloaded). The same reading
+gives `group` as `e464`, `eye` as `e0ba` and `git-pull-request` as `e0e5`, as `src/assets.rs` has them.
+
+| Name | Code point |
+| --- | --- |
+| `arrow-down-to-line` | `e455` |
+| `folder-open` | `e247` |
+| `external-link` | `e0b9` |
+| `copy` | `e09e` |
+| `trash-2` | `e18e` (the font maps `e18d`, Lucide's `trash`, to the same glyph) |
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

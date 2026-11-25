@@ -271,6 +271,20 @@ pub const MENU_LINE: f32 = 9.0;
 pub const MENU_GAP: f32 = 4.0;
 /// The size of a key's name at the end of a menu row.
 pub const KEY_TEXT: f32 = 12.0;
+/// The room inside a menu's row before its icon and after its key, and at either side of the line between two
+/// parts of a menu (`menuRow`'s and `menuLine`'s `padding: [0, 8]`).
+pub const MENU_ROW_PAD: f32 = 8.0;
+/// The gap between a menu row's icon, its words and its key (`menuRow`'s `gap: 8`).
+pub const MENU_ROW_GAP: f32 = 8.0;
+/// The width of the key's name at the end of a menu row; the name stands at its right (`fixed(key, 16, …)`).
+pub const MENU_KEY_WIDTH: f32 = 16.0;
+/// How strong the line between two parts of a menu is, of the text colour (`menuLine`'s `fill: soft(0.12)`).
+pub const MENU_LINE_OPACITY: f32 = 0.12;
+/// The height of the fill behind a row's menu button, centred on the row; its ends are round (`Row actions`'s
+/// `height: 32`, `cornerRadius: 16`).
+pub const DOTS_HEIGHT: f32 = 32.0;
+/// The corner radius of the fill behind a row's menu button.
+pub const DOTS_RADIUS: f32 = 16.0;
 /// The gap between a dialog's title and the quiet line under it (`dialogTitle`'s `gap: 4`).
 pub const HEADER_GAP: f32 = 4.0;
 /// The height of a line of a dialog's quiet line, of its size (`dialogTitle`'s `lineHeight: 1.45`).
@@ -763,6 +777,12 @@ mod tests {
             ("MENU_LINE", MENU_LINE, 9.0),
             ("MENU_GAP", MENU_GAP, 4.0),
             ("KEY_TEXT", KEY_TEXT, 12.0),
+            ("MENU_ROW_PAD", MENU_ROW_PAD, 8.0),
+            ("MENU_ROW_GAP", MENU_ROW_GAP, 8.0),
+            ("MENU_KEY_WIDTH", MENU_KEY_WIDTH, 16.0),
+            ("MENU_LINE_OPACITY", MENU_LINE_OPACITY, 0.12),
+            ("DOTS_HEIGHT", DOTS_HEIGHT, 32.0),
+            ("DOTS_RADIUS", DOTS_RADIUS, 16.0),
             ("HEADER_GAP", HEADER_GAP, 4.0),
             ("HEADER_LINE_HEIGHT", HEADER_LINE_HEIGHT, 1.45),
             ("PROGRESS_WIDTH", PROGRESS_WIDTH, 640.0),

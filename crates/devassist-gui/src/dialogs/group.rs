@@ -144,7 +144,7 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Option<Pla
     let title = if prompt.rename.is_some() { RENAME_TITLE } else { MOVE_TITLE };
     let header = Header::new(painter, title, &line(prompt), DIALOG_WIDTH - 2.0 * DIALOG_PAD);
     let places = group_places(window, header.height(), note(prompt).is_some(), repos.groups().len());
-    Some(Plan { header, parts: Parts::Group(places) })
+    Some(Plan { header: Some(header), parts: Parts::Group(places) })
 }
 
 /// The scroll of a list of rows [`LIST_ROW`] tall in a box `room` points tall that shows the whole row `index`,

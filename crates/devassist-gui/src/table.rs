@@ -8,7 +8,7 @@
 use std::f32::consts::{FRAC_PI_2, PI};
 
 use egui::epaint::CornerRadiusF32;
-use egui::{Align2, Color32, FontFamily, Painter, Pos2, Rect, Role, Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2};
+use egui::{Align2, Color32, FontFamily, Painter, Pos2, Rect, Response, Role, Sense, Shape, Stroke, Ui, WidgetInfo, pos2, vec2};
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
@@ -16,10 +16,10 @@ use crate::columns::{self, Columns, Span};
 use crate::frost;
 use crate::repos_view::{Changes, GroupLine, Line, Origin, Pulls, RepoLine, Tone};
 use crate::theme::{
-    self, CELL_ICON_GAP, GROUP_FILL_OPACITY, GROUP_HEIGHT, GROUP_ROW_GAP, HAIRLINE, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, ICON, ICON_SMALL,
-    LINE_OPACITY, Mode, NAME_ICON_GAP, PROGRESS_HEIGHT, PROGRESS_LEAST, PROGRESS_TRACK_OPACITY, PULL_GAP, PULL_ICON_GAP, Palette, RADIUS_PANEL,
-    ROW_HEIGHT, ROW_PAD_RIGHT, RULE_BAR, RULE_BAR_TOP, RULE_BREAK_END, RULE_BREAK_GAP, RULE_FIFTH_OPACITY, RULE_HEIGHT, RULE_LABEL_GAP,
-    RULE_LEGEND_GAP, RULE_TICK, RULE_TICK_FIFTH, RULE_TICK_OPACITY, RULE_WIDTH, RULE_ZERO_WIDTH, TEXT, TEXT_SMALL,
+    self, CELL_ICON_GAP, DOTS_HEIGHT, DOTS_RADIUS, GROUP_FILL_OPACITY, GROUP_HEIGHT, GROUP_ROW_GAP, HAIRLINE, HEAD_FILL_OPACITY, HEAD_HEIGHT,
+    HOVER_OPACITY, ICON, ICON_SMALL, LINE_OPACITY, Mode, NAME_ICON_GAP, PROGRESS_HEIGHT, PROGRESS_LEAST, PROGRESS_TRACK_OPACITY, PULL_GAP,
+    PULL_ICON_GAP, Palette, RADIUS_PANEL, ROW_HEIGHT, ROW_PAD_RIGHT, RULE_BAR, RULE_BAR_TOP, RULE_BREAK_END, RULE_BREAK_GAP, RULE_FIFTH_OPACITY,
+    RULE_HEIGHT, RULE_LABEL_GAP, RULE_LEGEND_GAP, RULE_TICK, RULE_TICK_FIFTH, RULE_TICK_OPACITY, RULE_WIDTH, RULE_ZERO_WIDTH, TEXT, TEXT_SMALL,
 };
 use crate::widgets::{self, Tick, draw_icon, font};
 
@@ -68,6 +68,13 @@ pub enum Did {
     Folded(String),
     /// Ticked or unticked every repository shown (a click on the head's box).
     TickedAll,
+    /// Asked for the menu of the repository with this key (a click on its row's "…"), the button at `anchor`.
+    Menu {
+        /// The repository's key.
+        key: String,
+        /// Where its button is: the menu stands under it.
+        anchor: Rect,
+    },
     /// Nothing.
     None,
 }
@@ -106,8 +113,10 @@ pub fn in_view(heights: &[f32], scroll: f32, room: f32) -> (usize, usize, f32) {
 /// Draws the head row and the lines in view on a frosted panel in `rect`, and says what was clicked.
 ///
 /// `sheet` is the baker's frosted sheet for the panel, `scroll` how far the lines are moved up: the wheel over the
-/// table changes it, and it is held to the content at every frame, also when the lines got fewer.
-pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Palette, mode: Mode, scroll: &mut f32) -> Did {
+/// table changes it, and it is held to the content at every frame, also when the lines got fewer. `menu` is the key
+/// of the row whose menu is open: its "…" has the selection's fill.
+#[expect(clippy::too_many_arguments, reason = "the table's one entry: what it draws, on what, and the row whose menu is open")]
+pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Palette, mode: Mode, scroll: &mut f32, menu: Option<&str>) -> Did {
     let heights: Vec<f32> = lines.iter().map(height).collect();
     let body = body_rect(rect);
     if ui.rect_contains_pointer(rect) {
@@ -153,8 +162,14 @@ pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Pal
                 let tick = if repo.ticked { Tick::On } else { Tick::Off };
                 // Placed on the whole row, so the box keeps to the row's centre line; the clip keeps its press to the
                 // part shown.
-                if widgets::checkbox(ui, tick_rect(row, &columns), &repo.key, tick, palette, &select(&repo.name)).clicked() {
+                let ticked = widgets::checkbox(ui, tick_rect(row, &columns), &repo.key, tick, palette, &select(&repo.name)).clicked();
+                let dots = cell(row, columns.action);
+                let open = menu == Some(repo.key.as_str());
+                let asked = draw_dots(ui, dots, shown, &repo.key, &repo.name, open, palette).clicked();
+                if ticked {
                     did = Did::Ticked(repo.key.clone());
+                } else if asked {
+                    did = Did::Menu { key: repo.key.clone(), anchor: dots };
                 } else if response.clicked() {
                     did = Did::Picked(repo.key.clone());
                 }
@@ -457,9 +472,56 @@ fn draw_repo(ui: &Ui, row: Rect, columns: &Columns, repo: &RepoLine, palette: Pa
         let clipped = painter.with_clip_rect(cell(row, span).intersect(painter.clip_rect()));
         draw_pulls(&clipped, row.left() + span.left, y, repo.pulls, palette);
     }
-    // The menu button's column stays empty: the button comes with its menu, and a button that does nothing is not
-    // drawn.
     draw_origin(ui, cell(row, columns.origin), &repo.origin, palette);
+}
+
+/// What a screen reader says for a row's menu button.
+fn actions(name: &str) -> String {
+    format!("Actions for {name}")
+}
+
+/// The menu button of the repository `key` (named `name`) in the cell `dots` (the action column, the row's whole
+/// height); it takes the press on the part of it in `shown`. Paints the "…", on the selection's fill while its
+/// menu is `open`, on the hover's fill under the pointer.
+fn draw_dots(ui: &Ui, dots: Rect, shown: Rect, key: &str, name: &str, open: bool, palette: Palette) -> Response {
+    let response = ui.interact(dots.intersect(shown), ui.scope_id().with(("table-dots", key)), Sense::CLICK);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, actions(name)));
+    let (fill, ink) = if open {
+        (palette.selection, palette.on_glass)
+    } else if response.hovered() {
+        (soft(palette, HOVER_OPACITY), palette.quiet)
+    } else {
+        (Color32::TRANSPARENT, palette.quiet)
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(Rect::from_center_size(dots.center(), vec2(dots.width(), DOTS_HEIGHT)), DOTS_RADIUS, fill);
+    }
+    draw_icon(ui.painter(), dots.center(), Icon::Ellipsis, ICON, ink);
+    response
+}
+
+/// Where the menu button of the line with `key` is in the table at `rect`, its lines moved up by `scroll`: the
+/// action column, the line's whole height (a group's header has no button, but a menu for what is ticked stands
+/// there). A line scrolled out of view gives the nearest edge of the lines' room, with no height, so a menu for it
+/// stands at the table's top or bottom. `None` when no line has the key.
+#[must_use]
+pub fn dots_rect(rect: Rect, lines: &[Line], scroll: f32, key: &str) -> Option<Rect> {
+    let index = lines.iter().position(|line| match line {
+        Line::Group(group) => group.key == key,
+        Line::Repo(repo) => repo.key == key,
+    })?;
+    let body = body_rect(rect);
+    let top = body.top() + lines[..index].iter().map(height).sum::<f32>() - scroll;
+    let row = Rect::from_min_max(pos2(body.left(), top), pos2(body.right(), top + height(&lines[index])));
+    let dots = cell(row, columns::columns(rect.width()).action);
+    let edge = |y: f32| Rect::from_min_max(pos2(dots.left(), y), pos2(dots.right(), y));
+    Some(if dots.bottom() <= body.top() {
+        edge(body.top())
+    } else if dots.top() >= body.bottom() {
+        edge(body.bottom())
+    } else {
+        dots
+    })
 }
 
 /// Paints the pull requests cell from `left`: open, merged and closed each with its icon (a state with none left
@@ -597,7 +659,7 @@ mod tests {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), events, ..Default::default() };
         let mut did = Did::None;
         let output = ctx.run_ui(input, |ui| {
-            did = show(ui, rect, lines, &sheet(), theme::palette(Mode::Light), Mode::Light, scroll);
+            did = show(ui, rect, lines, &sheet(), theme::palette(Mode::Light), Mode::Light, scroll, None);
         });
         (did, output)
     }
@@ -759,28 +821,92 @@ mod tests {
     }
 
     #[test]
-    fn a_row_draws_no_menu_button_until_it_has_a_menu() {
+    fn each_repository_row_has_a_menu_button_and_a_groups_header_none() {
         let ctx = context();
         let mut scroll = 0.0;
         let lines = demo();
         frame(&ctx, table_rect(), &lines, Vec::new(), &mut scroll).1.drop_without_applying_deltas();
         let (_, output) = frame(&ctx, table_rect(), &lines, Vec::new(), &mut scroll);
         let menu = assets::icon(Icon::Ellipsis).to_string();
-        let action = columns::columns(table_rect().width()).action;
-        let drawn: Vec<String> = output
-            .shapes
-            .iter()
-            .filter_map(|clipped| match &clipped.shape {
-                egui::Shape::Text(text) if text.galley.text().contains(&menu) || text.pos.x >= table_rect().left() + action.left - 0.5 => {
-                    Some(text.galley.text().to_owned())
-                }
-                _ => None,
-            })
-            .collect();
+        let drawn = output.shapes.iter().filter(|clipped| matches!(&clipped.shape, egui::Shape::Text(text) if text.galley.text() == menu)).count();
         output.drop_without_applying_deltas();
-        assert_eq!(drawn, Vec::<String>::new(), "something is drawn in the menu button's column");
-        // Its room is kept for the menu to come.
-        assert!(action.width > 0.0);
+        assert_eq!(drawn, 12, "one for each of the twelve repositories, none on the four headers");
+    }
+
+    #[test]
+    fn the_dots_of_the_row_whose_menu_is_open_have_the_selections_fill() {
+        let lines = demo();
+        let filled = |menu: Option<&str>| {
+            let ctx = context();
+            let mut scroll = 0.0;
+            let input = || RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+            let palette = theme::palette(Mode::Light);
+            ctx.run_ui(input(), |ui| {
+                show(ui, table_rect(), &lines, &sheet(), palette, Mode::Light, &mut scroll, menu);
+            })
+            .drop_without_applying_deltas();
+            let output = ctx.run_ui(input(), |ui| {
+                show(ui, table_rect(), &lines, &sheet(), palette, Mode::Light, &mut scroll, menu);
+            });
+            let fills: Vec<Rect> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(shape) if shape.fill == palette.selection && (shape.rect.height() - DOTS_HEIGHT).abs() < 1e-3 => {
+                        Some(shape.rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            output.drop_without_applying_deltas();
+            fills
+        };
+        assert_eq!(filled(None), Vec::<Rect>::new());
+        let index = lines.iter().position(|line| matches!(line, Line::Repo(repo) if repo.key == "homelab")).unwrap();
+        let row = row_of(&lines, index);
+        let fills = filled(Some("homelab"));
+        assert_eq!(fills.len(), 1, "{fills:?}");
+        assert_eq!(fills[0].center().y, row.center().y);
+        assert_eq!(fills[0].width(), columns::columns(table_rect().width()).action.width);
+    }
+
+    #[test]
+    fn a_click_on_the_dots_asks_for_that_rows_menu_at_its_button() {
+        let lines = demo();
+        let index = lines.iter().position(|line| matches!(line, Line::Repo(repo) if repo.key == "homelab")).unwrap();
+        let row = row_of(&lines, index);
+        let action = columns::columns(table_rect().width()).action;
+        let dots = Rect::from_min_max(pos2(row.left() + action.left, row.top()), pos2(row.left() + action.right(), row.bottom()));
+        assert_eq!(dots_rect(table_rect(), &lines, 0.0, "homelab"), Some(dots));
+        // The hit area is the column's width and the row's height: its corner is the button's, not the row's.
+        let corner = pos2(dots.left() + 1.0, dots.top() + 1.0);
+        assert_eq!(said_once(&click(&lines, corner)), Did::Menu { key: "homelab".to_owned(), anchor: dots });
+        // Beside it, the row.
+        assert_eq!(said_once(&click(&lines, pos2(dots.left() - 4.0, dots.center().y))), Did::Picked("homelab".to_owned()));
+        // The drawing's homelab: the button's cell ends at the table's right padding, on the row's bottom.
+        assert_eq!((dots.right(), dots.bottom()), (table_rect().right() - theme::ROW_PAD_RIGHT, 272.0));
+    }
+
+    #[test]
+    fn a_row_scrolled_away_anchors_its_menu_at_the_nearest_edge_of_the_lines() {
+        let lines = many(100);
+        let body = body_rect(table_rect());
+        let first = match &lines[1] {
+            Line::Repo(repo) => repo.key.clone(),
+            Line::Group(_) => panic!("the second line is a repository"),
+        };
+        // Scrolled far down: the first rows are above the room.
+        let above = dots_rect(table_rect(), &lines, 2000.0, &first).unwrap();
+        assert_eq!((above.top(), above.height()), (body.top(), 0.0));
+        let last = match lines.last() {
+            Some(Line::Repo(repo)) => repo.key.clone(),
+            _ => panic!("the last line is a repository"),
+        };
+        let below = dots_rect(table_rect(), &lines, 0.0, &last).unwrap();
+        assert_eq!((below.top(), below.height()), (body.bottom(), 0.0));
+        assert_eq!(dots_rect(table_rect(), &lines, 0.0, "nothing"), None);
+        // A header has its place too, for a menu of what is ticked opened on it.
+        assert!(dots_rect(table_rect(), &lines, 0.0, "group::home").is_some_and(|rect| rect.height() == GROUP_HEIGHT));
     }
 
     #[test]
@@ -842,7 +968,7 @@ mod tests {
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), events, ..Default::default() };
             let mut output = ctx.run_ui(input, |ui| {
                 if drawn == Drawn::Table {
-                    show(ui, table_rect(), lines, &sheet, theme::palette(mode), mode, &mut scroll);
+                    show(ui, table_rect(), lines, &sheet, theme::palette(mode), mode, &mut scroll, None);
                 } else {
                     let window = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
                     frost::paint(ui.painter(), window, table_rect(), RADIUS_PANEL, &sheet);

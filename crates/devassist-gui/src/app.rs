@@ -182,8 +182,9 @@ impl eframe::App for App {
         let painter = ctx.layer_painter(LayerId::background());
         // The screen's glass is placed before the bake, so it is baked where the screen draws over it.
         let plan = if on_repositories { repos_screen::plan(&painter, &layout, &self.session) } else { None };
-        // The dialog the core's mode asks for, on any screen: opened now when the core's workers asked for it.
-        let dialog = dialogs::before(&ctx, self.session.repos(), &mut self.dialogs);
+        // The dialog or the menu the core's mode asks for, on any screen: opened now when the core's workers asked for
+        // it. The menu stands under the row's button the screen placed in the last frame.
+        let dialog = dialogs::before(&ctx, self.session.repos(), repos_screen::menu_anchor(&self.screen), &mut self.dialogs);
         let mut wants = shell::wants(&layout);
         if let Some(plan) = &plan {
             plan.add_wants(&mut wants);
