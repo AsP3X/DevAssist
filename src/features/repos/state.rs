@@ -338,7 +338,7 @@ impl ForkSort {
         }
     }
 
-    pub fn next(self) -> Self {
+    fn next(self) -> Self {
         match self {
             ForkSort::Changed => ForkSort::Newest,
             ForkSort::Newest => ForkSort::Name,
@@ -1193,6 +1193,43 @@ impl Repos {
         }
     }
 
+    /// Sorts the fork overview the next way.
+    pub fn cycle_fork_sort(&mut self) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        view.sort = view.sort.next();
+        view.scroll = 0;
+    }
+
+    /// Shows only the forks with commits of their own, or all of them.
+    pub fn toggle_fork_changed_only(&mut self) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        view.changed_only = !view.changed_only;
+        view.scroll = 0;
+    }
+
+    /// Starts typing a new filter for the fork overview.
+    pub fn start_fork_filter(&mut self) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        view.filter.clear();
+        view.filtering = true;
+    }
+
+    /// Highlights a fork in the overview, by owner, and ends the typing
+    /// of its filter.
+    pub fn pick_fork(&mut self, owner: &str) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        view.selected = Some(owner.to_string());
+        view.filtering = false;
+    }
+
     pub fn is_marked_local(&self, folder: &str) -> bool {
         self.marked.iter().any(|marked| marked == folder)
     }
@@ -1660,6 +1697,29 @@ impl Repos {
         self.mode = Mode::List;
     }
 
+    /// Up or Down in the group dialog: walks through the groups that exist.
+    pub fn step_group(&mut self, down: bool) {
+        let groups = self.groups();
+        let Some(prompt) = self.group_prompt.as_mut() else {
+            return;
+        };
+        if groups.is_empty() {
+            return;
+        }
+        let at = groups
+            .iter()
+            .position(|group| group.eq_ignore_ascii_case(prompt.input.trim()));
+        let last = groups.len() - 1;
+        let next = match (at, down) {
+            (Some(index), true) if index < last => index + 1,
+            (Some(index), false) if index > 0 => index - 1,
+            (_, true) => 0,
+            (_, false) => last,
+        };
+        prompt.input = groups[next].clone();
+        prompt.error = None;
+    }
+
     /// Enter in the group dialog: moves the repositories, or renames.
     pub fn accept_group(&mut self) {
         let Some(prompt) = self.group_prompt.as_mut() else {
@@ -1766,6 +1826,25 @@ impl Repos {
         let installed = &self.installed;
         self.marked
             .retain(|marked| installed.iter().any(|repo| repo.folder == *marked));
+    }
+
+    /// Starts filtering the installed list, with an empty filter.
+    pub fn open_filter(&mut self) {
+        self.mode = Mode::Filter;
+        self.list_filter.clear();
+    }
+
+    /// Ends filtering the installed list and shows all of it again.
+    pub fn close_filter(&mut self) {
+        self.mode = Mode::List;
+        self.list_filter.clear();
+        self.list_scroll = 0;
+    }
+
+    /// The filter of the installed list was typed into.
+    pub fn note_list_filter_changed(&mut self) {
+        self.list_scroll = 0;
+        self.snap_visible_selection();
     }
 
     pub fn open_import(&mut self) {
@@ -1978,6 +2057,14 @@ impl Repos {
         }
     }
 
+    /// Shows the repository at this place in the progress dialog.
+    pub fn pick_job_at(&mut self, index: usize) {
+        if let Some(job) = self.job.as_mut() {
+            self.job_close_at = None;
+            job.pick_index(index);
+        }
+    }
+
     /// Scrolls git's output. Reading it keeps the dialog open.
     pub fn scroll_job(&mut self, delta: isize) {
         self.job_close_at = None;
@@ -2156,7 +2243,7 @@ impl Repos {
             .map(|repo| repo.id())
     }
 
-    pub fn snap_visible_selection(&mut self) {
+    fn snap_visible_selection(&mut self) {
         let names = self.current_names();
         list::snap(&mut self.selected, &names);
     }

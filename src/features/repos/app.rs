@@ -139,18 +139,9 @@ impl App {
             KeyCode::Char('u') | KeyCode::Char('U') => self.update_shown_forks(),
             KeyCode::Char('r') | KeyCode::F(5) => self.load_forks(),
             KeyCode::Char('l') | KeyCode::Char('L') => self.show_job(),
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                view.sort = view.sort.next();
-                view.scroll = 0;
-            }
-            KeyCode::Char('c') | KeyCode::Char('C') => {
-                view.changed_only = !view.changed_only;
-                view.scroll = 0;
-            }
-            KeyCode::Char('/') => {
-                view.filter.clear();
-                view.filtering = true;
-            }
+            KeyCode::Char('s') | KeyCode::Char('S') => self.cycle_fork_sort(),
+            KeyCode::Char('c') | KeyCode::Char('C') => self.toggle_fork_changed_only(),
+            KeyCode::Char('/') => self.start_fork_filter(),
             KeyCode::Esc if !view.filter.is_empty() => view.filter.clear(),
             KeyCode::Esc | KeyCode::Left | KeyCode::Backspace | KeyCode::Char('q') => {
                 self.close_forks()
@@ -186,10 +177,7 @@ impl App {
             KeyCode::Char('c') | KeyCode::Char(',') | KeyCode::F(2) => self.open_settings(false),
             KeyCode::Char('l') | KeyCode::Char('L') => self.show_job(),
             KeyCode::Char('q') => self.quit(),
-            KeyCode::Char('/') => {
-                self.mode = Mode::Filter;
-                self.list_filter.clear();
-            }
+            KeyCode::Char('/') => self.open_filter(),
             KeyCode::Esc if self.busy || self.fetching => self.cancel_work(),
             KeyCode::Esc => self.marked.clear(),
             _ => {}
@@ -246,18 +234,7 @@ impl App {
             KeyCode::Enter => self.accept_group(),
             // Walks through the groups that exist.
             KeyCode::Up | KeyCode::Down if !groups.is_empty() => {
-                let at = groups
-                    .iter()
-                    .position(|group| group.eq_ignore_ascii_case(prompt.input.trim()));
-                let last = groups.len() - 1;
-                let next = match (at, key.code == KeyCode::Down) {
-                    (Some(index), true) if index < last => index + 1,
-                    (Some(index), false) if index > 0 => index - 1,
-                    (_, true) => 0,
-                    (_, false) => last,
-                };
-                prompt.input = groups[next].clone();
-                prompt.error = None;
+                self.step_group(key.code == KeyCode::Down)
             }
             _ => {
                 if input::edit(&mut prompt.input, key, Alt::Types) {
@@ -269,11 +246,7 @@ impl App {
 
     fn on_filter_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::List;
-                self.list_filter.clear();
-                self.list_scroll = 0;
-            }
+            KeyCode::Esc => self.close_filter(),
             KeyCode::Enter => self.enter_row(),
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
@@ -283,8 +256,7 @@ impl App {
             KeyCode::End => self.move_to_end(false),
             _ => {
                 if input::edit(&mut self.list_filter, key, Alt::Ignored) {
-                    self.list_scroll = 0;
-                    self.snap_visible_selection();
+                    self.note_list_filter_changed();
                 }
             }
         }
@@ -386,12 +358,9 @@ impl App {
                 && now.duration_since(*at) < Duration::from_millis(400)
         });
         self.last_click = Some((name.clone(), now));
-        if self.mode == Mode::List
-            && let Some(view) = self.forks.as_mut()
-        {
+        if self.mode == Mode::List && self.forks.is_some() {
             if let Some(owner) = name.strip_prefix("fork:") {
-                view.selected = Some(owner.to_string());
-                view.filtering = false;
+                self.pick_fork(owner);
                 if double {
                     self.open_fork_folder();
                 }
@@ -414,13 +383,11 @@ impl App {
                 self.run_menu(item);
             }
         } else if self.mode == Mode::Progress {
-            if let Some(job) = self.core.job.as_mut()
-                && let Some(index) = name
-                    .strip_prefix("job:")
-                    .and_then(|index| index.parse().ok())
+            if let Some(index) = name
+                .strip_prefix("job:")
+                .and_then(|index| index.parse().ok())
             {
-                self.core.job_close_at = None;
-                job.pick_index(index);
+                self.pick_job_at(index);
             }
         } else if self.mode == Mode::Settings {
             if let Some(form) = self.form.as_mut() {
