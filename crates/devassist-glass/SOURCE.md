@@ -49,6 +49,10 @@ Rewritten for one pane that is a single rounded box and never turned:
   paints the backdrop a blur's reach (`REACH` standard deviations) beyond the pane; here the window's picture is
   grown by as much with its own edge mirrored (as the GPU sampler's `MirrorRepeat`), blurred and cut back, so
   it stays opaque up to the window's edge.
+- `SHADER_FAILED`, `shader_allowed` and `shader_gave_up` are new code, not from Quill: after the glass shader's
+  first failure in a process `draw` no longer tries it and draws every pane frosted, with one warning in the
+  log (Quill warns at each failure; here each try can hold the window's thread for seconds). Its test is
+  `after_the_shaders_first_failure_it_is_not_tried_again_and_said_once`.
 - `to_display` is new code, not from Quill: it takes a picture `prepare` returned (linear light) back to
   display colours with the copied `recode` and `to_gamma`, so the window can blur its own wallpaper with
   `prepare`'s mirrored edges. Its test is `a_prepared_picture_comes_back_to_display_colours`.

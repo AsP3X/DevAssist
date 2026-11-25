@@ -3,6 +3,8 @@
 // `toward_light`, `frosted_pixel` and `program`; `RIM_BLUR` is made public. From app/src/render/bake.rs at
 // 6c6a0cc: `REACH`, `sigma` (made public), `length` and `pixels_up`. `outward` is `Form::outward` for one shape that is not turned;
 // `draw`'s glass part is `Builder::glass`, `frosted` is Quill's `frosted` with its `form` branch only.
+// New code, not from Quill: `SHADER_FAILED`, `shader_allowed` and `shader_gave_up`, with which `draw` stops trying
+// the shader after its first failure in a process.
 
 //! One pane of glass or frost over a backdrop picture.
 //!
@@ -210,8 +212,19 @@ fn pixels_up(length: f32) -> Option<usize> {
 // Quill's `REACH` in app/src/render/bake.rs.
 const REACH: f32 = 3.0;
 
-/// Whether a failure of the glass shader has been logged already; it is said once, not at every frame.
-static WARNED: AtomicBool = AtomicBool::new(false);
+/// Whether the glass shader has failed in this process. After its first failure it is not tried again: each try
+/// can hold the calling thread for seconds, and a GPU that failed once is likely to fail again.
+static SHADER_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the glass shader may be tried, `failed` being whether it has failed before.
+fn shader_allowed(failed: &AtomicBool) -> bool {
+    !failed.load(Ordering::Relaxed)
+}
+
+/// Notes in `failed` that the shader failed; true the first time, when the failure is to be said in the log.
+fn shader_gave_up(failed: &AtomicBool) -> bool {
+    !failed.swap(true, Ordering::Relaxed)
+}
 
 /// What lies behind every pane: the whole window's backdrop in linear light, blurred for the pane's body
 /// (`soft`) and only lightly for its rim (`rim`), each with the window's top left at 0,0.
@@ -264,20 +277,22 @@ impl Pane {
 }
 
 /// The pane as a picture of `rect` at `picture_scale` pixels per point, premultiplied, in display (gamma)
-/// colours: through the glass shader when `params.glass` and a GPU is there, else frosted on the CPU.
+/// colours: through the glass shader when `params.glass` and a GPU is there, else frosted on the CPU. Once the
+/// shader has failed, every pane after it is frosted, for the rest of the process.
 /// A pane with no area gives `None`.
 #[must_use]
 pub fn draw(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
     let size = pane.pixels(behind.picture_scale)?;
     if pane.params.glass
+        && shader_allowed(&SHADER_FAILED)
         && gpu::ready()
         && let Some(program) = program()
     {
         match glass(&program, behind, pane, size) {
             Ok(bitmap) => return Some(bitmap),
             Err(error) => {
-                if !WARNED.swap(true, Ordering::Relaxed) {
-                    log::warn!("liquid glass: {error}; drawn frosted instead");
+                if shader_gave_up(&SHADER_FAILED) {
+                    log::warn!("liquid glass: {error}; drawn frosted instead, from now on");
                 }
             }
         }
@@ -553,6 +568,16 @@ mod tests {
         let behind = grey_behind(64, 64);
         assert!(frosted(&behind.as_behind(), &pane([8.0, 8.0, 0.0, 20.0], 4.0, false)).is_none());
         assert!(draw(&behind.as_behind(), &pane([8.0, 8.0, 20.0, -1.0], 4.0, true)).is_none());
+    }
+
+    #[test]
+    fn after_the_shaders_first_failure_it_is_not_tried_again_and_said_once() {
+        let failed = AtomicBool::new(false);
+        assert!(shader_allowed(&failed), "tried until it fails");
+        assert!(shader_gave_up(&failed), "the first failure is said");
+        assert!(!shader_allowed(&failed), "not tried after a failure");
+        assert!(!shader_gave_up(&failed), "a later failure is not said again");
+        assert!(!shader_allowed(&failed));
     }
 
     #[test]
