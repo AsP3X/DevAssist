@@ -15,8 +15,9 @@ use crate::overlay::Kind;
 use crate::repos_view::shorten_path;
 use crate::shell::Wants;
 use crate::theme::{
-    ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, BUTTON_PAD, BUTTON_RADIUS, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX, CHECKBOX_STROKE_OPACITY,
-    FIELD_PAD, FOCUS_GAP, FOCUS_RING, HAIRLINE, HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD, Palette, RADIUS_SMALL, Surface, TEXT,
+    ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, BUTTON_OFF_OPACITY, BUTTON_PAD, BUTTON_RADIUS, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX,
+    CHECKBOX_STROKE_OPACITY, FIELD_PAD, FOCUS_GAP, FOCUS_RING, HAIRLINE, HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD, Palette, RADIUS_SMALL, Surface,
+    TEXT,
 };
 
 /// The mark that ends a text cut short.
@@ -263,6 +264,20 @@ pub fn button(ui: &mut Ui, rect: Rect, words: &str, kind: Kind, palette: Palette
         ink,
     );
     response
+}
+
+/// Draws a plain dialog's button with `words` at `rect` that cannot be pressed: the plain one's fill and words at
+/// [`BUTTON_OFF_OPACITY`], taking no press and never the keyboard's focus.
+pub fn button_off(ui: &Ui, rect: Rect, words: &str, palette: Palette) {
+    let painter = ui.painter();
+    painter.rect_filled(rect, BUTTON_RADIUS, palette.selection.gamma_multiply(BUTTON_OFF_OPACITY));
+    painter.with_clip_rect(rect.intersect(ui.clip_rect())).text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        words,
+        font(TEXT, assets::medium_family()),
+        palette.on_glass.gamma_multiply(BUTTON_OFF_OPACITY),
+    );
 }
 
 /// A face at `size` points.

@@ -1,6 +1,6 @@
 //! The `DevAssist` window.
 //!
-//! `devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar] [--demo]`
+//! `devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar] [--demo [--show NAME]]`
 //!
 //! A release build on Windows starts without a console window; the settings warning is then said in the status
 //! bar for its first seconds as well.

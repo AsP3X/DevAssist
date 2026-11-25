@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 use devassist_core::config::{BACKDROPS, Look, Settings};
 
+use crate::demo;
 use crate::theme::Mode;
 
 /// How the command line is written.
 pub const USAGE: &str =
-    "usage: devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar] [--demo]";
+    "usage: devassist-gui [--config PATH] [--screenshot OUT.png] [--light|--dark] [--backdrop KEY] [--no-blur] [--no-sidebar] [--demo [--show NAME]]";
 
 /// What the command line asks for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub struct Launch {
     pub sidebar_hidden: bool,
     /// The window shows the drawing's twelve repositories instead of the real ones, reading no disk and no network.
     pub demo: bool,
+    /// The overlay the demo opens before anything is drawn (one of `demo::SHOWS`): for pictures of a dialog.
+    pub show: Option<String>,
 }
 
 /// Reads the command line `args`, without the program's own name.
@@ -46,8 +49,17 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Launch, String> {
             "--no-blur" => launch.no_blur = true,
             "--no-sidebar" => launch.sidebar_hidden = true,
             "--demo" => launch.demo = true,
+            "--show" => launch.show = Some(args.next().ok_or("--show needs the name of a dialog or menu")?),
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
             other => return Err(format!("unexpected argument {other}")),
+        }
+    }
+    if let Some(name) = &launch.show {
+        if !launch.demo {
+            return Err("--show is for the demo: add --demo".to_owned());
+        }
+        if !demo::SHOWS.iter().any(|(known, _)| known == name) {
+            return Err(demo::show_error(name));
         }
     }
     Ok(launch)
@@ -90,6 +102,17 @@ mod tests {
         assert_eq!(parse(["--config".to_string()].into_iter()).unwrap_err(), "--config needs a file name");
         assert!(parse(["--backdrop".to_string()].into_iter()).unwrap_err().starts_with("--backdrop needs a key"));
         assert_eq!(parse(["stray".to_string()].into_iter()).unwrap_err(), "unexpected argument stray");
+    }
+
+    #[test]
+    fn show_opens_a_known_overlay_in_the_demo_only() {
+        let args = |list: &[&str]| parse(list.iter().map(|arg| (*arg).to_owned()));
+        assert_eq!(args(&["--demo", "--show", "progress"]).unwrap().show.as_deref(), Some("progress"));
+        assert_eq!(args(&["--show", "progress", "--demo"]).unwrap().show.as_deref(), Some("progress"));
+        assert_eq!(args(&["--show", "progress"]).unwrap_err(), "--show is for the demo: add --demo");
+        assert_eq!(args(&["--demo", "--show", "menu"]).unwrap_err(), "--show knows progress, not menu");
+        assert_eq!(args(&["--demo", "--show"]).unwrap_err(), "--show needs the name of a dialog or menu");
+        assert_eq!(args(&["--demo"]).unwrap().show, None);
     }
 
     #[test]

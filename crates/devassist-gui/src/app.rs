@@ -9,6 +9,7 @@ use egui::{Color32, LayerId, Mesh};
 use crate::assets;
 use crate::baker::{Baker, Scene};
 use crate::demo;
+use crate::dialogs::{self, Dialogs};
 use crate::launch::{self, Launch};
 use crate::overlay;
 use crate::repos_screen::{self, Screen};
@@ -105,6 +106,8 @@ pub struct App {
     page: Page,
     /// What the Repositories screen keeps between frames.
     screen: Screen,
+    /// What the dialogs keep between frames.
+    dialogs: Dialogs,
     /// The settings warning, said in the status bar for the first [`NOTICE_TIME`]: a window started without a
     /// console has nowhere else to say it.
     notice: Option<String>,
@@ -130,6 +133,7 @@ impl App {
             session: Session::start(settings, launch),
             page: Page::default(),
             screen: Screen::default(),
+            dialogs: Dialogs::default(),
             notice,
         }
     }
@@ -176,9 +180,14 @@ impl eframe::App for App {
         let painter = ctx.layer_painter(LayerId::background());
         // The screen's glass is placed before the bake, so it is baked where the screen draws over it.
         let plan = if on_repositories { repos_screen::plan(&painter, &layout, &self.session) } else { None };
+        // The dialog the core's mode asks for, on any screen: opened now when the core's workers asked for it.
+        let dialog = dialogs::before(&ctx, self.session.repos(), &mut self.dialogs);
         let mut wants = shell::wants(&layout);
         if let Some(plan) = &plan {
             plan.add_wants(&mut wants);
+        }
+        if let Some(dialog) = &dialog {
+            wants.add(dialog.want());
         }
         let scene = Scene { size: size.into(), pixels_per_point: ctx.pixels_per_point(), mode, backdrop, blur };
         // The wallpaper first, stretched over the window, then each glass pane; each shows only its own part of
@@ -210,6 +219,8 @@ impl eframe::App for App {
                 shell::placeholder(ui, layout.panel, sheet.as_ref(), theme::palette(mode));
             }
         });
+        // Over everything but the window's own top row: the dialog, also one the screen asked for in this frame.
+        dialogs::after(&ctx, dialog, self.session.repos_mut(), &drawn, mode, &mut self.dialogs);
     }
 }
 

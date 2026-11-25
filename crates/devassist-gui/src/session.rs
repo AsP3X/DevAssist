@@ -50,7 +50,7 @@ impl DerefMut for Held {
 
 impl Session {
     /// Loads the repositories of `settings`, or the drawing's twelve when `launch` asks for the demo (whatever
-    /// `settings` is).
+    /// `settings` is), with the overlay `--show` names open.
     ///
     /// The window does not set `DevAssist` up: the settings' first-run mark is cleared, so the core opens no
     /// settings dialog and looks up no account. A run that only takes a picture reads the repositories as they are
@@ -58,7 +58,14 @@ impl Session {
     #[must_use]
     pub fn start(settings: Result<Settings, String>, launch: &Launch) -> Session {
         if launch.demo {
-            return Session::demo(demo::repos());
+            let mut repos = demo::repos();
+            if let Some(name) = &launch.show
+                && let Err(message) = demo::show(&mut repos, name)
+            {
+                // `launch::parse` lets only known names through.
+                log::warn!("{message}");
+            }
+            return Session::demo(repos);
         }
         match settings {
             Err(message) => Session::Broken(message),
@@ -237,6 +244,19 @@ mod tests {
         assert!(!session.is_demo());
         session.refresh();
         session.close();
+    }
+
+    #[test]
+    fn a_demo_shown_with_its_progress_dialog_ticks_idle() {
+        let launch = Launch { show: Some("progress".to_owned()), ..demo() };
+        let mut session = Session::start(Err("ignored in a demo".into()), &launch);
+        assert!(session.repos().unwrap().mode == devassist_core::repos::state::Mode::Progress);
+        for _ in 0..3 {
+            assert_eq!(session.tick(), theme::TICK_IDLE, "the demo's run makes the window repaint");
+        }
+        let repos = session.repos().unwrap();
+        assert!(repos.work_held() && !repos.busy && repos.job.as_ref().is_some_and(devassist_core::task::job::Job::running));
+        assert!(repos.mode == devassist_core::repos::state::Mode::Progress, "nothing closes the demo's dialog by itself");
     }
 
     #[test]

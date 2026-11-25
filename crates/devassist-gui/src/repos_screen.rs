@@ -3,7 +3,7 @@
 //! the terminal app. Every change goes through a method of the core's `Repos`.
 
 use devassist_core::repos::state::{GROUP_KEY, Repos, SortMode};
-use egui::{Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Ui, pos2};
+use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Sense, Ui, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
@@ -172,6 +172,8 @@ enum Command {
     Refresh,
     /// Fold the highlighted group (`true`) or unfold it.
     Fold(bool),
+    /// Show the run's progress dialog again.
+    ShowRun,
 }
 
 /// What the keys among `events` ask, in order, as the terminal app reads them. Letters are read from the typed
@@ -213,6 +215,7 @@ fn commands(events: &[Event]) -> Vec<Command> {
                         's' | 'S' => commands.push(Command::Sort),
                         'r' => commands.push(Command::Refresh),
                         '/' => commands.push(Command::Filter),
+                        'l' | 'L' => commands.push(Command::ShowRun),
                         _ => {}
                     }
                 }
@@ -313,6 +316,13 @@ pub fn show(
             moved |= apply(command, session, ui);
         }
     }
+    // A hidden run says how it goes in the status bar; a click there shows its dialog again, as `l` does.
+    if keys && let Some(repos) = session.repos_mut().filter(|repos| repos.job.is_some()) {
+        let response = ui.interact(layout.status, Id::unique("status-bar"), Sense::CLICK).on_hover_cursor(CursorIcon::PointingHand);
+        if response.clicked() {
+            repos.show_job();
+        }
+    }
     if !keys {
         // Nor a press on the field in the frame an overlay opens, before its shield is in place.
         ui.memory_mut(|memory| memory.surrender_focus(filter_id()));
@@ -381,6 +391,10 @@ fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
             repos.set_list_filter(&text);
         }
         Command::Fold(fold) => repos.fold_selected(fold),
+        Command::ShowRun => {
+            repos.show_job();
+            return false;
+        }
         Command::Refresh => {}
     }
     true
@@ -638,6 +652,8 @@ mod tests {
         assert_eq!(read(vec![press(Key::F5)]), [Command::Refresh]);
         assert_eq!(read(typed(Key::Slash, "/")), [Command::Filter]);
         assert_eq!(read(typed(Key::S, "S")), [Command::Sort]);
+        assert_eq!(read(typed(Key::L, "l")), [Command::ShowRun]);
+        assert_eq!(read(typed(Key::L, "L")), [Command::ShowRun]);
         // Ctrl with A ticks all; A alone types an "a", which is no key here.
         assert_eq!(read(vec![key(Key::A, Modifiers::COMMAND)]), [Command::TickAll]);
         assert_eq!(read(typed(Key::A, "a")), []);

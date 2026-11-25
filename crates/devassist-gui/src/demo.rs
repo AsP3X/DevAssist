@@ -13,6 +13,7 @@ use devassist_core::config::Settings;
 use devassist_core::repos::github::PullCounts;
 use devassist_core::repos::gitops::{LocalRepo, PendingPulls};
 use devassist_core::repos::state::Repos;
+use devassist_core::task::job::{Job, JobEvent};
 
 /// The folder, under the system's temporary folder, of the demo's settings path, which is never written.
 const SETTINGS_FOLDER: &str = "devassist-gui-demo";
@@ -156,9 +157,87 @@ pub fn repos() -> Repos {
     repos
 }
 
+/// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
+/// Another overlay is one more line here.
+pub const SHOWS: [(&str, Opener); 1] = [("progress", show_progress)];
+
+/// What sets an overlay up in the demo's repositories.
+pub type Opener = fn(&mut Repos);
+
+/// Opens the overlay `name` (one of [`SHOWS`]) in the demo's `repos`, through the core's own methods.
+///
+/// # Errors
+/// A sentence naming the overlays there are, when `name` is none of them.
+pub fn show(repos: &mut Repos, name: &str) -> Result<(), String> {
+    let (_, open) = SHOWS.iter().find(|(known, _)| *known == name).ok_or_else(|| show_error(name))?;
+    open(repos);
+    Ok(())
+}
+
+/// What `--show` says of a name it does not know.
+#[must_use]
+pub fn show_error(name: &str) -> String {
+    let names: Vec<&str> = SHOWS.iter().map(|(name, _)| *name).collect();
+    format!("--show knows {}, not {name}", names.join(", "))
+}
+
+/// The drawing's update: api at three of its four branches, web waiting.
+const RUN_TITLE: &str = "Updating 2 repositories";
+/// The repositories of the drawing's update.
+const RUN_NAMES: [&str; 2] = ["api", "web"];
+/// How far api is: branches done, of the branches with news.
+const RUN_STEPS: (u32, u32) = (3, 4);
+/// What git printed for api so far, as the drawing has it.
+const RUN_OUTPUT: [&str; 7] = [
+    "From https://github.com/acme/api",
+    "   4c1e2aa..9d03b71  main        -> origin/main",
+    "   77ab120..0e5f9c3  release/2.4 -> origin/release/2.4",
+    " * [new branch]      hotfix/tls-renewal -> origin/hotfix/tls-renewal",
+    "main: fast-forwarded 4 commits",
+    "release/2.4: fast-forwarded 1 commit",
+    "feature/audit-log: left alone, it has your commits",
+];
+
+/// The drawing's update in progress, as the core keeps a run: made with the core's `Job` and its events, so nothing
+/// runs. The core is not busy with it (no worker), so it waits for nothing and never ends; its dialog is open.
+fn show_progress(repos: &mut Repos) {
+    let mut job = Job::new(RUN_TITLE, RUN_NAMES.map(str::to_owned).to_vec(), 0);
+    job.on(JobEvent::Start(0));
+    job.on(JobEvent::Steps(RUN_STEPS.0, RUN_STEPS.1));
+    for line in RUN_OUTPUT {
+        job.on(JobEvent::Line(line.to_owned(), false));
+    }
+    repos.job = Some(job);
+    repos.show_job();
+}
+
 #[cfg(test)]
 mod tests {
+    use devassist_core::repos::state::Mode;
+    use devassist_core::task::job::ItemState;
+
     use super::*;
+
+    #[test]
+    fn the_demos_run_is_the_drawings_and_waits_for_nothing() {
+        let mut repos = repos();
+        show(&mut repos, "progress").unwrap();
+        assert!(repos.mode == Mode::Progress);
+        let job = repos.job.as_ref().unwrap();
+        assert_eq!(job.title, "Updating 2 repositories");
+        assert_eq!(job.summary().to_string(), "1 of 2  api");
+        assert_eq!((job.items[0].short_state(), job.items[0].bar_fill()), ("3/4".to_owned(), Some(0.75)));
+        assert_eq!((job.items[1].state, job.items[1].short_state()), (ItemState::Waiting, "waiting".to_owned()));
+        assert_eq!(job.items[0].output.len(), 7);
+        assert!(job.running(), "it shows a run that goes on");
+        // Yet the core waits for nothing: the window sleeps, and the dialog stays.
+        assert!(!repos.busy && !repos.waiting() && repos.work_held());
+        for _ in 0..5 {
+            repos.drain();
+        }
+        assert!(repos.mode == Mode::Progress && !repos.waiting());
+        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, not nothing");
+    }
 
     #[test]
     fn the_demo_is_the_drawings_story() {

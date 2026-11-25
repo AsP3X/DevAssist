@@ -271,6 +271,36 @@ pub const MENU_LINE: f32 = 9.0;
 pub const MENU_GAP: f32 = 4.0;
 /// The size of a key's name at the end of a menu row.
 pub const KEY_TEXT: f32 = 12.0;
+/// The gap between a dialog's title and the quiet line under it (`dialogTitle`'s `gap: 4`).
+pub const HEADER_GAP: f32 = 4.0;
+/// The height of a line of a dialog's quiet line, of its size (`dialogTitle`'s `lineHeight: 1.45`).
+pub const HEADER_LINE_HEIGHT: f32 = 1.45;
+/// How strong a dialog's button is drawn while it cannot be pressed, of its full strength (not the design's: it
+/// draws no such button; the plan's own).
+pub const BUTTON_OFF_OPACITY: f32 = 0.5;
+/// The width of the progress dialog (`dialog("Update", 640, …)`).
+pub const PROGRESS_WIDTH: f32 = 640.0;
+/// The height of a task's row in the progress dialog (`task`'s `height: 44`).
+pub const TASK_HEIGHT: f32 = 44.0;
+/// The room at either side of a task's row, and the gap between its parts (`task`'s `padding: [0, 12]`, `gap: 12`).
+pub const TASK_PAD: f32 = 12.0;
+/// The width of a task's name (`fixed(name, 120, …)`).
+pub const TASK_NAME: f32 = 120.0;
+/// The width of a task's bar (`bar(200, share)`).
+pub const TASK_BAR: f32 = 200.0;
+/// How many task rows the progress dialog shows before its list scrolls.
+pub const TASK_ROWS: usize = 6;
+/// The room inside the output's box at every side (`Output`'s `padding: 12`).
+pub const OUTPUT_PAD: f32 = 12.0;
+/// The gap between two lines of output (`Output`'s `gap: 8`).
+pub const OUTPUT_GAP: f32 = 8.0;
+/// The height of one line of output, in the 12-point monospaced face (the drawing's lines stand 22 points apart,
+/// the gap being 8).
+pub const OUTPUT_LINE: f32 = 14.0;
+/// How many lines of output the progress dialog shows (the drawing's seven).
+pub const OUTPUT_ROWS: usize = 7;
+/// The size of the output's text (`mono`'s `fontSize: 12`).
+pub const OUTPUT_TEXT: f32 = 12.0;
 /// The width of the ring around the control of an overlay that Enter and Space act on (not the design's: it has
 /// no keyboard; the accent, as egui marks its focus).
 pub const FOCUS_RING: f32 = 2.0;
@@ -709,6 +739,17 @@ mod tests {
             ("MENU_LINE", MENU_LINE, 9.0),
             ("MENU_GAP", MENU_GAP, 4.0),
             ("KEY_TEXT", KEY_TEXT, 12.0),
+            ("HEADER_GAP", HEADER_GAP, 4.0),
+            ("HEADER_LINE_HEIGHT", HEADER_LINE_HEIGHT, 1.45),
+            ("PROGRESS_WIDTH", PROGRESS_WIDTH, 640.0),
+            ("TASK_HEIGHT", TASK_HEIGHT, 44.0),
+            ("TASK_PAD", TASK_PAD, 12.0),
+            ("TASK_NAME", TASK_NAME, 120.0),
+            ("TASK_BAR", TASK_BAR, 200.0),
+            ("OUTPUT_PAD", OUTPUT_PAD, 12.0),
+            ("OUTPUT_GAP", OUTPUT_GAP, 8.0),
+            ("OUTPUT_LINE", OUTPUT_LINE, 14.0),
+            ("OUTPUT_TEXT", OUTPUT_TEXT, 12.0),
         ];
         for (constant, got, expected) in want {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
