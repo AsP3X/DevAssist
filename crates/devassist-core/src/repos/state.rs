@@ -1,5 +1,5 @@
 //! What the repositories tool knows and does. Its keys and its mouse are
-//! in `app`.
+//! the terminal app's, in `src/features/repos/app.rs`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -23,10 +23,10 @@ use crate::task::worker::Worker;
 /// How long the Add search waits after the last key before asking GitHub.
 const LOOKUP_DELAY: Duration = Duration::from_millis(350);
 
-/// How long the progress dialog stays after a run that went well.
 /// Opening more folders than this at once is refused.
 #[doc(hidden)]
 pub const OPEN_LIMIT: usize = 8;
+/// How long the progress dialog stays after a run that went well.
 #[doc(hidden)]
 pub const JOB_LINGER: Duration = Duration::from_millis(1200);
 /// How the status line starts while an automatic pull runs.

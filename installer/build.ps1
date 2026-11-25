@@ -80,7 +80,7 @@ if ($iscc) {
 
 # ---- the plain program
 # For people who want no installer, and what self-update downloads. The name
-# must end in -x64.exe: src/update.rs looks for that.
+# must end in -x64.exe: crates/devassist-core/src/update.rs looks for that.
 Copy-Item $exe (Join-Path $out "devassist-$version-x64.exe") -Force
 
 # ---- checksums
