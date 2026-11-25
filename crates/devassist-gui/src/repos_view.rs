@@ -422,6 +422,13 @@ mod tests {
         let mut gone = repo("b", "");
         gone.upstream_gone = true;
         assert_eq!(origin_of(gone), measured(0, 0, "Upstream gone", Tone::Warning));
+        // Counts win over the states: a checkout with commits says them, not that its upstream is gone.
+        let mut ahead_and_gone = ahead(repo("e", ""), 1);
+        ahead_and_gone.upstream_gone = true;
+        assert_eq!(origin_of(ahead_and_gone), measured(0, 1, "1 ahead", Tone::Plain));
+        let mut detached_with_commits = ahead(repo("f", ""), 2);
+        detached_with_commits.branch = "detached".to_owned();
+        assert_eq!(origin_of(detached_with_commits), measured(0, 2, "2 ahead", Tone::Plain));
         let mut none = repo("c", "");
         none.all_branches_current = false;
         assert_eq!(origin_of(none.clone()), measured(0, 0, "No upstream", Tone::Warning));
@@ -561,6 +568,8 @@ mod tests {
         repos.selected = Some("gone".to_owned());
         repos.marked.push("gone".to_owned());
         repos.watched.push(PathBuf::from("/srv/code/gone"));
+        // The core counts the watched paths, listed or not.
+        assert_eq!(status(&repos).notes, [(Icon::Eye, "Watching 1 repository".to_owned())]);
         let all = lines(&repos);
         assert_eq!(all.len(), 3, "a header and two rows");
         assert!(all.iter().all(|line| match line {
@@ -597,7 +606,7 @@ mod tests {
         assert_eq!(by("api").pulls, Pulls { open: 2, merged: 14, closed: 3, new: 2, changed: 0, known: true });
         assert!(by("api").ticked && by("web").ticked);
         assert_eq!(by("web").origin, measured(0, 0, "3 new on dev", Tone::Plain));
-        assert_eq!(by("artcraft-repos").origin, measured(2, 1, "1 ahead, 2 behind", Tone::Plain));
+        assert_eq!(by("DevAssist").origin, measured(2, 1, "1 ahead, 2 behind", Tone::Plain));
         assert_eq!(by("old-blog").origin, Origin::Failed("Not found on GitHub".to_owned()));
         assert_eq!(by("sandbox").changes, Changes::Uncommitted);
         assert!(by("homelab").watched);

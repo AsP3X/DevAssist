@@ -62,10 +62,10 @@ const ENTRIES: [Entry; 12] = [
     Entry { watched: true, ..Entry::new("homelab", "home", "D:\\code\\home\\homelab", "main") },
     Entry { ahead: 1, ..Entry::new("recipes", "home", "D:\\code\\home\\recipes", "main") },
     Entry { behind: 4, ticked: true, pulls: Some((2, 14, 3, 2, 0)), ..Entry::new("api", "Work", "D:\\code\\work\\api", "main") },
-    Entry::new("customer-portal-i18n", "Work", "D:\\code\\work\\portal-i18n", "main"),
+    Entry::new("customer-portal-i18n", "Work", "D:\\code\\work\\customer-portal-i18n", "main"),
     Entry { dirty: true, pulls: Some((3, 21, 0, 0, 1)), ..Entry::new("portal", "Work", "D:\\code\\work\\portal", "feature/login") },
     Entry { fresh: Some((3, "dev")), ticked: true, pulls: Some((1, 37, 0, 0, 0)), ..Entry::new("web", "Work", "D:\\code\\work\\web", "main") },
-    Entry { ahead: 1, behind: 2, pulls: Some((0, 9, 1, 0, 0)), ..Entry::new("DevAssist", "Tools", "D:\\code\\artcraft-repos", "master") },
+    Entry { ahead: 1, behind: 2, pulls: Some((0, 9, 1, 0, 0)), ..Entry::new("DevAssist", "Tools", "D:\\code\\DevAssist", "master") },
     Entry { pulls: Some((1, 6, 0, 0, 0)), ..Entry::new("release-scripts", "Tools", "D:\\code\\tools\\release-scripts", "main") },
     Entry { ahead: 1, ..Entry::new("notes", "", "D:\\code\\notes", "main") },
     Entry { error: Some(NOT_FOUND), ..Entry::new("old-blog", "", "E:\\archive\\old-blog", "main") },
@@ -164,8 +164,9 @@ mod tests {
         assert_eq!(by("sandbox").state_label(), "dirty");
         assert_eq!(by("dotfiles").state_label(), "clean");
         assert_eq!(by("web").remote_label().as_deref(), Some("3 new on dev"));
-        assert_eq!(by("customer-portal-i18n").folder, "portal-i18n");
+        assert_eq!(by("customer-portal-i18n").folder, "customer-portal-i18n");
         assert_eq!(by("release-scripts").folder, "release-scripts");
+        assert_eq!(by("DevAssist").folder, "DevAssist");
         assert!(repos.installed.iter().all(|r| r.ready));
         assert!(repos.installed.iter().all(|r| !r.path.to_string_lossy().contains('\u{2026}')));
     }
