@@ -4728,6 +4728,47 @@ mod tests {
     }
 
     #[test]
+    fn checkouts_taken_over_at_startup_are_written_whole_and_then_merged() {
+        let api = std::env::temp_dir().join("devassist-taken-api");
+        let web = std::env::temp_dir().join("devassist-taken-web");
+        let mut settings = test_settings();
+        // The file knows api; web was imported at this start.
+        settings.checkouts = vec![api.clone(), web.clone()];
+        settings.unsaved = true;
+        let path = settings.config_path.clone();
+        std::fs::write(&path, format!("checkout = {}\n", api.display())).unwrap();
+        let mut app = App::empty(settings);
+
+        // The first save writes the checkouts as the app has them.
+        app.save_config();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(&format!("checkout = {}\n", api.display())),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("checkout = {}\n", web.display())),
+            "{text}"
+        );
+
+        // A later save keeps what another DevAssist changed meanwhile.
+        std::fs::write(&path, text + "watch_interval = 30\n").unwrap();
+        app.clone_dir = std::env::temp_dir().join("devassist-taken-elsewhere");
+        app.save_config();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(text.contains("watch_interval = 30\n"), "{text}");
+        assert!(
+            text.contains(&format!("checkout = {}\n", web.display())),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("clone_dir = {}\n", app.clone_dir.display())),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn saving_keeps_the_look_the_settings_file_had() {
         let look = config::Look {
             theme: config::Theme::Dark,

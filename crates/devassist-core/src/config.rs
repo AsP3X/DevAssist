@@ -662,8 +662,10 @@ pub fn save_changes(path: &Path, before: &Saved, after: &Saved) -> Result<(), St
     }
 }
 
-/// `after` where it differs from `before`, otherwise `file`. Every field
-/// is named, so a new one does not compile until it is merged here too.
+/// `after` where it differs from `before`, otherwise `file`. Lists take
+/// over the entries this program added or removed, not the whole list.
+/// Every field is named, so a new one does not compile until it is
+/// merged here too.
 fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
     fn pick<T: Clone + PartialEq>(before: &T, after: &T, file: T) -> T {
         if after == before { file } else { after.clone() }
@@ -685,26 +687,41 @@ fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
         shell,
         look,
     } = file;
-    // The accounts and whether they were chosen are one setting: taken
-    // apart, accounts confirmed unchanged would be written as none.
-    let (owners, owners_set) = pick(
-        &(&before.owners, before.owners_set),
-        &(&after.owners, after.owners_set),
-        (&owners, owners_set),
-    );
-    let owners = owners.clone();
+    let same_name = |left: &String, right: &String| left.eq_ignore_ascii_case(right);
+    // The accounts and whether they were chosen are one setting. Accounts
+    // that become chosen are taken whole: they were not in the file, so
+    // merged by entry, accounts confirmed unchanged would be written as none.
+    let (owners, owners_set) = if after.owners_set != before.owners_set {
+        (after.owners.clone(), after.owners_set)
+    } else if after.owners != before.owners {
+        (
+            merge_list(&before.owners, &after.owners, owners, same_name),
+            after.owners_set,
+        )
+    } else {
+        (owners, owners_set)
+    };
     Saved {
         title: pick(&before.title, &after.title, title),
         owners,
         owners_set,
-        pinned: pick(&before.pinned, &after.pinned, pinned),
+        pinned: merge_list(&before.pinned, &after.pinned, pinned, |left, right| {
+            left.id().eq_ignore_ascii_case(&right.id())
+        }),
         protocol: pick(&before.protocol, &after.protocol, protocol),
         clone_dir: pick(&before.clone_dir, &after.clone_dir, clone_dir),
-        checkouts: pick(&before.checkouts, &after.checkouts, checkouts),
-        placement: pick(&before.placement, &after.placement, placement),
-        collapsed: pick(&before.collapsed, &after.collapsed, collapsed),
+        checkouts: merge_list(
+            &before.checkouts,
+            &after.checkouts,
+            checkouts,
+            |left, right| same_path(left, right),
+        ),
+        placement: merge_placement(&before.placement, &after.placement, placement),
+        collapsed: merge_list(&before.collapsed, &after.collapsed, collapsed, same_name),
         update_check: pick(&before.update_check, &after.update_check, update_check),
-        watched: pick(&before.watched, &after.watched, watched),
+        watched: merge_list(&before.watched, &after.watched, watched, |left, right| {
+            same_path(left, right)
+        }),
         watch_interval: pick(
             &before.watch_interval,
             &after.watch_interval,
@@ -714,6 +731,55 @@ fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
         shell: pick(&before.shell, &after.shell, shell),
         look: pick(&before.look, &after.look, look),
     }
+}
+
+/// The file's list with the entries this program added since `before`
+/// appended, in its order, and the entries it removed taken out. `same`
+/// is how the file tells two entries apart.
+fn merge_list<T: Clone>(
+    before: &[T],
+    after: &[T],
+    file: Vec<T>,
+    same: impl Fn(&T, &T) -> bool,
+) -> Vec<T> {
+    let has = |list: &[T], item: &T| list.iter().any(|known| same(known, item));
+    let mut merged: Vec<T> = file
+        .into_iter()
+        .filter(|item| !(has(before, item) && !has(after, item)))
+        .collect();
+    for item in after {
+        if !has(before, item) && !has(&merged, item) {
+            merged.push(item.clone());
+        }
+    }
+    merged
+}
+
+/// The file's groups, with each checkout whose group this program changed
+/// since `before` given its new group, and those it took out of a group
+/// taken out.
+fn merge_placement(
+    before: &[(PathBuf, String)],
+    after: &[(PathBuf, String)],
+    file: Vec<(PathBuf, String)>,
+) -> Vec<(PathBuf, String)> {
+    let group_in = |list: &'_ [(PathBuf, String)], path: &Path| {
+        list.iter()
+            .find(|(known, _)| same_path(known, path))
+            .map(|(_, group)| group.clone())
+    };
+    let mut merged = file;
+    merged.retain(|(path, _)| group_in(before, path).is_none() || group_in(after, path).is_some());
+    for (path, group) in after {
+        if group_in(before, path).as_ref() == Some(group) {
+            continue;
+        }
+        match merged.iter_mut().find(|(known, _)| same_path(known, path)) {
+            Some(entry) => entry.1 = group.clone(),
+            None => merged.push((path.clone(), group.clone())),
+        }
+    }
+    merged
 }
 
 fn render(saved: &Saved) -> String {
@@ -1700,6 +1766,123 @@ mod tests {
         let read = read_back(&path);
         assert!(read.owners_set);
         assert_eq!(read.owners, vec!["storytold".to_string()]);
+    }
+
+    /// The file as another program left it: `before` with `change` applied.
+    fn other_program_writes(path: &Path, before: &Saved, change: impl FnOnce(&mut Saved)) {
+        let mut theirs = before.clone();
+        change(&mut theirs);
+        save(path, &theirs).unwrap();
+    }
+
+    #[test]
+    fn both_programs_add_a_checkout_and_both_stay() {
+        let path = temp_file("merge-add-add");
+        let before = one_checkout();
+        other_program_writes(&path, &before, |theirs| {
+            theirs.checkouts.push(PathBuf::from("/srv/code/gui"))
+        });
+        let mut after = before.clone();
+        after.checkouts.push(PathBuf::from("/srv/code/cli"));
+        save_changes(&path, &before, &after).unwrap();
+        assert_eq!(
+            read_back(&path).checkouts,
+            vec![
+                PathBuf::from("/srv/code/api"),
+                PathBuf::from("/srv/code/gui"),
+                PathBuf::from("/srv/code/cli"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_checkout_removed_here_goes_and_one_added_there_stays() {
+        let path = temp_file("merge-remove-add");
+        let before = Saved {
+            checkouts: vec![
+                PathBuf::from("/srv/code/api"),
+                PathBuf::from("/srv/code/old"),
+            ],
+            ..one_checkout()
+        };
+        other_program_writes(&path, &before, |theirs| {
+            theirs.checkouts.push(PathBuf::from("/srv/code/gui"))
+        });
+        let mut after = before.clone();
+        after
+            .checkouts
+            .retain(|path| path != Path::new("/srv/code/old"));
+        save_changes(&path, &before, &after).unwrap();
+        assert_eq!(
+            read_back(&path).checkouts,
+            vec![
+                PathBuf::from("/srv/code/api"),
+                PathBuf::from("/srv/code/gui")
+            ]
+        );
+    }
+
+    #[test]
+    fn groups_given_in_both_programs_are_both_kept() {
+        let path = temp_file("merge-groups");
+        let api = PathBuf::from("/srv/code/api");
+        let web = PathBuf::from("/srv/code/web");
+        let before = Saved {
+            checkouts: vec![api.clone(), web.clone()],
+            placement: vec![(api.clone(), "old".to_string())],
+            ..one_checkout()
+        };
+        other_program_writes(&path, &before, |theirs| {
+            theirs.placement.push((web.clone(), "home".to_string()))
+        });
+        let after = Saved {
+            placement: vec![(api.clone(), "work".to_string())],
+            ..before.clone()
+        };
+        save_changes(&path, &before, &after).unwrap();
+        let mut placement = read_back(&path).placement;
+        placement.sort();
+        assert_eq!(
+            placement,
+            vec![(api, "work".to_string()), (web, "home".to_string())]
+        );
+    }
+
+    #[test]
+    fn the_other_lists_merge_entry_by_entry_too() {
+        let path = temp_file("merge-lists");
+        let spec = |name: &str| RepoSpec {
+            owner: "acme".into(),
+            name: name.into(),
+        };
+        let api = PathBuf::from("/srv/code/api");
+        let web = PathBuf::from("/srv/code/web");
+        let before = Saved {
+            checkouts: vec![api.clone(), web.clone()],
+            owners: vec!["alpha".into()],
+            owners_set: true,
+            ..one_checkout()
+        };
+        other_program_writes(&path, &before, |theirs| {
+            theirs.pinned.push(spec("gui"));
+            theirs.collapsed.push("home".into());
+            theirs.watched.push(web.clone());
+            theirs.owners.push("beta".into());
+        });
+        let mut after = before.clone();
+        after.pinned.push(spec("cli"));
+        after.collapsed.push("work".into());
+        after.watched.push(api.clone());
+        after.owners.push("gamma".into());
+        save_changes(&path, &before, &after).unwrap();
+        let read = read_back(&path);
+        assert_eq!(read.pinned, vec![spec("gui"), spec("cli")]);
+        assert_eq!(read.collapsed, vec!["home".to_string(), "work".to_string()]);
+        assert_eq!(read.watched, vec![web, api]);
+        assert_eq!(
+            read.owners,
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+        );
     }
 
     #[test]
