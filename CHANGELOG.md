@@ -72,8 +72,12 @@ What changed in each version of DevAssist. The format follows
 
 ### Changed
 
+- Saving keeps what was changed in the settings file since DevAssist read it,
+  by another DevAssist or by hand, and writes only what you changed. Options
+  given at start, such as `--title` or `--repo`, are no longer written to the
+  file.
 - Internal: the logic is a crate of its own, `devassist-core`, as the base for
-  a window. Nothing changes in use.
+  a window.
 
 ## [0.6.0] - 2026-11-24
 

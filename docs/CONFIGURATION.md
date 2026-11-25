@@ -13,8 +13,11 @@ Because the file is per user, DevAssist can be started from any folder and
 installed anywhere. `--config PATH` uses another file.
 
 The app writes this file itself: when you save the settings dialog (`c`), and
-whenever the list of clones or the groups change. Comments you add by hand are
-lost when it is rewritten.
+whenever the list of clones or the groups change. It reads the file first and
+writes only what changed in the app, so what another DevAssist or a hand edit
+changed in the meantime stays. Options given at start, such as `--title`, are
+not written to the file. Comments you add by hand are lost when it is
+rewritten.
 
 ## The settings file
 
