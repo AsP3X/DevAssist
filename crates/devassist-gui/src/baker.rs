@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use devassist_glass::material::Params;
-use devassist_glass::pane::{self, Behind, Pane, RIM_BLUR};
+use devassist_glass::pane::{self, Behind, Pane, RIM_BLUR, sigma};
 use devassist_glass::raster::{self, Bitmap};
 use egui::{Color32, Context, Pos2, Rect, TextureHandle, TextureId, TextureOptions};
 use image::RgbaImage;
@@ -157,19 +157,18 @@ fn lay_veil(picture: &mut Bitmap, colour: Color32, opacity: [f32; 2]) {
     }
 }
 
-/// The standard deviation, in points, of the Gaussian a blur of `radius` points is (as the glass crate reads a
-/// blur's radius: half of it).
-fn sigma(radius: f32) -> f32 {
-    radius.max(0.0) / 2.0
-}
-
 /// The pixels per point a picture blurred by a Gaussian of `sigma` points needs to show all it holds: at most
-/// `finest`, and at least enough for [`COARSE_LEAST_PIXELS`] along the window's shorter side.
+/// `finest`, and at least enough for [`COARSE_LEAST_PIXELS`] along the window's shorter side. 0 when `finest`
+/// is no usable scale; `finest` when `sigma` is no usable blur.
 fn coarse_scale(finest: f32, sigma: f32, size: [f32; 2]) -> f32 {
-    let least = (COARSE_LEAST_PIXELS / size[0].min(size[1])).min(finest);
+    if !(finest.is_finite() && finest > 0.0) {
+        return 0.0;
+    }
     if !(sigma.is_finite() && sigma > 0.0) {
         return finest;
     }
+    let short = size[0].min(size[1]);
+    let least = if short.is_finite() && short > 0.0 { (COARSE_LEAST_PIXELS / short).min(finest) } else { 0.0 };
     (COARSE_SIGMA_PX / sigma).clamp(least, finest)
 }
 
@@ -227,10 +226,14 @@ pub struct Wallpaper {
     pub scale: f32,
 }
 
-/// The pixels per point of the wallpaper of `scene`.
+/// The pixels per point of the wallpaper of `scene`; 0 for a scene without a usable `pixels_per_point`.
 #[must_use]
 pub fn wallpaper_scale(scene: &Scene) -> f32 {
-    if scene.blur { coarse_scale(scene.pixels_per_point, sigma(BACKDROP_BLUR), scene.size) } else { scene.pixels_per_point }
+    let finest = scene.pixels_per_point;
+    if !(finest.is_finite() && finest > 0.0) {
+        return 0.0;
+    }
+    if scene.blur { coarse_scale(finest, sigma(BACKDROP_BLUR), scene.size) } else { finest }
 }
 
 /// The wallpaper of `scene` from its decoded `photo`.
@@ -563,10 +566,15 @@ mod tests {
         let first = baker.frame(&ctx, &scene(SIZE), &shell_wants(), at(0));
         let settled = baker.counts();
         assert!(!baker.waiting());
-        for (width, ms) in [(810.0, 16), (820.0, 32), (830.0, 48)] {
+        // Each change comes before the last one has settled, though the first is long past the settle time:
+        // the wait starts again at every change.
+        let step = RESIZE_SETTLE * 2 / 3;
+        let changes = [(810.0, step), (820.0, step * 2), (830.0, step * 3), (830.0, step * 3 + RESIZE_SETTLE.saturating_sub(at(1)))];
+        assert!(changes[3].1.saturating_sub(changes[0].1) > RESIZE_SETTLE);
+        for (width, time) in changes {
             let size = [width, SIZE[1]];
             let wants = shell_wants_at(size);
-            let drawn = baker.frame(&ctx, &scene(size), &wants, at(ms));
+            let drawn = baker.frame(&ctx, &scene(size), &wants, time);
             assert_eq!(baker.counts(), settled, "baked while the size changed, at {width}");
             assert!(baker.waiting());
             assert_eq!(drawn.len(), wants.len() + 1);
@@ -578,11 +586,57 @@ mod tests {
         }
         let size = [830.0, SIZE[1]];
         let wants = shell_wants_at(size);
-        let drawn = baker.frame(&ctx, &scene(size), &wants, at(48) + RESIZE_SETTLE);
+        let drawn = baker.frame(&ctx, &scene(size), &wants, step * 3 + RESIZE_SETTLE);
         assert_eq!(baker.counts(), (settled.0 + wants.len(), settled.1 + 1));
         assert!(!baker.waiting());
         assert_eq!(drawn[0].rect, whole(size));
         assert_ne!(drawn[0].texture, first[0].texture);
+    }
+
+    #[test]
+    fn going_back_to_the_settled_size_while_waiting_bakes_nothing() {
+        let (ctx, mut baker) = (egui::Context::default(), Baker::new());
+        let first = baker.frame(&ctx, &scene(SIZE), &shell_wants(), at(0));
+        let settled = baker.counts();
+        baker.frame(&ctx, &scene([810.0, SIZE[1]]), &shell_wants_at([810.0, SIZE[1]]), at(16));
+        assert!(baker.waiting());
+        let back = baker.frame(&ctx, &scene(SIZE), &shell_wants(), at(32));
+        assert!(!baker.waiting());
+        assert_eq!(baker.counts(), settled);
+        assert_eq!(back, first);
+        // Nor later: the settled pictures are the ones for this size.
+        baker.frame(&ctx, &scene(SIZE), &shell_wants(), at(32) + RESIZE_SETTLE * 2);
+        assert_eq!(baker.counts(), settled);
+        assert!(!baker.waiting());
+    }
+
+    #[test]
+    fn a_scene_without_a_usable_scale_has_no_wallpaper_scale_and_no_panic() {
+        for blur in [true, false] {
+            for pixels_per_point in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0] {
+                let mut odd = scene(SIZE);
+                (odd.pixels_per_point, odd.blur) = (pixels_per_point, blur);
+                let scale = wallpaper_scale(&odd);
+                assert!(scale.to_bits() == 0.0_f32.to_bits() || scale.is_finite() && scale > 0.0, "{scale} at {pixels_per_point}, blur {blur}");
+            }
+        }
+        // Nor for odd blurs or window sizes.
+        for (finest, sigma, size) in [
+            (1.0, f32::NAN, SIZE),
+            (1.0, f32::INFINITY, SIZE),
+            (1.0, -3.0, SIZE),
+            (1.0, 12.0, [0.0, 0.0]),
+            (1.0, 12.0, [f32::NAN, 600.0]),
+            (1.0, 12.0, [-800.0, 600.0]),
+            (1.0, 12.0, [f32::INFINITY, f32::INFINITY]),
+            (f32::NAN, 12.0, SIZE),
+        ] {
+            let scale = coarse_scale(finest, sigma, size);
+            assert!(
+                scale.to_bits() == 0.0_f32.to_bits() || scale.is_finite() && scale > 0.0 && scale <= 1.0,
+                "{scale} for {finest}, {sigma}, {size:?}"
+            );
+        }
     }
 
     #[test]
@@ -609,7 +663,15 @@ mod tests {
         assert_eq!(baker.frame(&ctx, &scene([0.0, 0.0]), &shell_wants(), at(0)), Vec::new());
         assert_eq!(baker.counts(), (0, 0));
         let mut odd = scene(SIZE);
-        for (size, pixels_per_point) in [([-5.0, 600.0], 1.0), ([800.0, f32::NAN], 1.0), ([f32::INFINITY, 600.0], 1.0), (SIZE, 0.0), (SIZE, -1.0)] {
+        for (size, pixels_per_point) in [
+            ([-5.0, 600.0], 1.0),
+            ([800.0, f32::NAN], 1.0),
+            ([f32::INFINITY, 600.0], 1.0),
+            (SIZE, 0.0),
+            (SIZE, -1.0),
+            (SIZE, f32::NAN),
+            (SIZE, f32::INFINITY),
+        ] {
             (odd.size, odd.pixels_per_point) = (size, pixels_per_point);
             assert_eq!(baker.frame(&ctx, &odd, &shell_wants(), at(0)), Vec::new(), "{size:?} at {pixels_per_point}");
             assert!(wallpaper(&odd).is_none());

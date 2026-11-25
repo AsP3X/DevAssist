@@ -31,7 +31,8 @@ New: draws one rounded pane over the window's backdrop. Copied into it unchanged
   `frosted_pixel`, `program`; the tests `the_glass_shader_compiles_and_has_every_uniform_the_renderer_sets`
   (with its eight outlines written out, as `MOST_SHAPES` is not copied) and
   `the_colour_curves_undo_each_other_and_keep_the_alpha`;
-- from `src/render/bake.rs`: `REACH`, `sigma`, `length` and `pixels_up`.
+- from `src/render/bake.rs`: `REACH`, `sigma`, `length` and `pixels_up`. `sigma` is made public, so the
+  window works out the blur of its own pictures with the same rule (half the radius).
 
 Rewritten for one pane that is a single rounded box and never turned:
 
@@ -40,7 +41,10 @@ Rewritten for one pane that is a single rounded box and never turned:
   the identity, `u_box0` and `u_round0` from the pane, the frame the pane's centre in its own picture, and
   each sampler's map from an offset from that centre in points to a place on its backdrop picture. The other
   uniforms are filled as Quill fills them.
-- `frosted` is Quill's `frosted` with its `form` branch only.
+- `frosted` is Quill's `frosted` with its `form` branch only. New here: it clamps where it samples the backdrop
+  to the outermost pixel centres, so the backdrop's edge pixel goes on to its edge (as the shader's mirrored
+  sampler does) instead of fading into the clear past it; with a coarse backdrop that band would be several
+  points wide. Its test is `a_frosted_pane_at_the_corner_of_a_coarse_backdrop_does_not_fade`.
 - `prepare` is the part of Quill's `Builder::pane` that takes the backdrop to linear light and blurs it. Quill
   paints the backdrop a blur's reach (`REACH` standard deviations) beyond the pane; here the window's picture is
   grown by as much with its own edge mirrored (as the GPU sampler's `MirrorRepeat`), blurred and cut back, so

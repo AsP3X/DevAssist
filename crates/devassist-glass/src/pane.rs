@@ -1,7 +1,7 @@
 // Copied unchanged from Quill (pencraft) app/src/render/glass.rs at 6c6a0cc: `SHADER`, `BACKDROP`, `RIM`,
 // `HAIRLINE`, `Shape` with `distance`, `CURVE_STEPS`, `Curve`, `to_linear`, `to_gamma`, `recode`, `linear`,
 // `toward_light`, `frosted_pixel` and `program`; `RIM_BLUR` is made public. From app/src/render/bake.rs at
-// 6c6a0cc: `REACH`, `sigma`, `length` and `pixels_up`. `outward` is `Form::outward` for one shape that is not turned;
+// 6c6a0cc: `REACH`, `sigma` (made public), `length` and `pixels_up`. `outward` is `Form::outward` for one shape that is not turned;
 // `draw`'s glass part is `Builder::glass`, `frosted` is Quill's `frosted` with its `form` branch only.
 
 //! One pane of glass or frost over a backdrop picture.
@@ -183,9 +183,11 @@ fn frosted_pixel(behind: Pixel, params: &Params, tint: [f32; 3], cover: f32, edg
     [to_gamma(rgb[0] / alpha) * out, to_gamma(rgb[1] / alpha) * out, to_gamma(rgb[2] / alpha) * out, out]
 }
 
-/// The standard deviation of the Gaussian an effect's `blur` or `radius` asks for (half of it).
-// Copied from Quill's app/src/render/bake.rs.
-fn sigma(radius: f32) -> f32 {
+/// The standard deviation of the Gaussian an effect's `blur` or `radius` asks for (half of it), in the
+/// radius's own units: the blur [`prepare`] gives a picture for a `radius`.
+// Copied from Quill's app/src/render/bake.rs (made public here).
+#[must_use]
+pub fn sigma(radius: f32) -> f32 {
     radius.max(0.0) / 2.0
 }
 
@@ -292,6 +294,10 @@ pub fn frosted(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
     let shape = pane.shape();
     let centre = pane.centre();
     let (scale, soft_scale) = (behind.picture_scale, behind.scale);
+    // The backdrop's edge pixel goes on past its centre, as the shader's mirrored sampler does, instead of fading
+    // into the clear beyond it: half a pixel, which is several points of a coarse backdrop.
+    let (most_x, most_y) = ((length(behind.soft.w) - 0.5).max(0.5), (length(behind.soft.h) - 0.5).max(0.5));
+    let inside = |v: f32, most: f32| v.clamp(0.5, most);
     let mut out = Bitmap::new(w, h);
     for y in 0..out.h {
         for x in 0..out.w {
@@ -305,7 +311,13 @@ pub fn frosted(behind: &Behind<'_>, pane: &Pane) -> Option<Bitmap> {
             if cover > 0.0
                 && let Some(pixel) = out.px.get_mut(y * out.w + x)
             {
-                *pixel = frosted_pixel(behind.soft.sample(doc[0] * soft_scale, doc[1] * soft_scale), params, tint, cover, edge);
+                *pixel = frosted_pixel(
+                    behind.soft.sample(inside(doc[0] * soft_scale, most_x), inside(doc[1] * soft_scale, most_y)),
+                    params,
+                    tint,
+                    cover,
+                    edge,
+                );
             }
         }
     }
@@ -643,6 +655,25 @@ mod tests {
         // The band along the top edge shows what lies further in; the middle shows the same in both.
         assert!(differing(100, 2, 380, 16) > 500, "the rim doesn't bend: {}", differing(100, 2, 380, 16));
         assert_eq!(differing(160, 80, 320, 120), 0);
+    }
+
+    #[test]
+    fn a_frosted_pane_at_the_corner_of_a_coarse_backdrop_does_not_fade() {
+        // A flat opaque backdrop of 100 points a side at a tenth of a pixel per point.
+        let mut backdrop = Bitmap::new(10, 10);
+        backdrop.fill([0.5, 0.5, 0.5, 1.0]);
+        let soft = prepare(&backdrop, 0.0, 0.1);
+        let behind = Behind { soft: &soft, rim: &soft, scale: 0.1, rim_scale: 0.1, picture_scale: 1.0 };
+        let picture = frosted(&behind, &pane([0.0, 0.0, 30.0, 30.0], 0.0, false)).unwrap();
+        let middle = picture.px[15 * picture.w + 15];
+        for (x, y) in [(0, 0), (1, 1), (0, 10), (10, 0), (2, 2), (2, 15), (15, 2)] {
+            let pixel = picture.px[y * picture.w + x];
+            assert!((pixel[3] - 1.0).abs() < 1e-4, "alpha {} at {x}, {y}", pixel[3]);
+            // Off the hairline along the edge, the colour is the middle's.
+            if x >= 2 && y >= 2 {
+                assert!((pixel[0] - middle[0]).abs() < 1e-3, "{pixel:?} at {x}, {y}; {middle:?} in the middle");
+            }
+        }
     }
 
     #[test]
