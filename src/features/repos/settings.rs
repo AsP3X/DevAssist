@@ -234,6 +234,7 @@ impl Form {
             watch_interval,
             pull_requests: self.pull_requests,
             shell: Default::default(),
+            look: Default::default(),
         })
     }
 

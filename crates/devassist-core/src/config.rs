@@ -21,6 +21,46 @@ pub const DEFAULT_WATCH_INTERVAL: u32 = 5;
 /// The longest interval: one day.
 pub const MAX_WATCH_INTERVAL: u32 = 1440;
 
+/// Whether the window is light or dark, or follows the system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theme {
+    Light,
+    Dark,
+    System,
+}
+
+impl Theme {
+    fn name(self) -> &'static str {
+        match self {
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+            Theme::System => "system",
+        }
+    }
+}
+
+/// The picture behind the window, by name.
+pub const BACKDROPS: [&str; 6] = ["lake", "midday", "golden", "dusk", "night", "forest"];
+
+/// How the window looks. The terminal app keeps these settings and does
+/// not use them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Look {
+    pub theme: Theme,
+    pub backdrop: String,
+    pub blur: bool,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            theme: Theme::System,
+            backdrop: "lake".to_string(),
+            blur: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub title: String,
@@ -52,6 +92,8 @@ pub struct Settings {
     pub pull_requests: bool,
     /// What the shell itself is set to.
     pub shell: ShellPrefs,
+    /// How the window looks.
+    pub look: Look,
     /// False when this start was told not to look, with --no-update-check.
     pub update_check_now: bool,
     /// Where the settings are saved.
@@ -102,6 +144,8 @@ pub struct Saved {
     pub pull_requests: bool,
     /// What the shell itself is set to.
     pub shell: ShellPrefs,
+    /// How the window looks.
+    pub look: Look,
 }
 
 pub enum Startup {
@@ -141,6 +185,8 @@ struct ParsedConfig {
     pull_requests: Option<bool>,
     palette_key: Option<KeyCombo>,
     start: Option<String>,
+    /// Set when any of theme, backdrop or blur is in the file.
+    look: Option<Look>,
 }
 
 /// The settings file as found at startup.
@@ -250,6 +296,11 @@ pub fn startup() -> Result<Startup, String> {
             .and_then(|file| file.start.clone())
             .unwrap_or(defaults.start),
     };
+    let look = loaded
+        .file
+        .as_ref()
+        .and_then(|file| file.look.clone())
+        .unwrap_or_default();
     let discovered = discovered_owners(&checkouts);
     let resolved = resolve(&flags, loaded.file, &discovered);
     Ok(Startup::Run(Box::new(Settings {
@@ -269,6 +320,7 @@ pub fn startup() -> Result<Startup, String> {
         watch_interval,
         pull_requests,
         shell,
+        look,
         update_check_now: update_check && !flags.no_update_check,
         config_path: loaded.path,
         first_run,
@@ -688,6 +740,19 @@ fn render(saved: &Saved) -> String {
     if saved.shell.start != defaults.start {
         out.push_str(&format!("start = {}\n", saved.shell.start));
     }
+    let look = Look::default();
+    if saved.look.theme != look.theme {
+        out.push_str(&format!("theme = {}\n", saved.look.theme.name()));
+    }
+    if saved.look.backdrop != look.backdrop {
+        out.push_str(&format!("backdrop = {}\n", saved.look.backdrop));
+    }
+    if saved.look.blur != look.blur {
+        out.push_str(&format!(
+            "blur = {}\n",
+            if saved.look.blur { "on" } else { "off" }
+        ));
+    }
     out
 }
 
@@ -858,6 +923,32 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                     ));
                 }
                 parsed.start = Some(place);
+            }
+            "theme" => {
+                parsed.look.get_or_insert_with(Look::default).theme =
+                    match value.to_ascii_lowercase().as_str() {
+                        "light" => Theme::Light,
+                        "dark" => Theme::Dark,
+                        "system" => Theme::System,
+                        _ => return Err(format!("line {line_no}: theme is light, dark or system")),
+                    };
+            }
+            "backdrop" => {
+                let name = value.to_ascii_lowercase();
+                if !BACKDROPS.contains(&name.as_str()) {
+                    return Err(format!(
+                        "line {line_no}: backdrop is lake, midday, golden, dusk, night or forest"
+                    ));
+                }
+                parsed.look.get_or_insert_with(Look::default).backdrop = name;
+            }
+            "blur" => {
+                parsed.look.get_or_insert_with(Look::default).blur =
+                    match value.to_ascii_lowercase().as_str() {
+                        "on" | "yes" | "true" => true,
+                        "off" | "no" | "false" => false,
+                        _ => return Err(format!("line {line_no}: blur is on or off")),
+                    };
             }
             other => return Err(format!("line {line_no}: unknown setting {other}")),
         }
@@ -1032,6 +1123,7 @@ mod tests {
             watch_interval: 5,
             pull_requests: false,
             shell: ShellPrefs::default(),
+            look: Look::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         assert_eq!(parsed.title, saved.title);
@@ -1060,6 +1152,7 @@ mod tests {
             watch_interval: 5,
             pull_requests: false,
             shell: ShellPrefs::default(),
+            look: Look::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         assert!(!parsed.owners_explicit);
@@ -1112,6 +1205,7 @@ mod tests {
             watch_interval: 5,
             pull_requests: false,
             shell: ShellPrefs::default(),
+            look: Look::default(),
         };
         let text = render(&saved);
         let lines: Vec<&str> = text.lines().skip(2).collect();
@@ -1158,6 +1252,7 @@ mod tests {
             watch_interval: 5,
             pull_requests: false,
             shell: ShellPrefs::default(),
+            look: Look::default(),
         };
         let text = render(&saved);
         assert!(text.lines().any(|line| line.trim_end() == "collapsed ="));
@@ -1207,6 +1302,7 @@ mod tests {
                 palette_key: KeyCombo::parse("alt-f2").unwrap(),
                 start: "docker".to_string(),
             },
+            look: Look::default(),
         };
         let text = render(&saved);
         assert!(text.contains("palette_key = alt-f2\n"), "{text}");
@@ -1249,6 +1345,7 @@ mod tests {
             watch_interval: 30,
             pull_requests: false,
             shell: Default::default(),
+            look: Look::default(),
         };
         let again = parse_config(&render(&saved)).unwrap();
         assert_eq!(again.watched, parsed.watched);
@@ -1300,6 +1397,7 @@ mod tests {
             watch_interval: 5,
             pull_requests: false,
             shell: ShellPrefs::default(),
+            look: Look::default(),
         };
         // On is the default and is not written down.
         assert!(!render(&saved).contains("update_check"));
@@ -1324,6 +1422,7 @@ mod tests {
             watch_interval: 5,
             pull_requests: false,
             shell: ShellPrefs::default(),
+            look: Look::default(),
         };
         let parsed = parse_config(&render(&saved)).unwrap();
         let resolved = resolve(&Flags::default(), Some(parsed), &["storytold".into()]);
@@ -1368,7 +1467,7 @@ mod tests {
     #[test]
     fn config_rejects_unknown_keys_and_slashes_in_owners() {
         assert!(
-            parse_config("theme = dark\n")
+            parse_config("colour = blue\n")
                 .unwrap_err()
                 .contains("unknown")
         );
@@ -1379,5 +1478,78 @@ mod tests {
         );
         assert!(parse_config("repo = not a repo\n").is_err());
         assert!(parse_config("protocol = ftp\n").is_err());
+    }
+
+    #[test]
+    fn the_look_settings_are_read() {
+        let parsed = parse_config("theme = dark\nbackdrop = golden\nblur = off\n").unwrap();
+        assert_eq!(
+            parsed.look,
+            Some(Look {
+                theme: Theme::Dark,
+                backdrop: "golden".into(),
+                blur: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_look_setting_that_is_not_allowed_names_what_is() {
+        assert_eq!(
+            parse_config("theme = purple\n").unwrap_err(),
+            "line 1: theme is light, dark or system"
+        );
+        assert_eq!(
+            parse_config("blur = maybe\n").unwrap_err(),
+            "line 1: blur is on or off"
+        );
+        assert_eq!(
+            parse_config("backdrop = moon\n").unwrap_err(),
+            "line 1: backdrop is lake, midday, golden, dusk, night or forest"
+        );
+    }
+
+    #[test]
+    fn the_look_settings_survive_a_save() {
+        let look = Look {
+            theme: Theme::Light,
+            backdrop: "night".into(),
+            blur: false,
+        };
+        let saved = Saved {
+            title: None,
+            owners: Vec::new(),
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: Vec::new(),
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+            update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
+            pull_requests: false,
+            shell: ShellPrefs::default(),
+            look: look.clone(),
+        };
+        let path = std::env::temp_dir().join(format!(
+            "devassist-look-{}-{:?}.toml",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        save(&path, &saved).unwrap();
+        let read = read_config(&path);
+        let _ = fs::remove_file(&path);
+        assert_eq!(read.unwrap().look, Some(look));
+
+        // The default look is not written down.
+        let plain = Saved {
+            look: Look::default(),
+            ..saved
+        };
+        let text = render(&plain);
+        assert!(!text.contains("theme") && !text.contains("backdrop") && !text.contains("blur"));
+        assert_eq!(parse_config(&text).unwrap().look, None);
     }
 }

@@ -581,6 +581,8 @@ pub struct App {
     watch_status: Option<(String, bool)>,
     /// The shell's settings, kept to be saved with the rest.
     shell: config::ShellPrefs,
+    /// The window's look, kept to be saved with the rest. Not used here.
+    look: config::Look,
     generation: u64,
     remote_generation: u64,
     status_pending: usize,
@@ -687,6 +689,7 @@ impl App {
             pulls_generation: 0,
             pulls_pending: HashMap::new(),
             shell: settings.shell,
+            look: settings.look,
             generation: 0,
             remote_generation: 0,
             status_pending: 0,
@@ -2102,6 +2105,7 @@ impl App {
             watch_interval: self.watch_interval,
             pull_requests: self.pull_requests,
             shell: self.shell.clone(),
+            look: self.look.clone(),
         };
         if let Err(err) = config::save(&self.config_path, &saved) {
             self.notice(err, true);
@@ -2658,6 +2662,7 @@ impl App {
         saved.update_check = self.update_check;
         saved.watched = self.watched.clone();
         saved.shell = self.shell.clone();
+        saved.look = self.look.clone();
         let pulls_turned_on = saved.pull_requests && !self.pull_requests;
         if let Err(err) = config::save(&form.path, &saved) {
             form.error = Some(err);
@@ -4204,6 +4209,7 @@ mod tests {
             pull_requests: false,
             update_check_now: false,
             shell: Default::default(),
+            look: Default::default(),
             clone_dir: std::env::temp_dir().join("devassist-clones"),
             owners_explicit: true,
             unsaved: false,
@@ -4658,6 +4664,35 @@ mod tests {
         assert!(text.contains("owners = none"));
         assert!(text.contains("title = Desk"));
         assert!(text.contains("protocol = ssh"));
+    }
+
+    #[test]
+    fn saving_keeps_the_look_the_settings_file_had() {
+        let look = config::Look {
+            theme: config::Theme::Dark,
+            backdrop: "forest".into(),
+            blur: false,
+        };
+        let mut settings = test_settings();
+        settings.look = look.clone();
+        let mut app = App::empty(settings);
+
+        // Any save from the list writes it back.
+        app.save_config();
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        let _ = std::fs::remove_file(&app.config_path);
+        assert!(text.contains("theme = dark\n"), "{text}");
+        assert!(text.contains("backdrop = forest\n"), "{text}");
+        assert!(text.contains("blur = off\n"), "{text}");
+
+        // So does the settings dialog, which does not edit them.
+        app.open_settings(true);
+        app.save_settings();
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        let _ = std::fs::remove_file(&app.config_path);
+        assert!(text.contains("theme = dark\n"), "{text}");
+        assert!(text.contains("backdrop = forest\n"), "{text}");
+        assert!(text.contains("blur = off\n"), "{text}");
     }
 
     #[test]

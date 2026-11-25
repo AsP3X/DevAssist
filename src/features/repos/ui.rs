@@ -2542,6 +2542,7 @@ mod tests {
             pull_requests: false,
             update_check_now: false,
             shell: Default::default(),
+            look: Default::default(),
             clone_dir: PathBuf::from("development"),
             owners_explicit: true,
             unsaved: false,

@@ -8,6 +8,7 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
+- The settings file knows `theme`, `backdrop` and `blur`, for the coming window.
 - **The forks of a repository can be cloned.** **Clone the forks** (`n`) in
   the actions menu fetches every fork of a repository on GitHub, and the forks
   of those, into a folder beside the checkout: `api-fork` for `api`. Every

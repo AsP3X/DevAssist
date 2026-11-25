@@ -50,6 +50,9 @@ pull_requests = on
 | `update_check` | `on` or `off`. Whether DevAssist looks for a newer version when it starts. Default: on. |
 | `palette_key` | The key that opens the palette, the list that takes you to a tool. Default: `ctrl-p`. Write `ctrl-`, `alt-` or `shift-` and a letter or digit, or `f1` to `f12` alone or with one of those: `ctrl-k`, `alt-t`, `f2`, `ctrl-shift-p`. A letter or digit needs `ctrl` or `alt`, so that typing stays typing, and `ctrl-c` is taken. A key your terminal keeps for itself never reaches DevAssist. |
 | `start` | Where DevAssist starts: `home` for the welcome screen, or a tool's name, `repos` or `docker`. Default: `home`. A name no tool has starts at home. |
+| `theme` | `light`, `dark` or `system`. Whether the window is light or dark, or follows the system. Default: `system`. The terminal app keeps this setting and does not use it; it is for the window. |
+| `backdrop` | `lake`, `midday`, `golden`, `dusk`, `night` or `forest`. The picture behind the window. Default: `lake`. The terminal app keeps this setting and does not use it; it is for the window. |
+| `blur` | `on` or `off`. Whether the window blurs the picture behind it. Default: on. The terminal app keeps this setting and does not use it; it is for the window. |
 | `clone_dir` | The folder the Add dialog offers for a new clone. It follows the folder you used last. |
 | `checkout` | The path of a clone on the list. One line per clone. |
 | `group` | Starts a group. The `checkout` lines after it are in that group, up to the next `group` line. Checkouts before the first `group` line are in no group. |
