@@ -148,6 +148,8 @@ pub const FIELD_WIDTH: f32 = 280.0;
 pub const FIELD_PAD: f32 = 12.0;
 /// The side of a checkbox.
 pub const CHECKBOX: f32 = 16.0;
+/// The gap between the fold arrow, the name and the note in a group's heading row.
+pub const GROUP_ROW_GAP: f32 = 8.0;
 /// The gap between the controls in the bar above the table.
 pub const TOOLBAR_GAP: f32 = 8.0;
 /// How strong the lines of the table are, of the text colour.
@@ -485,47 +487,48 @@ mod tests {
     #[test]
     fn the_table_is_the_designs() {
         let want = [
-            (ROW_HEIGHT, 44.0),
-            (HEAD_HEIGHT, 40.0),
-            (GROUP_HEIGHT, 36.0),
-            (ROW_PAD_LEFT, 12.0),
-            (ROW_PAD_RIGHT, 8.0),
-            (COLUMN_GAP, 12.0),
-            (COLUMN_CHECK, 24.0),
-            (COLUMN_FOLDER, 176.0),
-            (COLUMN_BRANCH, 136.0),
-            (COLUMN_CHANGES, 104.0),
-            (COLUMN_PULLS, 134.0),
-            (COLUMN_ORIGIN, 288.0),
-            (COLUMN_ACTION, 32.0),
-            (COLUMN_NAME_LEAST, 120.0),
-            (RULE_UNIT, 8.0),
-            (RULE_HEIGHT, 16.0),
-            (RULE_BAR, 6.0),
-            (RULE_BAR_TOP, 2.0),
-            (RULE_TICK, 4.0),
-            (RULE_TICK_FIFTH, 7.0),
-            (RULE_LABEL_GAP, 12.0),
-            (RULE_TICK_OPACITY, 0.28),
-            (RULE_FIFTH_OPACITY, 0.5),
-            (CAPSULE_PAD, 4.0),
-            (CAPSULE_GAP, 2.0),
-            (ACTION_HEIGHT, 28.0),
-            (ACTION_GAP, 6.0),
-            (FIELD_WIDTH, 280.0),
-            (FIELD_PAD, 12.0),
-            (CHECKBOX, 16.0),
-            (TOOLBAR_GAP, 8.0),
-            (LINE_OPACITY, 0.10),
-            (HEAD_FILL_OPACITY, 0.06),
-            (GROUP_FILL_OPACITY, 0.03),
-            (HOVER_OPACITY, 0.05),
-            (CHECKBOX_STROKE_OPACITY, 0.4),
-            (SELECTED_OPACITY_LIGHT, 0.14),
-            (SELECTED_OPACITY_DARK, 0.32),
+            ("ROW_HEIGHT", ROW_HEIGHT, 44.0),
+            ("HEAD_HEIGHT", HEAD_HEIGHT, 40.0),
+            ("GROUP_HEIGHT", GROUP_HEIGHT, 36.0),
+            ("ROW_PAD_LEFT", ROW_PAD_LEFT, 12.0),
+            ("ROW_PAD_RIGHT", ROW_PAD_RIGHT, 8.0),
+            ("COLUMN_GAP", COLUMN_GAP, 12.0),
+            ("COLUMN_CHECK", COLUMN_CHECK, 24.0),
+            ("COLUMN_FOLDER", COLUMN_FOLDER, 176.0),
+            ("COLUMN_BRANCH", COLUMN_BRANCH, 136.0),
+            ("COLUMN_CHANGES", COLUMN_CHANGES, 104.0),
+            ("COLUMN_PULLS", COLUMN_PULLS, 134.0),
+            ("COLUMN_ORIGIN", COLUMN_ORIGIN, 288.0),
+            ("COLUMN_ACTION", COLUMN_ACTION, 32.0),
+            ("COLUMN_NAME_LEAST", COLUMN_NAME_LEAST, 120.0),
+            ("RULE_UNIT", RULE_UNIT, 8.0),
+            ("RULE_HEIGHT", RULE_HEIGHT, 16.0),
+            ("RULE_BAR", RULE_BAR, 6.0),
+            ("RULE_BAR_TOP", RULE_BAR_TOP, 2.0),
+            ("RULE_TICK", RULE_TICK, 4.0),
+            ("RULE_TICK_FIFTH", RULE_TICK_FIFTH, 7.0),
+            ("RULE_LABEL_GAP", RULE_LABEL_GAP, 12.0),
+            ("RULE_TICK_OPACITY", RULE_TICK_OPACITY, 0.28),
+            ("RULE_FIFTH_OPACITY", RULE_FIFTH_OPACITY, 0.5),
+            ("CAPSULE_PAD", CAPSULE_PAD, 4.0),
+            ("CAPSULE_GAP", CAPSULE_GAP, 2.0),
+            ("ACTION_HEIGHT", ACTION_HEIGHT, 28.0),
+            ("ACTION_GAP", ACTION_GAP, 6.0),
+            ("FIELD_WIDTH", FIELD_WIDTH, 280.0),
+            ("FIELD_PAD", FIELD_PAD, 12.0),
+            ("CHECKBOX", CHECKBOX, 16.0),
+            ("TOOLBAR_GAP", TOOLBAR_GAP, 8.0),
+            ("LINE_OPACITY", LINE_OPACITY, 0.10),
+            ("HEAD_FILL_OPACITY", HEAD_FILL_OPACITY, 0.06),
+            ("GROUP_FILL_OPACITY", GROUP_FILL_OPACITY, 0.03),
+            ("HOVER_OPACITY", HOVER_OPACITY, 0.05),
+            ("CHECKBOX_STROKE_OPACITY", CHECKBOX_STROKE_OPACITY, 0.4),
+            ("SELECTED_OPACITY_LIGHT", SELECTED_OPACITY_LIGHT, 0.14),
+            ("SELECTED_OPACITY_DARK", SELECTED_OPACITY_DARK, 0.32),
+            ("GROUP_ROW_GAP", GROUP_ROW_GAP, 8.0),
         ];
-        for (i, (got, expected)) in want.into_iter().enumerate() {
-            assert!((got - expected).abs() < f32::EPSILON, "measure {i} is {got}, the design has {expected}");
+        for (constant, got, expected) in want {
+            assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
         }
         assert_eq!(RULE_HALF, 10);
         assert_eq!(ACTION_PAD, [8.0, 10.0]);

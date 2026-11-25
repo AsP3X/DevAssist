@@ -53,142 +53,74 @@ pub fn install_fonts(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
-/// An icon of the Lucide font the window uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Icon {
-    /// Lucide `house`.
-    House,
-    /// Lucide `folder-git-2`.
-    FolderGit2,
-    /// Lucide `container`.
-    Container,
-    /// Lucide `list-ordered`.
-    ListOrdered,
-    /// Lucide `scroll-text`.
-    ScrollText,
-    /// Lucide `search`.
-    Search,
-    /// Lucide `settings`.
-    Settings,
-    /// Lucide `circle-help`.
-    CircleHelp,
-    /// Lucide `panel-left`.
-    PanelLeft,
-    /// Lucide `wrench`.
-    Wrench,
-    /// Lucide `minus`.
-    Minus,
-    /// Lucide `square`.
-    Square,
-    /// Lucide `x`.
-    X,
-    /// Lucide `ellipsis-vertical`.
-    EllipsisVertical,
-    /// Lucide `git-branch`.
-    GitBranch,
-    /// Lucide `git-pull-request`.
-    GitPullRequest,
-    /// Lucide `git-merge`.
-    GitMerge,
-    /// Lucide `git-pull-request-closed`.
-    GitPullRequestClosed,
-    /// Lucide `eye`.
-    Eye,
-    /// Lucide `chevron-down`.
-    ChevronDown,
-    /// Lucide `chevron-right`.
-    ChevronRight,
-    /// Lucide `arrow-up`.
-    ArrowUp,
-    /// Lucide `arrow-down`.
-    ArrowDown,
-    /// Lucide `arrow-up-down`.
-    ArrowUpDown,
-    /// Lucide `check`.
-    Check,
-    /// Lucide `ellipsis`.
-    Ellipsis,
-    /// Lucide `triangle-alert`.
-    TriangleAlert,
-    /// Lucide `loader-circle`.
-    LoaderCircle,
-    /// Lucide `rotate-cw`.
-    RotateCw,
-    /// Lucide `clock`.
-    Clock,
+/// Lists the icons once: each entry is a variant, its code point in the Lucide font (`lucide-static` 1.80.0) and
+/// its Lucide name. The enum, [`Icon::ALL`], [`icon`] and [`Icon::name`] are all made from the list, so an icon
+/// cannot be in one and left out of another.
+macro_rules! icons {
+    ($($variant:ident => $code:literal, $name:literal,)+) => {
+        /// An icon of the Lucide font the window uses; the variant is the Lucide name in camel case.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Icon {
+            $(
+                #[doc = concat!("Lucide `", $name, "`.")]
+                $variant,
+            )+
+        }
+
+        impl Icon {
+            /// Every icon, in the order of the enum.
+            pub const ALL: [Icon; [$($name),+].len()] = [$(Icon::$variant),+];
+
+            /// The icon's name in Lucide.
+            #[must_use]
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Icon::$variant => $name,)+
+                }
+            }
+        }
+
+        /// The character that draws `name` in the [`icons_family`]. Code points are from `lucide-static` 1.80.0.
+        #[must_use]
+        pub fn icon(name: Icon) -> char {
+            match name {
+                $(Icon::$variant => char::from_u32($code).unwrap_or(char::REPLACEMENT_CHARACTER),)+
+            }
+        }
+    };
 }
 
-impl Icon {
-    /// Every icon, in the order of the enum.
-    pub const ALL: [Icon; 30] = [
-        Icon::House,
-        Icon::FolderGit2,
-        Icon::Container,
-        Icon::ListOrdered,
-        Icon::ScrollText,
-        Icon::Search,
-        Icon::Settings,
-        Icon::CircleHelp,
-        Icon::PanelLeft,
-        Icon::Wrench,
-        Icon::Minus,
-        Icon::Square,
-        Icon::X,
-        Icon::EllipsisVertical,
-        Icon::GitBranch,
-        Icon::GitPullRequest,
-        Icon::GitMerge,
-        Icon::GitPullRequestClosed,
-        Icon::Eye,
-        Icon::ChevronDown,
-        Icon::ChevronRight,
-        Icon::ArrowUp,
-        Icon::ArrowDown,
-        Icon::ArrowUpDown,
-        Icon::Check,
-        Icon::Ellipsis,
-        Icon::TriangleAlert,
-        Icon::LoaderCircle,
-        Icon::RotateCw,
-        Icon::Clock,
-    ];
-}
-
-/// The character that draws `name` in the [`icons_family`]. Code points are from `lucide-static` 1.80.0.
-#[must_use]
-pub fn icon(name: Icon) -> char {
-    match name {
-        Icon::House => '\u{e0f5}',
-        Icon::FolderGit2 => '\u{e40a}',
-        Icon::Container => '\u{e4d5}',
-        Icon::ListOrdered => '\u{e1d1}',
-        Icon::ScrollText => '\u{e45f}',
-        Icon::Search => '\u{e151}',
-        Icon::Settings => '\u{e154}',
-        Icon::CircleHelp => '\u{e082}',
-        Icon::PanelLeft => '\u{e12a}',
-        Icon::Wrench => '\u{e1b1}',
-        Icon::Minus => '\u{e11c}',
-        Icon::Square => '\u{e167}',
-        Icon::X => '\u{e1b2}',
-        Icon::EllipsisVertical => '\u{e0b7}',
-        Icon::GitBranch => '\u{e0e2}',
-        Icon::GitPullRequest => '\u{e0e5}',
-        Icon::GitMerge => '\u{e0e4}',
-        Icon::GitPullRequestClosed => '\u{e35a}',
-        Icon::Eye => '\u{e0ba}',
-        Icon::ChevronDown => '\u{e06d}',
-        Icon::ChevronRight => '\u{e06f}',
-        Icon::ArrowUp => '\u{e04a}',
-        Icon::ArrowDown => '\u{e042}',
-        Icon::ArrowUpDown => '\u{e37d}',
-        Icon::Check => '\u{e06c}',
-        Icon::Ellipsis => '\u{e0b6}',
-        Icon::TriangleAlert => '\u{e193}',
-        Icon::LoaderCircle => '\u{e10a}',
-        Icon::RotateCw => '\u{e149}',
-        Icon::Clock => '\u{e087}',
-    }
+icons! {
+    House => 0xe0f5, "house",
+    FolderGit2 => 0xe40a, "folder-git-2",
+    Container => 0xe4d5, "container",
+    ListOrdered => 0xe1d1, "list-ordered",
+    ScrollText => 0xe45f, "scroll-text",
+    Search => 0xe151, "search",
+    Settings => 0xe154, "settings",
+    CircleHelp => 0xe082, "circle-help",
+    PanelLeft => 0xe12a, "panel-left",
+    Wrench => 0xe1b1, "wrench",
+    Minus => 0xe11c, "minus",
+    Square => 0xe167, "square",
+    X => 0xe1b2, "x",
+    EllipsisVertical => 0xe0b7, "ellipsis-vertical",
+    GitBranch => 0xe0e2, "git-branch",
+    GitPullRequest => 0xe0e5, "git-pull-request",
+    GitMerge => 0xe0e4, "git-merge",
+    GitPullRequestClosed => 0xe35a, "git-pull-request-closed",
+    Eye => 0xe0ba, "eye",
+    ChevronDown => 0xe06d, "chevron-down",
+    ChevronRight => 0xe06f, "chevron-right",
+    ArrowUp => 0xe04a, "arrow-up",
+    ArrowDown => 0xe042, "arrow-down",
+    ArrowUpDown => 0xe37d, "arrow-up-down",
+    Check => 0xe06c, "check",
+    Ellipsis => 0xe0b6, "ellipsis",
+    TriangleAlert => 0xe193, "triangle-alert",
+    LoaderCircle => 0xe10a, "loader-circle",
+    RotateCw => 0xe149, "rotate-cw",
+    Clock => 0xe087, "clock",
 }
 
 /// The JPEG bytes of the backdrop picture for `key`, one of `devassist_core::config::BACKDROPS`.
@@ -287,45 +219,15 @@ mod tests {
     }
 
     #[test]
-    fn icon_all_lists_every_icon() {
-        // A variant missing from this match does not compile; one missing from ALL fails the assertion.
-        fn place(name: Icon) -> usize {
-            match name {
-                Icon::House => 0,
-                Icon::FolderGit2 => 1,
-                Icon::Container => 2,
-                Icon::ListOrdered => 3,
-                Icon::ScrollText => 4,
-                Icon::Search => 5,
-                Icon::Settings => 6,
-                Icon::CircleHelp => 7,
-                Icon::PanelLeft => 8,
-                Icon::Wrench => 9,
-                Icon::Minus => 10,
-                Icon::Square => 11,
-                Icon::X => 12,
-                Icon::EllipsisVertical => 13,
-                Icon::GitBranch => 14,
-                Icon::GitPullRequest => 15,
-                Icon::GitMerge => 16,
-                Icon::GitPullRequestClosed => 17,
-                Icon::Eye => 18,
-                Icon::ChevronDown => 19,
-                Icon::ChevronRight => 20,
-                Icon::ArrowUp => 21,
-                Icon::ArrowDown => 22,
-                Icon::ArrowUpDown => 23,
-                Icon::Check => 24,
-                Icon::Ellipsis => 25,
-                Icon::TriangleAlert => 26,
-                Icon::LoaderCircle => 27,
-                Icon::RotateCw => 28,
-                Icon::Clock => 29,
-            }
-        }
-        for (at, name) in Icon::ALL.into_iter().enumerate() {
-            assert_eq!(place(name), at, "{name:?} is not at its place in ALL");
-        }
+    fn the_icons_are_listed_once_without_repeats() {
+        let codes: std::collections::BTreeSet<char> = Icon::ALL.into_iter().map(icon).collect();
+        let names: std::collections::BTreeSet<&str> = Icon::ALL.into_iter().map(Icon::name).collect();
+        assert_eq!(codes.len(), Icon::ALL.len(), "two icons share a code point");
+        assert_eq!(names.len(), Icon::ALL.len(), "two icons share a name");
+        assert!(!codes.contains(&char::REPLACEMENT_CHARACTER), "an icon has no valid code point");
+        // The README lists 16 icons beyond the 14 the sidebar and bar already had.
         assert_eq!(Icon::ALL.len(), 30);
+        assert_eq!(Icon::X.name(), "x");
+        assert_eq!(Icon::FolderGit2.name(), "folder-git-2");
     }
 }
