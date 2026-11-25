@@ -1015,7 +1015,7 @@ mod tests {
     /// Everything against a real engine, on containers, an image tag and a
     /// volume made for the test and named `devassist-test-*`. Nothing else
     /// is touched. It needs Docker running and the `redis:7-alpine` image:
-    /// `cargo test -- --ignored live_docker`
+    /// `cargo test --workspace -- --ignored live_docker`
     #[test]
     #[ignore = "needs a running Docker and the redis:7-alpine image"]
     fn live_docker_lists_logs_stops_and_removes() {

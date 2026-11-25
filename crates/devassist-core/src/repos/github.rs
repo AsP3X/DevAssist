@@ -917,7 +917,7 @@ mod tests {
         );
     }
 
-    /// `cargo test -- --ignored live_pull_counts`
+    /// `cargo test --workspace -- --ignored live_pull_counts`
     #[test]
     #[ignore = "asks GitHub, and needs a sign-in"]
     fn live_pull_counts_come_back_for_a_public_repository() {

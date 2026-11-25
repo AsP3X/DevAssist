@@ -5,7 +5,7 @@ and publishes it; installed copies of DevAssist then find it on their own.
 
 ## Steps
 
-1. Set the new version in `Cargo.toml` and run `cargo build` so `Cargo.lock`
+1. Set the new version in `Cargo.toml`, under `[workspace.package]`, and run `cargo build` so `Cargo.lock`
    follows.
 2. Add a section for the version to `CHANGELOG.md`, headed `## [1.2.3] - YYYY-MM-DD`.
    That section becomes the release notes, and it is what people see in the
@@ -43,7 +43,7 @@ it: the app asks GitHub for the latest full release.
 
 ## How self-update works
 
-The code is in `src/shell/update.rs`; the dialog is in `src/shell/updater.rs`.
+The code is in `crates/devassist-core/src/update.rs`; the dialog is in `src/shell/updater.rs`.
 
 1. **Look.** At start-up, and when the user presses `v`, the app asks
    `https://api.github.com/repos/AsP3X/DevAssist/releases/latest`. If the tag

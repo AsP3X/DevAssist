@@ -4470,7 +4470,7 @@ mod tests {
         let _ = std::fs::remove_file(&app.config_path);
     }
 
-    /// `cargo test -- --ignored live_forks`
+    /// `cargo test --workspace -- --ignored live_forks`
     #[test]
     #[ignore = "asks GitHub and clones a small public repository"]
     fn live_forks_of_a_public_repository_are_collected_beside_it() {

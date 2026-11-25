@@ -328,7 +328,7 @@ mod tests {
 
     /// The real thing, against the latest release on GitHub. It needs the
     /// network, so it only runs when asked for:
-    /// `cargo test -- --ignored live_download`
+    /// `cargo test --workspace -- --ignored live_download`
     #[test]
     #[ignore = "downloads the latest release from GitHub"]
     fn live_download_matches_its_checksum() {
