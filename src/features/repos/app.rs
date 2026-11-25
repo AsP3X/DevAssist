@@ -595,6 +595,11 @@ pub struct App {
     lookup_running: Option<String>,
     job_close_at: Option<Instant>,
     worker: Worker<Msg>,
+    /// The settings as this program last read or wrote them. A save writes
+    /// only what changed since, so what another DevAssist changed in the
+    /// file stays. None writes everything: the settings changed at startup
+    /// and are not in the file yet.
+    last_saved: Option<config::Saved>,
 }
 
 impl App {
@@ -632,7 +637,8 @@ impl App {
     }
 
     fn empty(settings: Settings) -> Self {
-        Self {
+        let unsaved = settings.unsaved;
+        let mut app = Self {
             checkouts: settings.checkouts,
             clone_dir: settings.clone_dir,
             owners_explicit: settings.owners_explicit,
@@ -699,7 +705,12 @@ impl App {
             lookup_due: None,
             lookup_running: None,
             worker: Worker::default(),
+            last_saved: None,
+        };
+        if !unsaved {
+            app.last_saved = Some(app.saved());
         }
+        app
     }
 
     pub fn drain(&mut self) -> bool {
@@ -2090,7 +2101,25 @@ impl App {
         let checkouts = &self.checkouts;
         self.watched
             .retain(|path| checkouts.iter().any(|known| paths::same_path(known, path)));
-        let saved = config::Saved {
+        let saved = self.saved();
+        if let Err(err) = self.write_settings(&self.config_path.clone(), saved) {
+            self.notice(err, true);
+        }
+    }
+
+    /// Writes what changed since the last read or write, and remembers it.
+    fn write_settings(&mut self, path: &Path, saved: config::Saved) -> Result<(), String> {
+        match &self.last_saved {
+            Some(before) => config::save_changes(path, before, &saved)?,
+            None => config::save(path, &saved)?,
+        }
+        self.last_saved = Some(saved);
+        Ok(())
+    }
+
+    /// The settings and the list of checkouts as they are written.
+    fn saved(&self) -> config::Saved {
+        config::Saved {
             title: self.custom_title.clone(),
             owners: self.owners.clone(),
             owners_set: self.owners_explicit,
@@ -2106,9 +2135,6 @@ impl App {
             pull_requests: self.pull_requests,
             shell: self.shell.clone(),
             look: self.look.clone(),
-        };
-        if let Err(err) = config::save(&self.config_path, &saved) {
-            self.notice(err, true);
         }
     }
 
@@ -2664,11 +2690,14 @@ impl App {
         saved.shell = self.shell.clone();
         saved.look = self.look.clone();
         let pulls_turned_on = saved.pull_requests && !self.pull_requests;
-        if let Err(err) = config::save(&form.path, &saved) {
-            form.error = Some(err);
+        let path = form.path.clone();
+        if let Err(err) = self.write_settings(&path, saved.clone()) {
+            if let Some(form) = self.form.as_mut() {
+                form.error = Some(err);
+            }
             return;
         }
-        let path = form.path.display().to_string();
+        let path = path.display().to_string();
         self.form = None;
         self.mode = Mode::List;
         self.owners = saved.owners;
@@ -4664,6 +4693,38 @@ mod tests {
         assert!(text.contains("owners = none"));
         assert!(text.contains("title = Desk"));
         assert!(text.contains("protocol = ssh"));
+    }
+
+    #[test]
+    fn a_setting_left_alone_here_is_saved_as_the_file_has_it_now() {
+        let mut app = App::empty(test_settings());
+        let _ = std::fs::remove_file(&app.config_path);
+        app.save_config();
+        // Another DevAssist changes the interval and the look in the file.
+        let other = std::fs::read_to_string(&app.config_path).unwrap()
+            + "watch_interval = 30\ntheme = dark\n";
+        std::fs::write(&app.config_path, other).unwrap();
+
+        // A save from the list keeps both.
+        app.clone_dir = std::env::temp_dir().join("devassist-elsewhere");
+        app.save_config();
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(text.contains("watch_interval = 30\n"), "{text}");
+        assert!(text.contains("theme = dark\n"), "{text}");
+        assert!(
+            text.contains(&format!("clone_dir = {}\n", app.clone_dir.display())),
+            "{text}"
+        );
+
+        // So does the settings dialog, which changes the title only.
+        app.open_settings(false);
+        app.form.as_mut().unwrap().title = "Desk".into();
+        app.save_settings();
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        let _ = std::fs::remove_file(&app.config_path);
+        assert!(text.contains("title = Desk\n"), "{text}");
+        assert!(text.contains("watch_interval = 30\n"), "{text}");
+        assert!(text.contains("theme = dark\n"), "{text}");
     }
 
     #[test]

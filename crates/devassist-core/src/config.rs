@@ -220,11 +220,8 @@ pub fn startup() -> Result<Startup, String> {
     }
     let loaded = load_file(&flags)?;
     let first_run = loaded.file.is_none() && !flags.owners_explicit && !flags.no_owner;
-    let mut checkouts = loaded
-        .file
-        .as_ref()
-        .map(|file| file.checkouts.clone())
-        .unwrap_or_default();
+    let stored = saved_from(loaded.file.as_ref().unwrap_or(&ParsedConfig::default()));
+    let mut checkouts = stored.checkouts;
     let known = checkouts.len();
     let mut folders: Vec<PathBuf> = flags
         .import
@@ -237,10 +234,8 @@ pub fn startup() -> Result<Startup, String> {
             push_path(&mut checkouts, repo.path);
         }
     }
-    let clone_dir = loaded
-        .file
-        .as_ref()
-        .and_then(|file| file.clone_dir.clone())
+    let clone_dir = stored
+        .clone_dir
         .or_else(|| flags.import.first().and(folders.first().cloned()))
         .or_else(|| {
             checkouts
@@ -249,58 +244,21 @@ pub fn startup() -> Result<Startup, String> {
         })
         .or_else(home_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    let owners_explicit = loaded
-        .file
-        .as_ref()
-        .is_some_and(|file| file.owners_explicit);
+    let owners_explicit = stored.owners_set;
     let unsaved = checkouts.len() != known || loaded.migrated;
-    let (placement, collapsed) = loaded
-        .file
-        .as_ref()
-        .map(|file| (file.placement.clone(), file.collapsed.clone()))
-        .unwrap_or_default();
-    let update_check = loaded
-        .file
-        .as_ref()
-        .and_then(|file| file.update_check)
-        .unwrap_or(true);
+    let placement = stored.placement;
+    let collapsed = stored.collapsed;
+    let update_check = stored.update_check;
     // A watched path that is no longer on the list is dropped.
-    let watched: Vec<PathBuf> = loaded
-        .file
-        .as_ref()
-        .map(|file| file.watched.clone())
-        .unwrap_or_default()
+    let watched: Vec<PathBuf> = stored
+        .watched
         .into_iter()
         .filter(|path| checkouts.iter().any(|known| same_path(known, path)))
         .collect();
-    let watch_interval = loaded
-        .file
-        .as_ref()
-        .and_then(|file| file.watch_interval)
-        .unwrap_or(DEFAULT_WATCH_INTERVAL);
-    let pull_requests = loaded
-        .file
-        .as_ref()
-        .and_then(|file| file.pull_requests)
-        .unwrap_or(false);
-    let defaults = ShellPrefs::default();
-    let shell = ShellPrefs {
-        palette_key: loaded
-            .file
-            .as_ref()
-            .and_then(|file| file.palette_key)
-            .unwrap_or(defaults.palette_key),
-        start: loaded
-            .file
-            .as_ref()
-            .and_then(|file| file.start.clone())
-            .unwrap_or(defaults.start),
-    };
-    let look = loaded
-        .file
-        .as_ref()
-        .and_then(|file| file.look.clone())
-        .unwrap_or_default();
+    let watch_interval = stored.watch_interval;
+    let pull_requests = stored.pull_requests;
+    let shell = stored.shell;
+    let look = stored.look;
     let discovered = discovered_owners(&checkouts);
     let resolved = resolve(&flags, loaded.file, &discovered);
     Ok(Startup::Run(Box::new(Settings {
@@ -627,6 +585,31 @@ fn load_file(flags: &Flags) -> Result<Loaded, String> {
     })
 }
 
+/// The settings a file holds, with the defaults for what it leaves out.
+fn saved_from(file: &ParsedConfig) -> Saved {
+    let defaults = ShellPrefs::default();
+    Saved {
+        title: file.title.clone(),
+        owners: file.owners.clone(),
+        owners_set: file.owners_explicit,
+        pinned: file.pinned.clone(),
+        protocol: file.protocol.unwrap_or(Protocol::Auto),
+        clone_dir: file.clone_dir.clone(),
+        checkouts: file.checkouts.clone(),
+        placement: file.placement.clone(),
+        collapsed: file.collapsed.clone(),
+        update_check: file.update_check.unwrap_or(true),
+        watched: file.watched.clone(),
+        watch_interval: file.watch_interval.unwrap_or(DEFAULT_WATCH_INTERVAL),
+        pull_requests: file.pull_requests.unwrap_or(false),
+        shell: ShellPrefs {
+            palette_key: file.palette_key.unwrap_or(defaults.palette_key),
+            start: file.start.clone().unwrap_or(defaults.start),
+        },
+        look: file.look.clone().unwrap_or_default(),
+    }
+}
+
 fn read_config(path: &Path) -> Result<ParsedConfig, String> {
     let text = fs::read_to_string(path)
         .map_err(|err| format!("could not read {}: {err}", path.display()))?;
@@ -666,6 +649,71 @@ pub fn save(path: &Path, saved: &Saved) -> Result<(), String> {
     }
     fs::write(path, render(saved))
         .map_err(|err| format!("could not save {}: {err}", path.display()))
+}
+
+/// Writes the settings this program changed since `before` and keeps
+/// every other setting as the file has it now, so a change another
+/// DevAssist made in the meantime stays. A file that cannot be read or
+/// parsed is written over with `after` whole.
+pub fn save_changes(path: &Path, before: &Saved, after: &Saved) -> Result<(), String> {
+    match read_config(path) {
+        Ok(file) => save(path, &merge(before, after, saved_from(&file))),
+        Err(_) => save(path, after),
+    }
+}
+
+/// `after` where it differs from `before`, otherwise `file`. Every field
+/// is named, so a new one does not compile until it is merged here too.
+fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
+    fn pick<T: Clone + PartialEq>(before: &T, after: &T, file: T) -> T {
+        if after == before { file } else { after.clone() }
+    }
+    let Saved {
+        title,
+        owners,
+        owners_set,
+        pinned,
+        protocol,
+        clone_dir,
+        checkouts,
+        placement,
+        collapsed,
+        update_check,
+        watched,
+        watch_interval,
+        pull_requests,
+        shell,
+        look,
+    } = file;
+    // The accounts and whether they were chosen are one setting: taken
+    // apart, accounts confirmed unchanged would be written as none.
+    let (owners, owners_set) = pick(
+        &(&before.owners, before.owners_set),
+        &(&after.owners, after.owners_set),
+        (&owners, owners_set),
+    );
+    let owners = owners.clone();
+    Saved {
+        title: pick(&before.title, &after.title, title),
+        owners,
+        owners_set,
+        pinned: pick(&before.pinned, &after.pinned, pinned),
+        protocol: pick(&before.protocol, &after.protocol, protocol),
+        clone_dir: pick(&before.clone_dir, &after.clone_dir, clone_dir),
+        checkouts: pick(&before.checkouts, &after.checkouts, checkouts),
+        placement: pick(&before.placement, &after.placement, placement),
+        collapsed: pick(&before.collapsed, &after.collapsed, collapsed),
+        update_check: pick(&before.update_check, &after.update_check, update_check),
+        watched: pick(&before.watched, &after.watched, watched),
+        watch_interval: pick(
+            &before.watch_interval,
+            &after.watch_interval,
+            watch_interval,
+        ),
+        pull_requests: pick(&before.pull_requests, &after.pull_requests, pull_requests),
+        shell: pick(&before.shell, &after.shell, shell),
+        look: pick(&before.look, &after.look, look),
+    }
 }
 
 fn render(saved: &Saved) -> String {
@@ -1551,5 +1599,133 @@ mod tests {
         let text = render(&plain);
         assert!(!text.contains("theme") && !text.contains("backdrop") && !text.contains("blur"));
         assert_eq!(parse_config(&text).unwrap().look, None);
+    }
+
+    /// A settings file of its own for one test.
+    fn temp_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "devassist-{name}-{}-{:?}.toml",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    /// One checkout in no group, watched every five minutes.
+    fn one_checkout() -> Saved {
+        Saved {
+            title: None,
+            owners: Vec::new(),
+            owners_set: false,
+            pinned: Vec::new(),
+            protocol: Protocol::Auto,
+            clone_dir: None,
+            checkouts: vec![PathBuf::from("/srv/code/api")],
+            placement: Vec::new(),
+            collapsed: Vec::new(),
+            update_check: true,
+            watched: Vec::new(),
+            watch_interval: 5,
+            pull_requests: false,
+            shell: ShellPrefs::default(),
+            look: Look::default(),
+        }
+    }
+
+    /// The file as it reads back now.
+    fn read_back(path: &Path) -> Saved {
+        let read = read_config(path);
+        let _ = fs::remove_file(path);
+        saved_from(&read.unwrap())
+    }
+
+    #[test]
+    fn a_save_keeps_what_the_other_program_changed() {
+        let path = temp_file("merge-other");
+        let before = one_checkout();
+        save(&path, &before).unwrap();
+        // The other program changes the interval in the file.
+        save(
+            &path,
+            &Saved {
+                watch_interval: 30,
+                ..before.clone()
+            },
+        )
+        .unwrap();
+        let after = Saved {
+            placement: vec![(PathBuf::from("/srv/code/api"), "work".to_string())],
+            ..before.clone()
+        };
+        save_changes(&path, &before, &after).unwrap();
+        let read = read_back(&path);
+        assert_eq!(read.watch_interval, 30);
+        assert_eq!(read.placement, after.placement);
+    }
+
+    #[test]
+    fn a_save_takes_the_persons_change_over_the_files() {
+        let path = temp_file("merge-mine");
+        let before = one_checkout();
+        save(
+            &path,
+            &Saved {
+                watch_interval: 30,
+                ..before.clone()
+            },
+        )
+        .unwrap();
+        let after = Saved {
+            watch_interval: 10,
+            ..before.clone()
+        };
+        save_changes(&path, &before, &after).unwrap();
+        assert_eq!(read_back(&path).watch_interval, 10);
+    }
+
+    #[test]
+    fn a_save_keeps_the_accounts_together_with_whether_they_were_chosen() {
+        // The accounts followed the checkouts and were not in the file.
+        // The settings dialog confirms them unchanged: they are chosen now.
+        let path = temp_file("merge-accounts");
+        let before = Saved {
+            owners: vec!["storytold".into()],
+            ..one_checkout()
+        };
+        save(&path, &before).unwrap();
+        let after = Saved {
+            owners_set: true,
+            ..before.clone()
+        };
+        save_changes(&path, &before, &after).unwrap();
+        let read = read_back(&path);
+        assert!(read.owners_set);
+        assert_eq!(read.owners, vec!["storytold".to_string()]);
+    }
+
+    #[test]
+    fn a_save_writes_everything_when_the_file_is_gone() {
+        let path = temp_file("merge-gone");
+        let _ = fs::remove_file(&path);
+        let before = one_checkout();
+        let after = Saved {
+            watch_interval: 10,
+            collapsed: vec!["work".into()],
+            ..before.clone()
+        };
+        assert_eq!(save_changes(&path, &before, &after), Ok(()));
+        assert_eq!(read_back(&path), after);
+    }
+
+    #[test]
+    fn a_save_writes_everything_when_the_file_no_longer_parses() {
+        let path = temp_file("merge-broken");
+        fs::write(&path, "nonsense = 1\n").unwrap();
+        let before = one_checkout();
+        let after = Saved {
+            title: Some("Desk".into()),
+            ..before.clone()
+        };
+        assert_eq!(save_changes(&path, &before, &after), Ok(()));
+        assert_eq!(read_back(&path), after);
     }
 }
