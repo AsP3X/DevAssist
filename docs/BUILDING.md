@@ -30,8 +30,8 @@ cargo run -- --config scratch.toml
 ## The window
 
 `devassist-gui` is a second program, a window in a "liquid glass" design. It
-has no functions yet: it opens and shows its frame. It is not in the
-installers or the release downloads.
+shows your repositories and changes nothing yet. It is not in the installers
+or the release downloads.
 
 ```
 cargo run -p devassist-gui
@@ -52,6 +52,7 @@ frosted instead.
 | `--backdrop KEY` | The backdrop: `lake`, `midday`, `golden`, `dusk`, `night` or `forest` |
 | `--no-blur` | Does not blur the backdrop |
 | `--no-sidebar` | Opens with the sidebar hidden |
+| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder and asks no network, so it suits screenshots. Refresh does nothing in it. Folding a group writes only to a settings file of its own under the system's temporary folder |
 
 At start the window reads `theme`, `backdrop` and `blur` from the settings
 file. It cannot change them yet. A settings file with a mistake makes the
@@ -59,7 +60,16 @@ window print one line on standard error and open with the default look. A
 wrong option prints the usage line. Warnings and errors, such as the glass
 falling back to frost or a `--screenshot` that could not be written, go to
 standard error. Set `DEVASSIST_LOG=info` to see the info lines too, such as
-how long each bake of the glass took.
+how long each bake of the glass took. A release build on Windows has no
+console, so there the settings warning is also said in the status bar for its
+first seconds.
+
+Glass panes and frosted panes are made differently. A glass pane is baked: it
+is drawn once into a picture and kept until something it depends on changes.
+A frosted pane has no picture of its own. For each wallpaper the baker draws
+one sheet, the whole window blurred and tinted, and a frosted pane shows the
+part of the sheet under it. That is why the table's panel can scroll without a
+bake.
 
 To make a picture of the window, give it a file name. This opens the window
 off screen for a moment and then ends:
@@ -222,10 +232,19 @@ use. The root package turns it on as a dev-dependency.
 | `src/theme.rs` | Every colour, radius, size and duration |
 | `src/assets.rs` | The built-in fonts, icon font and backdrops |
 | `src/baker.rs` | Makes the glass panes as pictures and keeps them |
-| `src/shell.rs` | The frame: sidebar, panel and status bar |
+| `src/shell.rs` | The frame: sidebar, panel and status bar. `shell::layout` is the one place that gives every rectangle |
+| `src/frost.rs` | Draws a frosted pane from the baker's sheet |
+| `src/session.rs` | What the window has loaded: the repositories, a settings file that could not be read, or the demo's |
+| `src/demo.rs` | The twelve repositories of `--demo` |
+| `src/repos_view.rs` | What each row of the table says, decided from the core's state |
+| `src/columns.rs` | Where the table's columns sit for a row of any width |
+| `src/table.rs` | Draws the table and says what was clicked |
+| `src/widgets.rs` | The small pieces the screens are drawn with: checkbox, cut-off text, capsule of actions, text field |
+| `src/repos_screen.rs` | The Repositories screen: its toolbar, its keys and what it shows when there is no table |
 | `src/app.rs` | The window and its drawing loop |
 | `src/screenshot.rs` | `--screenshot`: saves a picture of the window |
 | `src/contrast.rs` | A test-only module that checks every text's contrast on all six backdrops |
+| `src/picture.rs` | A test-only module that paints what egui draws into a picture on the CPU, for `contrast.rs` and the table's tests |
 | `assets/` | The shipped fonts, icon font and backdrops, with a `README.md` on where each comes from |
 
 ### Elsewhere

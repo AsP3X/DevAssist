@@ -470,6 +470,54 @@ queue waits until you close its dialog, so the error is not lost.
 `/` filters the list by name, owner, branch or path. `Esc` clears the filter.
 The filter also looks inside folded groups.
 
+## The window (being built)
+
+`devassist-gui` is a second program: a window that shows the same list of
+repositories. It is not in the downloads. Build it from the source (see
+[BUILDING.md](BUILDING.md)) and start it:
+
+```
+cargo run -p devassist-gui
+```
+
+It reads the same settings file as the terminal app. `--config PATH` reads
+another one. `--demo` shows twelve made-up repositories instead of yours.
+
+The window shows the repositories in their groups. Each row has its name,
+branch, changes (`Clean` or `Uncommitted`), pull requests, and how far it is
+behind and ahead. Above the table are a filter, the sort and, once something
+is ticked, how many are ticked, with a button that clears the ticks.
+
+You cannot change a repository from the window yet. Folding a group is saved
+to the settings file, as in the terminal app. What the program does by itself
+it also does here: it fetches when it starts, and it pulls the repositories
+you watch when their interval is over. With no repositories it says so
+and points to the terminal app. With a settings file that has a mistake it
+shows the mistake and loads nothing. In `--demo`, refresh does nothing.
+
+| Key | What it does |
+|---|---|
+| `↑` `↓`, `j` `k` | Move the highlight |
+| `PgUp` `PgDn` | Move it a page |
+| `Home` `End` | Highlight the first or the last row |
+| `←` `→` | Fold or unfold the highlighted group |
+| `Space` | Tick or untick the highlighted row and move down |
+| `Ctrl-A` | Tick every row shown |
+| `s` | Change the sort |
+| `/` | Type in the filter |
+| `r`, `F5` | Fetch and read again |
+| `Esc` | Clear the filter when it lets nothing through, otherwise clear the ticks |
+
+A click on a row highlights it, on its box ticks it, on a group's header folds
+it, and on the box in the head ticks every row shown.
+
+While the filter has the keyboard, `↑` `↓` and `PgUp` `PgDn` still move the
+highlight. `Home` and `End` belong to the text. `Tab` keeps the keyboard in the
+filter. `Esc` clears the filter.
+
+Everything else, such as adding, updating, moving and removing, is still done
+in the terminal app.
+
 ## Docker
 
 Open it from the welcome screen or the palette. DevAssist asks Docker only

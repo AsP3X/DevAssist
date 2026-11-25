@@ -8,8 +8,10 @@ What changed in each version of DevAssist. The format follows
 
 ### Added
 
-- A window is on its way: `devassist-gui` opens and shows its frame. It has no
-  functions yet and is not part of the downloads.
+- A window is on its way: `devassist-gui`. It shows your repositories: groups,
+  branch, changes, pull requests and how far each is behind and ahead. It can
+  filter, sort, fold and refresh. It cannot change anything yet and is not
+  part of the downloads.
 - The settings file knows `theme`, `backdrop` and `blur`, for the coming window.
 - **The forks of a repository can be cloned.** **Clone the forks** (`n`) in
   the actions menu fetches every fork of a repository on GitHub, and the forks

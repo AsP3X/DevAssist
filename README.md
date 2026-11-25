@@ -9,8 +9,8 @@ overview. It shows which ones have something new, updates them on every
 branch, clones new ones where you want them, and lets you sort them into
 groups. A second tool manages Docker: containers, Compose projects, images
 and volumes, with live logs. It works with the keyboard and with the mouse.
-A window with the same tools is being built; it has no functions yet and is
-not part of the downloads.
+A window is being built; it shows your repositories and cannot change anything
+yet. It is not part of the downloads.
 
 ```
  DevAssist   in 3 folders
