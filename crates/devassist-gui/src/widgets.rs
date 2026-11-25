@@ -117,6 +117,14 @@ pub fn width(painter: &Painter, text: &str, font: &FontId) -> f32 {
 pub enum Item<'a> {
     /// Words that say something and take no press.
     Label(&'a str),
+    /// A label that stands for longer words: `shown` is drawn as a label is, `name` is its name to a screen reader
+    /// and its hover text. It takes no press.
+    Count {
+        /// What is drawn.
+        shown: &'a str,
+        /// What it stands for.
+        name: &'a str,
+    },
     /// The thin upright line between a label and the actions after it; it takes no press.
     Divider,
     /// A button: its icon, its words (none for an icon alone, in the quiet colour), whether it is on, whether it is
@@ -152,7 +160,7 @@ pub fn add_glass(wants: &mut Wants, id: &'static str, rect: Rect) {
 fn item_width(painter: &Painter, item: &Item<'_>) -> f32 {
     let medium = font(TEXT, assets::medium_family());
     match item {
-        Item::Label(words) => LABEL_PAD[0] + width(painter, words, &medium) + LABEL_PAD[1],
+        Item::Label(words) | Item::Count { shown: words, .. } => LABEL_PAD[0] + width(painter, words, &medium) + LABEL_PAD[1],
         Item::Divider => DIVIDER_WIDTH,
         Item::Action { words: "", .. } | Item::Action { compact: true, .. } => ACTION_HEIGHT,
         Item::Action { words, .. } => ACTION_PAD[0] + ICON + ACTION_GAP + width(painter, words, &medium) + ACTION_PAD[1],
@@ -189,6 +197,12 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
         match *item {
             Item::Label(words) => {
                 painter.text(pos2(place.left() + LABEL_PAD[0], place.center().y), Align2::LEFT_CENTER, words, medium.clone(), palette.on_glass);
+            }
+            Item::Count { shown, name } => {
+                let response = ui.interact(place, ui.scope_id().with(("capsule", rect.min.x.to_bits(), index)), Sense::hover());
+                response.widget_info(|| WidgetInfo::labeled(Role::Label, true, name));
+                response.on_hover_text(name);
+                painter.text(pos2(place.left() + LABEL_PAD[0], place.center().y), Align2::LEFT_CENTER, shown, medium.clone(), palette.on_glass);
             }
             Item::Divider => {
                 let line = Rect::from_center_size(place.center(), vec2(DIVIDER_WIDTH, DIVIDER_HEIGHT));

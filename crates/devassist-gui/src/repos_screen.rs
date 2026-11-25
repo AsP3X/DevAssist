@@ -119,6 +119,8 @@ enum Fit {
     Full,
     /// Icons only; each word is its button's name and hover text.
     Compact,
+    /// Icons only, and the count without its word ("9999" for "9999 selected", which is its name and hover text).
+    Bare,
 }
 
 /// Where the screen's controls are this frame, and what they say: decided before the bake, so their glass is
@@ -131,8 +133,8 @@ pub struct Plan {
     view: Rect,
     /// The words of the sort.
     sort: &'static str,
-    /// The selection capsule, its count and how it fits, when something is ticked.
-    selection: Option<(Rect, String, Fit)>,
+    /// The selection capsule, how many are ticked and how it fits, when something is ticked.
+    selection: Option<(Rect, usize, Fit)>,
     /// The top row's capsule with "Update all" and how it fits, when there is room for it.
     update_all: Option<(Rect, Fit)>,
 }
@@ -165,13 +167,14 @@ pub fn plan(painter: &Painter, layout: &Layout, session: &Session) -> Option<Pla
     let sort = if repos.sort == SortMode::NeedsUpdate { ATTENTION_FIRST } else { BY_NAME };
     let view_width = widgets::capsule_width(painter, &view_items(sort));
     let count = repos.marked.len();
-    let words = selected(count);
-    let fits = [Fit::Full, Fit::Compact];
-    let selection_widths = (count > 0).then(|| fits.map(|fit| widgets::capsule_width(painter, &selection_items(&words, fit))));
+    let (number, words) = (count.to_string(), selected(count));
+    let fits = [Fit::Full, Fit::Compact, Fit::Bare];
+    let selection_widths = (count > 0).then(|| fits.map(|fit| widgets::capsule_width(painter, &selection_items(&number, &words, fit))));
     let (field, view, selection) = places(layout.toolbar, view_width, selection_widths);
     let title_width = widgets::width(painter, Page::Repositories.name(), &shell::title_font());
-    let update_all = top_place(shell::action_room(layout, title_width), fits.map(|fit| widgets::capsule_width(painter, &top_items(fit))));
-    Some(Plan { field, view, sort, selection: selection.map(|(rect, fit)| (rect, words, fit)), update_all })
+    let top_widths = [Fit::Full, Fit::Compact].map(|fit| widgets::capsule_width(painter, &top_items(fit)));
+    let update_all = top_place(shell::action_room(layout, title_width), top_widths);
+    Some(Plan { field, view, sort, selection: selection.map(|(rect, fit)| (rect, count, fit)), update_all })
 }
 
 /// The view capsule's items: the sort, whose words say which it is (no fill, as the design draws it).
@@ -181,16 +184,17 @@ fn view_items(sort: &str) -> [Item<'_>; 1] {
 
 /// The top row's capsule: "Update all".
 fn top_items(fit: Fit) -> [Item<'static>; 1] {
-    [Item::Action { icon: Icon::ArrowDownToLine, words: UPDATE_ALL, on: false, danger: false, compact: fit == Fit::Compact }]
+    [Item::Action { icon: Icon::ArrowDownToLine, words: UPDATE_ALL, on: false, danger: false, compact: fit != Fit::Full }]
 }
 
-/// The selection capsule's items, in the drawing's order: how many are ticked, a divider, what can be done to them
-/// (Remove in the danger colour), and the button that clears the ticks. Their places are `BAR_UPDATE` and on.
-fn selection_items(count: &str, fit: Fit) -> [Item<'_>; 7] {
-    let compact = fit == Fit::Compact;
+/// The selection capsule's items, in the drawing's order: how many are ticked (`words`, or `number` alone when it
+/// is [`Fit::Bare`]), a divider, what can be done to them (Remove in the danger colour), and the button that clears
+/// the ticks. Their places are `BAR_UPDATE` and on.
+fn selection_items<'a>(number: &'a str, words: &'a str, fit: Fit) -> [Item<'a>; 7] {
+    let compact = fit != Fit::Full;
     let action = |icon, words, danger| Item::Action { icon, words, on: false, danger, compact };
     [
-        Item::Label(count),
+        if fit == Fit::Bare { Item::Count { shown: number, name: words } } else { Item::Label(words) },
         Item::Divider,
         action(Icon::ArrowDownToLine, UPDATE, false),
         action(Icon::Group, MOVE_TO_GROUP, false),
@@ -201,17 +205,26 @@ fn selection_items(count: &str, fit: Fit) -> [Item<'_>; 7] {
 }
 
 /// The places of the filter field, the view capsule and the selection capsule in the toolbar row at `toolbar`, the
-/// selection `widths` wide with its words and without them when something is ticked: the field and the view from
-/// the left, the selection at the right end. The selection keeps its words while they fit beside a field of
-/// [`FIELD_WIDTH`]; else it shows its icons only, and when even those do not fit, the field narrows for them, to no
-/// less than [`FIELD_MIN_WIDTH`]. The selection never lies over the view.
-fn places(toolbar: Rect, view_width: f32, widths: Option<[f32; 2]>) -> (Rect, Rect, Option<(Rect, Fit)>) {
+/// selection `widths` wide in each [`Fit`] (full, compact, bare) when something is ticked: the field and the view
+/// from the left, the selection at the right end. Beside a field of [`FIELD_WIDTH`], the selection takes the first
+/// fit that fits: with its words, then icons only, then the count without its word. When not even that fits, the
+/// field narrows for it, down to [`FIELD_MIN_WIDTH`]; past that the field gives up the rest rather than the bar
+/// being cut (in no window the app allows, with up to 9999 ticked, does it come to that: tested). The selection is
+/// never narrower than its contents and never lies over the view.
+fn places(toolbar: Rect, view_width: f32, widths: Option<[f32; 3]>) -> (Rect, Rect, Option<(Rect, Fit)>) {
     let (top, bottom) = (toolbar.top(), toolbar.bottom());
     // What is left for the selection beside a field `field` wide.
     let room = |field: f32| toolbar.width() - field - TOOLBAR_GAP - view_width - TOOLBAR_GAP;
-    let chosen = widths.map(|[full, compact]| if full <= room(FIELD_WIDTH) { (full, Fit::Full) } else { (compact, Fit::Compact) });
+    let chosen = widths.map(|widths| {
+        let fits = [Fit::Full, Fit::Compact, Fit::Bare];
+        let index = widths.iter().position(|width| *width <= room(FIELD_WIDTH)).unwrap_or(fits.len() - 1);
+        (widths[index], fits[index])
+    });
     let field_width = match chosen {
-        Some((width, _)) if width > room(FIELD_WIDTH) => (FIELD_WIDTH - (width - room(FIELD_WIDTH))).max(FIELD_MIN_WIDTH),
+        Some((width, _)) if width > room(FIELD_WIDTH) => {
+            let narrowed = (FIELD_WIDTH - (width - room(FIELD_WIDTH))).max(FIELD_MIN_WIDTH);
+            if width <= room(narrowed) { narrowed } else { (FIELD_WIDTH - (width - room(FIELD_WIDTH))).max(0.0) }
+        }
         _ => FIELD_WIDTH,
     };
     let field = Rect::from_min_max(pos2(toolbar.left(), top), pos2((toolbar.left() + field_width).min(toolbar.right()), bottom));
@@ -302,22 +315,30 @@ enum Command {
     Remove,
 }
 
+impl Command {
+    /// Whether it acts on the repositories (and so happens once for a held key), rather than moving or showing.
+    fn acts(self) -> bool {
+        matches!(self, Command::UpdateChosen | Command::UpdateAll | Command::Watch | Command::Open | Command::Group | Command::Remove)
+    }
+}
+
 /// What the keys among `events` ask, in order, as the terminal app reads them. Letters are read from the typed
 /// text, so they follow the keyboard's layout; text typed with Ctrl, Alt or Cmd held (as the last key said) is no
 /// key here, as Ctrl-A is told from `a`. Once `/` has asked for the filter, the rest of the frame's text is typed
 /// into it and its other keys are the field's.
 fn commands(events: &[Event]) -> Vec<Command> {
     let mut commands = Vec::new();
-    // The modifiers held with the last key: the text a key types comes after it.
-    let mut held = Modifiers::NONE;
+    // The modifiers held with the last key, and whether it was a repeat of a held key: the text a key types comes
+    // after it.
+    let (mut held, mut repeated) = (Modifiers::NONE, false);
     for event in events {
-        if let Event::Key { modifiers, .. } = event {
-            held = *modifiers;
+        if let Event::Key { modifiers, repeat, .. } = event {
+            (held, repeated) = (*modifiers, *repeat);
         }
         match event {
             // Once the filter has the focus, its keys are the field's.
             Event::Key { .. } if commands.contains(&Command::Filter) => {}
-            Event::Key { key, pressed: true, modifiers, .. } => {
+            Event::Key { key, pressed: true, modifiers, repeat, .. } => {
                 let command = match key {
                     Key::ArrowUp => Command::Move(-1),
                     Key::ArrowDown => Command::Move(1),
@@ -332,7 +353,7 @@ fn commands(events: &[Event]) -> Vec<Command> {
                     Key::ArrowLeft => Command::Fold(true),
                     Key::ArrowRight => Command::Fold(false),
                     Key::Enter if !modifiers.any() => Command::Enter,
-                    Key::Delete if !modifiers.any() => Command::Remove,
+                    Key::Delete if !modifiers.any() && !repeat => Command::Remove,
                     _ => continue,
                 };
                 commands.push(command);
@@ -361,6 +382,10 @@ fn commands(events: &[Event]) -> Vec<Command> {
                         'd' => Command::Remove,
                         _ => continue,
                     };
+                    // A held key moves the highlight again and again, but acts once.
+                    if repeated && command.acts() {
+                        continue;
+                    }
                     commands.push(command);
                 }
             }
@@ -447,6 +472,11 @@ pub fn show(
     } else {
         for command in commands(&events) {
             moved |= apply(command, session, ui);
+            // A key that opened a dialog or the menu is the last the screen hears in this frame: what comes after it
+            // is the overlay's, from the next frame on.
+            if session.repos().is_some_and(|repos| repos.mode != CoreMode::List) {
+                break;
+            }
         }
     }
     // A hidden run says how it goes in the status bar; a click there shows its dialog again, as `l` does.
@@ -517,8 +547,9 @@ fn controls(ui: &mut Ui, plan: &Plan, repos: &mut Repos, palette: theme::Palette
     if widgets::capsule(ui, plan.view, &view_items(plan.sort), palette).is_some() && keys {
         repos.toggle_sort();
     }
-    if let Some((rect, count, fit)) = &plan.selection
-        && let Some(pressed) = widgets::capsule(ui, *rect, &selection_items(count, *fit), palette)
+    let ticked = plan.selection.map(|(rect, count, fit)| (rect, count.to_string(), selected(count), fit));
+    if let Some((rect, number, words, fit)) = &ticked
+        && let Some(pressed) = widgets::capsule(ui, *rect, &selection_items(number, words, *fit), palette)
         && keys
     {
         match pressed {
@@ -970,6 +1001,54 @@ mod tests {
         assert_eq!(repos(&session).status, crate::demo::repos().status);
     }
 
+    /// `code` held: pressed, then repeated `repeats` times, each with the text it types.
+    fn held(code: Key, text: Option<&str>, repeats: usize) -> Vec<Event> {
+        (0..=repeats)
+            .flat_map(|index| {
+                let pressed = Event::Key { key: code, physical_key: None, pressed: true, repeat: index > 0, modifiers: Modifiers::NONE };
+                std::iter::once(pressed).chain(text.map(|text| Event::Text(text.to_owned())))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_held_action_key_acts_once_and_a_held_arrow_keeps_moving() {
+        let read = |events: Vec<Event>| commands(&events);
+        let actions = [
+            (Key::U, "u", Command::UpdateChosen),
+            (Key::U, "U", Command::UpdateAll),
+            (Key::W, "w", Command::Watch),
+            (Key::O, "o", Command::Open),
+            (Key::M, "m", Command::Group),
+            (Key::D, "d", Command::Remove),
+        ];
+        for (code, letter, command) in actions {
+            assert_eq!(read(held(code, Some(letter), 3)), [command], "{letter}");
+        }
+        assert_eq!(read(held(Key::Delete, None, 3)), [Command::Remove]);
+        assert_eq!(read(held(Key::J, Some("j"), 2)), [Command::Move(1); 3]);
+        assert_eq!(read(held(Key::ArrowDown, None, 2)), [Command::Move(1); 3]);
+
+        // While a fetch runs, a held u queues one update, not one a repeat.
+        let mut busy = devassist_core::repos::state::testing::grouped_app();
+        busy.busy = true;
+        let ctx = context();
+        let mut session = Session::Live(Box::new(busy));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session.repos_mut().unwrap().pick("api");
+        frame(&ctx, &mut session, &mut screen, held(Key::U, Some("u"), 4));
+        assert_eq!(repos(&session).queue.len(), 1);
+    }
+
+    #[test]
+    fn no_key_acts_after_one_that_opened_a_dialog_in_the_same_frame() {
+        let ticks = Some(vec!["api".to_owned(), "web".to_owned()]);
+        assert_eq!(removing(&demo_after([typed(Key::D, "d"), vec![press(Key::Enter)]].concat())), ticks);
+        assert_eq!(removing(&demo_after([typed(Key::D, "d"), typed(Key::M, "m")].concat())), ticks);
+        assert!(repos(&demo_after([typed(Key::M, "m"), typed(Key::D, "d")].concat())).mode == CoreMode::Group);
+    }
+
     #[test]
     fn d_on_a_header_asks_for_repositories_and_dissolves_nothing() {
         for remove in [typed(Key::D, "d"), vec![press(Key::Delete)]] {
@@ -987,7 +1066,10 @@ mod tests {
             assert!(repos(&session).mode == CoreMode::List);
             assert_eq!((repos(&session).groups(), keys(&session)), (groups, rows), "the group is still there");
 
-            // With rows ticked, d on a header asks about the ticked rows, as the core does.
+            // With rows ticked, d on a header asks about the ticked rows, as the core does. (The key is let go
+            // first: egui reads a second press of a key still held as a repeat, which acts no more.)
+            let up = |key| Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
+            frame(&ctx, &mut session, &mut screen, vec![up(Key::D), up(Key::Delete)]);
             session.repos_mut().unwrap().toggle_mark_of("api");
             frame(&ctx, &mut session, &mut screen, remove);
             assert_eq!(removing(&session), Some(vec!["api".to_owned()]));
@@ -1039,12 +1121,13 @@ mod tests {
         let ctx = context();
         let two = Session::demo(crate::demo::repos());
         let mut compact_seen = false;
-        for every in [false, true] {
+        for count in [1, 2, 12, 99, 999, 9999] {
             for sort in [SortMode::Name, SortMode::NeedsUpdate] {
                 let mut session = Session::demo(crate::demo::repos());
-                if every {
-                    session.repos_mut().unwrap().mark_all_visible();
-                }
+                // The count is what the bar measures; folders beyond the demo's stand for a long list.
+                let marked = &mut session.repos_mut().unwrap().marked;
+                marked.clear();
+                marked.extend((0..count).map(|index| format!("repo-{index}")));
                 if repos(&session).sort != sort {
                     session.repos_mut().unwrap().toggle_sort();
                 }
@@ -1053,16 +1136,21 @@ mod tests {
                         #[expect(clippy::cast_precision_loss, reason = "window widths of a few thousand points")]
                         let size = vec2(width as f32, 900.0);
                         let (layout, planned) = planned(&ctx, &session, size, sidebar);
-                        let (bar, _, fit) = planned.selection.clone().unwrap();
+                        let (bar, _, fit) = planned.selection.unwrap();
                         let at = format!("{width} sidebar {sidebar} {:?} {fit:?}", repos(&session).marked.len());
                         assert!(layout.toolbar.contains_rect(bar) && layout.toolbar.contains_rect(planned.field), "{at}");
                         assert!(planned.field.right() + TOOLBAR_GAP <= planned.view.left() + 1e-3, "{at}");
                         assert!(planned.view.right() + TOOLBAR_GAP <= bar.left() + 1e-3, "{at}: {bar:?} over {:?}", planned.view);
                         assert!(planned.field.width() >= FIELD_MIN_WIDTH, "{at}");
+                        // Never cut: the bar's contents fit its rect.
+                        let content = widths(&ctx, &session)[fit as usize];
+                        assert!(content <= bar.width() + 1e-3, "{at}: {content} in {bar:?}");
                         // The words go only when they would not fit beside the field at its full width.
-                        let full = widths(&ctx, &session)[0];
+                        let [full, compact, _] = widths(&ctx, &session);
                         let room = layout.toolbar.width() - FIELD_WIDTH - 2.0 * TOOLBAR_GAP - planned.view.width();
                         assert_eq!(fit == Fit::Full, full <= room, "{at}");
+                        // And the count its word only when the icons alone would not fit there either.
+                        assert_eq!(fit == Fit::Bare, compact > room, "{at}");
                         compact_seen |= fit == Fit::Compact;
                     }
                 }
@@ -1071,8 +1159,8 @@ mod tests {
         assert!(compact_seen, "the narrow windows drop the words");
         // The design's window shows every word, the drawing's order.
         let (_, planned) = planned(&ctx, &two, vec2(WINDOW[0], WINDOW[1]), true);
-        assert_eq!(planned.selection.as_ref().map(|(_, count, fit)| (count.as_str(), *fit)), Some(("2 selected", Fit::Full)));
-        let names: Vec<&str> = selection_items("2 selected", Fit::Full)
+        assert_eq!(planned.selection.map(|(_, count, fit)| (count, fit)), Some((2, Fit::Full)));
+        let names: Vec<&str> = selection_items("2", "2 selected", Fit::Full)
             .iter()
             .filter_map(|item| match item {
                 Item::Action { words, .. } => Some(*words),
@@ -1080,38 +1168,59 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Update", "Move to group", "Open folder", "Remove", ""]);
-        assert!(matches!(selection_items("2 selected", Fit::Full)[BAR_REMOVE], Item::Action { danger: true, .. }));
+        assert!(matches!(selection_items("2", "2 selected", Fit::Full)[BAR_REMOVE], Item::Action { danger: true, .. }));
     }
 
-    /// The selection bar's width with its words and without them, for `session` on `ctx`.
-    fn widths(ctx: &Context, session: &Session) -> [f32; 2] {
-        let mut out = [0.0; 2];
-        let count = selected(repos(session).marked.len());
+    /// The selection bar's width in each fit (full, compact, bare), for `session` on `ctx`.
+    fn widths(ctx: &Context, session: &Session) -> [f32; 3] {
+        let mut out = [0.0; 3];
+        let count = repos(session).marked.len();
+        let (number, words) = (count.to_string(), selected(count));
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
         ctx.run_ui(input, |ui| {
-            out = [Fit::Full, Fit::Compact].map(|fit| widgets::capsule_width(ui.painter(), &selection_items(&count, fit)));
+            out = [Fit::Full, Fit::Compact, Fit::Bare].map(|fit| widgets::capsule_width(ui.painter(), &selection_items(&number, &words, fit)));
         })
         .drop_without_applying_deltas();
         out
     }
 
     #[test]
+    fn the_bar_is_never_narrower_than_what_it_holds() {
+        // A bar that does not fit beside the field at its least width, even without its words.
+        let narrow = Rect::from_min_size(pos2(280.0, 60.0), vec2(668.0, 36.0));
+        // The count drops its word, and the field narrows for what is still missing.
+        let (field, view, bar) = places(narrow, 241.0, Some([548.0, 260.0, 200.0]));
+        assert_eq!(bar.map(|(bar, fit)| (bar.width(), fit)), Some((200.0, Fit::Bare)));
+        assert_eq!(field.width(), 668.0 - 2.0 * TOOLBAR_GAP - 241.0 - 200.0);
+        assert!(field.width() >= FIELD_MIN_WIDTH && field.right() + TOOLBAR_GAP <= view.left() + 1e-3);
+        // Words that do not fit even beside the field at its least width: the field gives up the rest, the bar
+        // is not cut and lies over nothing.
+        let (field, view, bar) = places(narrow, 241.0, Some([548.0, 260.0, 230.0]));
+        let (bar, fit) = bar.unwrap();
+        assert_eq!((bar.width(), fit), (230.0, Fit::Bare), "the bar is cut: {bar:?}, field {field:?}, view {view:?}");
+        assert!(field.width() < FIELD_MIN_WIDTH && view.right() + TOOLBAR_GAP <= bar.left() + 1e-3);
+    }
+
+    #[test]
     fn the_places_keep_the_bar_off_the_field_and_the_view() {
         let toolbar = Rect::from_min_size(pos2(280.0, 60.0), vec2(1148.0, 36.0));
         // Room for the words: the field keeps the design's width.
-        let (field, view, bar) = places(toolbar, 252.0, Some([548.0, 260.0]));
+        let (field, view, bar) = places(toolbar, 252.0, Some([548.0, 260.0, 220.0]));
         assert_eq!(field.width(), FIELD_WIDTH);
         assert_eq!(bar, Some((Rect::from_min_size(pos2(880.0, 60.0), vec2(548.0, 36.0)), Fit::Full)));
         assert!(view.right() + TOOLBAR_GAP <= 880.0);
         // Room for the icons only.
-        let (_, _, bar) = places(toolbar, 252.0, Some([610.0, 260.0]));
+        let (_, _, bar) = places(toolbar, 252.0, Some([610.0, 260.0, 220.0]));
         assert_eq!(bar, Some((Rect::from_min_size(pos2(1168.0, 60.0), vec2(260.0, 36.0)), Fit::Compact)));
-        // Not even for those: the field gives up what it must, no less than its least width.
+        // Not for those: the count drops its word first, and the field keeps its width while that fits.
         let narrow = Rect::from_min_size(pos2(280.0, 60.0), vec2(668.0, 36.0));
-        let (field, view, bar) = places(narrow, 188.0, Some([548.0, 260.0]));
+        let (field, _, bar) = places(narrow, 188.0, Some([548.0, 260.0, 180.0]));
+        assert_eq!((field.width(), bar.map(|(_, fit)| fit)), (FIELD_WIDTH, Some(Fit::Bare)));
+        // Then the field gives up what it must, no less than its least width.
+        let (field, view, bar) = places(narrow, 188.0, Some([548.0, 260.0, 230.0]));
         let (bar, fit) = bar.unwrap();
-        assert_eq!(fit, Fit::Compact);
-        assert_eq!(field.width(), 668.0 - 2.0 * TOOLBAR_GAP - 188.0 - 260.0);
+        assert_eq!(fit, Fit::Bare);
+        assert_eq!(field.width(), 668.0 - 2.0 * TOOLBAR_GAP - 188.0 - 230.0);
         assert!(view.right() + TOOLBAR_GAP <= bar.left() + 1e-3 && (bar.right() - narrow.right()).abs() < 1e-3);
         // Nothing ticked: no bar, and the field keeps its width.
         let (field, _, bar) = places(narrow, 188.0, None);
@@ -1168,9 +1277,11 @@ mod tests {
         let ctx = context();
         let (_, planned) = planned(&ctx, session, vec2(WINDOW[0], WINDOW[1]), true);
         let (rect, count, fit) = planned.selection.unwrap();
+        let (number, count) = (count.to_string(), selected(count));
         let mut place = Rect::NOTHING;
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
-        ctx.run_ui(input, |ui| place = widgets::item_rects(ui.painter(), rect, &selection_items(&count, fit))[index]).drop_without_applying_deltas();
+        ctx.run_ui(input, |ui| place = widgets::item_rects(ui.painter(), rect, &selection_items(&number, &count, fit))[index])
+            .drop_without_applying_deltas();
         place
     }
 
@@ -1280,14 +1391,14 @@ mod tests {
     #[test]
     fn the_toolbar_is_the_designs() {
         let toolbar = Rect::from_min_size(pos2(280.0, 60.0), vec2(1148.0, 36.0));
-        let (field, view, selection) = places(toolbar, 252.0, Some([548.0, 260.0]));
+        let (field, view, selection) = places(toolbar, 252.0, Some([548.0, 260.0, 220.0]));
         assert_eq!(field, Rect::from_min_size(pos2(280.0, 60.0), vec2(280.0, 36.0)));
         assert_eq!(view, Rect::from_min_size(pos2(568.0, 60.0), vec2(252.0, 36.0)));
         assert_eq!(selection, Some((Rect::from_min_size(pos2(880.0, 60.0), vec2(548.0, 36.0)), Fit::Full)));
         assert_eq!(places(toolbar, 252.0, None).2, None);
         // In a narrow toolbar the selection keeps off the view, and nothing leaves the row.
         let narrow = Rect::from_min_size(pos2(12.0, 60.0), vec2(600.0, 36.0));
-        let (field, view, selection) = places(narrow, 252.0, Some([300.0, 200.0]));
+        let (field, view, selection) = places(narrow, 252.0, Some([300.0, 200.0, 180.0]));
         let (selection, _) = selection.unwrap();
         assert!(selection.left() >= view.right() + TOOLBAR_GAP || selection.width() == 0.0, "{selection:?} {view:?}");
         for rect in [field, view, selection] {
@@ -1305,8 +1416,8 @@ mod tests {
         ctx.run_ui(input, |ui| planned = plan(ui.painter(), &layout, &session)).drop_without_applying_deltas();
         let planned = planned.unwrap();
         assert_eq!(planned.sort, "By name");
-        let (rect, count, _) = planned.selection.clone().unwrap();
-        assert_eq!(count, "2 selected");
+        let (rect, count, _) = planned.selection.unwrap();
+        assert_eq!(count, 2);
         assert_eq!(rect.right(), layout.toolbar.right());
         let (actions, _) = planned.update_all.unwrap();
         assert_eq!(actions.right(), layout.actions.right());
