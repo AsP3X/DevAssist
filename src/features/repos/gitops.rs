@@ -992,6 +992,9 @@ pub struct ForksSaved {
     pub created: bool,
     /// Forks that were fetched.
     pub fetched: u32,
+    /// Forks left alone: GitHub says they are as they were the last time
+    /// they were fetched.
+    pub unchanged: u32,
     /// Forks that could not be fetched, as `owner/name`.
     pub failed: Vec<String>,
     /// Forks that have commits of their own, each with a folder of its
@@ -1011,6 +1014,103 @@ const FORKS_KEY: &str = "devassist.forksof";
 pub fn forks_folder(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
     Some(path.with_file_name(format!("{name}-fork")))
+}
+
+/// Whether the forks of a checkout have been cloned beside it.
+pub fn forks_cloned(path: &Path) -> bool {
+    forks_folder(path).is_some_and(|dest| dest.join(".git").is_dir())
+}
+
+/// A fork to fetch into the collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkSource {
+    pub owner: String,
+    pub name: String,
+    /// Something that changes when the fork does. A fork whose stamp is
+    /// the one it was last fetched with is not fetched again. Empty when
+    /// nothing is known: the fork is fetched every time.
+    pub stamp: String,
+}
+
+/// How many forks are fetched at the same time.
+const FORK_JOBS: usize = 8;
+
+/// The stamps the forks were last fetched with, by owner: a file in the
+/// collection's `.git`, one `owner<tab>stamp` a line.
+fn stamps_file(dest: &Path) -> PathBuf {
+    dest.join(".git").join("devassist-forks")
+}
+
+fn read_stamps(dest: &Path) -> std::collections::HashMap<String, String> {
+    fs::read_to_string(stamps_file(dest))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (owner, stamp) = line.split_once('\t')?;
+            Some((owner.to_string(), stamp.to_string()))
+        })
+        .collect()
+}
+
+/// Written beside the old file and then put in its place, so that a run
+/// that is cut short leaves the old one whole.
+fn write_stamps(dest: &Path, stamps: &std::collections::HashMap<String, String>) {
+    let mut lines: Vec<String> = stamps
+        .iter()
+        .map(|(owner, stamp)| format!("{owner}\t{stamp}\n"))
+        .collect();
+    lines.sort_unstable();
+    let file = stamps_file(dest);
+    let draft = file.with_extension("new");
+    if fs::write(&draft, lines.concat()).is_ok() {
+        let _ = fs::rename(&draft, &file);
+    }
+}
+
+/// What a run does with one fork.
+#[derive(Clone, Copy)]
+enum ForkPlan {
+    Fetch,
+    /// As it was when it was last fetched.
+    Unchanged,
+    /// It cannot be a remote.
+    Skip,
+}
+
+/// What `git remote add --no-tags` writes for a fork, with its pull
+/// requests kept under its own name. `name` is a valid remote name.
+fn remote_section(name: &str, url: &str) -> String {
+    let url = url.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "[remote \"{name}\"]\n\turl = \"{url}\"\n\tfetch = +refs/heads/*:refs/remotes/{name}/*\n\tfetch = +refs/pull/*/head:refs/pull/{name}/*/head\n\ttagOpt = --no-tags\n"
+    )
+}
+
+/// Adds sections to the end of the collection's configuration, all in
+/// one write: a `git remote add` each takes minutes for a thousand forks.
+fn add_to_config(dest: &Path, sections: &str) -> Result<(), String> {
+    use std::io::Write;
+    if sections.is_empty() {
+        return Ok(());
+    }
+    let file = dest.join(".git").join("config");
+    let old = fs::read_to_string(&file).map_err(|err| format!("{}: {err}", file.display()))?;
+    let gap = if old.is_empty() || old.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .and_then(|mut config| config.write_all(format!("{gap}{sections}").as_bytes()))
+        .map_err(|err| format!("{}: {err}", file.display()))
+}
+
+/// What a fetch running beside the others reports.
+enum ForkNews {
+    Line(String),
+    Done(usize, Result<(), String>),
 }
 
 /// The address a repository on GitHub is fetched from, over SSH when the
@@ -1047,11 +1147,15 @@ fn valid_remote_name(name: &str) -> bool {
 /// be fetched is named in the result and the rest goes on. Nothing is
 /// pruned: a branch or fork that disappears on GitHub stays here. Running
 /// it again brings new forks and new commits.
+///
+/// The forks are fetched several at a time. One whose stamp is the one
+/// it was last fetched with is left alone, so that running it again on
+/// hundreds of forks only costs the few that changed.
 pub fn save_forks(
     source: &Path,
     dest: &Path,
     original: &(String, String),
-    forks: &[(String, String)],
+    forks: &[ForkSource],
     url_of: &dyn Fn(&str, &str) -> String,
     token: Option<&str>,
     mut on_line: impl FnMut(&str, bool),
@@ -1133,43 +1237,190 @@ pub fn save_forks(
     }
     on_line(&format!("Fetching {id}, the original."), false);
     fetch_fork(dest, owner, token, &mut on_line)?;
+    // What to do with each fork. Every remote is in the configuration
+    // before the first fetch starts: a fetch cannot read it in the
+    // moment it is written.
     let total = forks.len();
-    for (index, (fork_owner, fork_name)) in forks.iter().enumerate() {
-        if process::was_cancelled() {
-            return Err("cancelled".into());
-        }
-        let fork = format!("{fork_owner}/{fork_name}");
-        let fetched = if !valid_remote_name(fork_owner) || fork_owner.eq_ignore_ascii_case(owner) {
-            on_line(
-                &format!("{fork_owner} cannot be the name of a remote."),
-                false,
-            );
-            Err(String::new())
+    let mut stamps = read_stamps(dest);
+    let mut plans = Vec::with_capacity(total);
+    let mut fresh = String::new();
+    let mut added = std::collections::HashSet::new();
+    for fork in forks {
+        let name = &fork.owner;
+        let plan = if !valid_remote_name(name)
+            || name.eq_ignore_ascii_case(owner)
+            || !added.insert(name.to_ascii_lowercase())
+        {
+            on_line(&format!("{name} cannot be the name of a remote."), false);
+            ForkPlan::Skip
         } else {
-            on_line(&format!("Fetching {fork}."), false);
-            let url = url_of(fork_owner, fork_name);
-            set_fork_remote(dest, &known, fork_owner, &url, false)
-                .and_then(|()| fetch_fork(dest, fork_owner, token, &mut on_line))
-        };
-        match fetched {
-            Ok(()) => saved.fetched += 1,
-            Err(err) => {
-                if process::was_cancelled() {
-                    return Err(err);
+            let url = url_of(name, &fork.name);
+            match known.get(name) {
+                Some(old) if *old == url => {
+                    if !fork.stamp.is_empty() && stamps.get(name) == Some(&fork.stamp) {
+                        ForkPlan::Unchanged
+                    } else {
+                        ForkPlan::Fetch
+                    }
                 }
-                on_line(&format!("{fork} was not fetched."), false);
-                saved.failed.push(fork);
+                Some(_) => match git_lines(dest, &["remote", "set-url", "--", name, &url]) {
+                    Ok(_) => ForkPlan::Fetch,
+                    Err(err) => {
+                        on_line(&err, false);
+                        ForkPlan::Skip
+                    }
+                },
+                None => {
+                    fresh.push_str(&remote_section(name, &url));
+                    ForkPlan::Fetch
+                }
+            }
+        };
+        plans.push(plan);
+    }
+    add_to_config(dest, &fresh)?;
+
+    // The forks, several at a time. This thread hands them out and hears
+    // what the fetches say.
+    let mut failed: Vec<(usize, String)> = Vec::new();
+    let mut cancelled = false;
+    let (job_tx, job_rx) = std::sync::mpsc::channel::<(usize, String)>();
+    let job_rx = std::sync::Mutex::new(job_rx);
+    let (news_tx, news_rx) = std::sync::mpsc::channel::<ForkNews>();
+    std::thread::scope(|scope| {
+        for _ in 0..FORK_JOBS.min(total) {
+            let news = news_tx.clone();
+            let jobs = &job_rx;
+            scope.spawn(move || {
+                loop {
+                    let next = jobs.lock().unwrap_or_else(|err| err.into_inner()).recv();
+                    let Ok((index, remote)) = next else { break };
+                    // Their own progress would fight over the one bar.
+                    let result = fetch_fork(dest, &remote, token, |line, progress| {
+                        if !progress {
+                            let _ = news.send(ForkNews::Line(line.to_string()));
+                        }
+                    });
+                    let _ = news.send(ForkNews::Done(index, result));
+                }
+            });
+        }
+        drop(news_tx);
+        let (mut next, mut flying, mut done, mut unsaved) = (0, 0, 0, 0);
+        let progress = |done: usize, on_line: &mut dyn FnMut(&str, bool)| {
+            on_line(
+                &format!(
+                    "Fetching forks: {:>3}% ({done}/{total})",
+                    done * 100 / total
+                ),
+                true,
+            );
+        };
+        loop {
+            while !cancelled && flying < FORK_JOBS && next < total {
+                if process::was_cancelled() {
+                    cancelled = true;
+                    break;
+                }
+                let index = next;
+                next += 1;
+                let fork = &forks[index];
+                let full = format!("{}/{}", fork.owner, fork.name);
+                let handed_out = match plans[index] {
+                    ForkPlan::Skip => Err(()),
+                    ForkPlan::Unchanged => {
+                        saved.unchanged += 1;
+                        Ok(false)
+                    }
+                    ForkPlan::Fetch => {
+                        on_line(&format!("Fetching {full}."), false);
+                        job_tx
+                            .send((index, fork.owner.clone()))
+                            .map(|()| true)
+                            .map_err(drop)
+                    }
+                };
+                match handed_out {
+                    Ok(true) => {
+                        flying += 1;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(()) => {
+                        on_line(&format!("{full} was not fetched."), false);
+                        failed.push((index, full));
+                    }
+                }
+                done += 1;
+                progress(done, &mut on_line);
+            }
+            if flying == 0 {
+                if cancelled || next >= total {
+                    break;
+                }
+                continue;
+            }
+            match news_rx.recv() {
+                Ok(ForkNews::Line(line)) => on_line(&line, false),
+                Ok(ForkNews::Done(index, result)) => {
+                    flying -= 1;
+                    done += 1;
+                    let fork = &forks[index];
+                    match result {
+                        Ok(()) => {
+                            saved.fetched += 1;
+                            if fork.stamp.is_empty() {
+                                stamps.remove(&fork.owner);
+                            } else {
+                                stamps.insert(fork.owner.clone(), fork.stamp.clone());
+                            }
+                            unsaved += 1;
+                            if unsaved >= 100 {
+                                write_stamps(dest, &stamps);
+                                unsaved = 0;
+                            }
+                        }
+                        Err(_) if process::was_cancelled() => cancelled = true,
+                        Err(_) => {
+                            let full = format!("{}/{}", fork.owner, fork.name);
+                            on_line(&format!("{full} was not fetched."), false);
+                            failed.push((index, full));
+                        }
+                    }
+                    progress(done, &mut on_line);
+                }
+                Err(_) => break,
             }
         }
-        let done = index + 1;
+        // Ends the fetching threads: nothing more is handed out.
+        drop(job_tx);
+    });
+    write_stamps(dest, &stamps);
+    if cancelled {
+        return Err("cancelled".into());
+    }
+    failed.sort();
+    saved.failed = failed.into_iter().map(|(_, fork)| fork).collect();
+    if saved.unchanged > 0 {
         on_line(
             &format!(
-                "Fetching forks: {:>3}% ({done}/{total})",
-                done * 100 / total
+                "{} forks are as they were when they were last fetched.",
+                saved.unchanged
             ),
-            true,
+            false,
         );
     }
+    // The fetches left tidying up to the end, where nothing else runs.
+    let tidy = [
+        OsStr::new("-C"),
+        dest.as_os_str(),
+        OsStr::new("-c"),
+        OsStr::new("gc.autoDetach=false"),
+        OsStr::new("gc"),
+        OsStr::new("--auto"),
+        OsStr::new("--quiet"),
+    ];
+    let _ = run_git(tidy, |_, _| {});
 
     let count = |prefix: &str| {
         git_lines(dest, &["for-each-ref", "--format=%(refname)", prefix]).map_or(0, |lines| {
@@ -1452,8 +1703,19 @@ fn fetch_fork(
     loop {
         let mut args = auth_args(token);
         args.extend([OsString::from("-C"), dest.as_os_str().to_os_string()]);
+        // Several of these run at once: none writes FETCH_HEAD or
+        // starts tidying up while the others fetch.
         args.extend(
-            ["fetch", "--no-prune", "--recurse-submodules=no", "--", name].map(OsString::from),
+            [
+                "fetch",
+                "--no-prune",
+                "--recurse-submodules=no",
+                "--no-write-fetch-head",
+                "--no-auto-maintenance",
+                "--",
+                name,
+            ]
+            .map(OsString::from),
         );
         match run_git(args, &mut on_line) {
             Err(err)
@@ -3118,7 +3380,11 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(dest, root.join("api-fork"));
 
         let original = ("ada".to_string(), "api".to_string());
-        let fork = |owner: &str| (owner.to_string(), "api".to_string());
+        let fork = |owner: &str| ForkSource {
+            owner: owner.to_string(),
+            name: "api".to_string(),
+            stamp: String::new(),
+        };
         let forks = [fork("bob"), fork("eve"), fork("gone"), fork("bad name")];
         let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
         let mut lines = Vec::new();
@@ -3195,6 +3461,98 @@ refs/remotes/fork/dev\tiii\t\t
         assert!(save_forks(&api, &bob, &original, &forks[..1], &url_of, None, |_, _| {}).is_err());
         assert!(fork_url("git@github.com:ada/api.git", "bob", "api").starts_with("git@"));
         assert!(fork_url("https://github.com/ada/api", "bob", "api").starts_with("https://"));
+        let _ = remove_tree(&root);
+    }
+
+    #[test]
+    fn a_fork_that_has_not_changed_is_not_fetched_again() {
+        let root = std::env::temp_dir().join(format!("devassist-stamps-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let tip = |dir: &Path, name: &str| {
+            git_lines(dir, &["rev-parse", "-q", "--verify", name])
+                .ok()
+                .and_then(|lines| lines.into_iter().next())
+        };
+        git(&root, &["init", "-q", "-b", "main", "ada"]);
+        commit(&root.join("ada"), "one");
+        // More forks than are fetched at once.
+        let owners: Vec<String> = (0..FORK_JOBS + 3).map(|n| format!("fork{n}")).collect();
+        for owner in &owners {
+            git(&root, &["clone", "-q", "ada", owner]);
+        }
+        let bob = root.join(&owners[0]);
+        commit(&bob, "bobs");
+        git(&root, &["clone", "-q", "ada", "api"]);
+        let api = root.join("api");
+        let dest = forks_folder(&api).unwrap();
+        assert!(!forks_cloned(&api));
+
+        let original = ("ada".to_string(), "api".to_string());
+        let stamped = |stamp: &str| -> Vec<ForkSource> {
+            owners
+                .iter()
+                .map(|owner| ForkSource {
+                    owner: owner.clone(),
+                    name: "api".to_string(),
+                    stamp: stamp.to_string(),
+                })
+                .chain([ForkSource {
+                    owner: "gone".to_string(),
+                    name: "api".to_string(),
+                    stamp: stamp.to_string(),
+                }])
+                .collect()
+        };
+        let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
+        let count = u32::try_from(owners.len()).unwrap();
+        let mut lines = Vec::new();
+        let first = save_forks(
+            &api,
+            &dest,
+            &original,
+            &stamped("monday 0"),
+            &url_of,
+            None,
+            |line, _| lines.push(line.to_string()),
+        )
+        .unwrap();
+        assert_eq!((first.fetched, first.unchanged), (count, 0), "{lines:?}");
+        assert_eq!(first.failed, ["gone/api"]);
+        assert_eq!(first.folders, 1);
+        assert!(forks_cloned(&api));
+        let total = owners.len() + 1;
+        assert!(lines.contains(&format!("Fetching forks: 100% ({total}/{total})")));
+
+        // The same stamps: nothing is fetched, though there is something
+        // new. Only the fork that never came is tried again.
+        commit(&bob, "more");
+        let old = tip(&dest, &format!("refs/remotes/{}/main", owners[0]));
+        let same = save_forks(
+            &api,
+            &dest,
+            &original,
+            &stamped("monday 0"),
+            &url_of,
+            None,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!((same.fetched, same.unchanged), (0, count));
+        assert_eq!(same.failed, ["gone/api"]);
+        assert_eq!(tip(&dest, &format!("refs/remotes/{}/main", owners[0])), old);
+        assert_eq!((same.folders, same.branches), (1, first.branches));
+
+        // One fork has another stamp: that one is fetched.
+        let mut forks = stamped("monday 0");
+        forks[0].stamp = "tuesday 0".to_string();
+        let moved = save_forks(&api, &dest, &original, &forks, &url_of, None, |_, _| {}).unwrap();
+        assert_eq!((moved.fetched, moved.unchanged), (1, count - 1));
+        assert_eq!(
+            tip(&dest, &format!("refs/remotes/{}/main", owners[0])),
+            tip(&bob, "main")
+        );
+        assert!(dest.join(&owners[0]).join("more").exists());
         let _ = remove_tree(&root);
     }
 

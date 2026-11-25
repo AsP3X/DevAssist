@@ -19,6 +19,11 @@ What changed in each version of DevAssist. The format follows
   in new forks and commits. When GitHub's request limit is reached or a fetch
   times out, the run pauses, counts down in the progress dialog and goes on
   by itself.
+- **All cloned forks can be updated at once.** **Update all cloned forks**
+  (`a`) in the actions menu brings every `-fork` folder up to date, whatever
+  is selected. A fork that GitHub reports as not pushed to since it was last
+  fetched is skipped, and the rest are fetched eight at a time, so an update
+  of hundreds of forks takes about as long as listing them.
 - **The overview shows where each repository is on disk.** A `path` column
   holds the folder of the checkout, in full where the window has the room:
   the other columns are now only as wide as their longest entry. A path that

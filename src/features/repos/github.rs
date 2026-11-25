@@ -607,6 +607,18 @@ pub fn parse_pull_counts(body: &str, count: usize) -> Result<Vec<Option<PullCoun
 pub struct Fork {
     pub owner: String,
     pub name: String,
+    /// Changes when the fork does: when it was last pushed to and how
+    /// many pull requests and issues it has open. Empty when GitHub does
+    /// not say, and then nothing can be concluded from it.
+    pub stamp: String,
+}
+
+/// What a fork's stamp is made of.
+fn fork_stamp(pushed_at: Option<&str>, open: u32) -> String {
+    match pushed_at.map(str::trim) {
+        Some(pushed) if !pushed.is_empty() => format!("{pushed} {open}"),
+        _ => String::new(),
+    }
 }
 
 /// The forks GitHub lists for a repository, and what kept the list from
@@ -623,6 +635,10 @@ struct ApiFork {
     owner: Option<ApiOwner>,
     #[serde(default)]
     forks_count: u32,
+    #[serde(default)]
+    pushed_at: Option<String>,
+    #[serde(default)]
+    open_issues_count: u32,
 }
 
 /// The most pages of forks read for one repository: 10,000 forks.
@@ -647,6 +663,7 @@ pub fn parse_fork_list(body: &str) -> Result<Vec<(Fork, u32)>, String> {
                 Fork {
                     owner,
                     name: fork.name,
+                    stamp: fork_stamp(fork.pushed_at.as_deref(), fork.open_issues_count),
                 },
                 fork.forks_count,
             ))
@@ -1050,17 +1067,24 @@ mod tests {
     fn a_page_of_forks_names_each_fork_and_how_many_forks_it_has() {
         assert!(forks_url("ada", "tool").contains("/repos/ada/tool/forks?per_page=100"));
         let body = r#"[
-            {"name": "tool", "owner": {"login": "bob"}, "forks_count": 2},
-            {"name": "tool-renamed", "owner": {"login": "eve"}},
+            {"name": "tool", "owner": {"login": "bob"}, "forks_count": 2,
+             "pushed_at": "2026-10-12T01:02:03Z", "open_issues_count": 3},
+            {"name": "tool-renamed", "owner": {"login": "eve"}, "pushed_at": null},
             {"name": "orphan", "owner": null}
         ]"#;
-        let fork = |owner: &str, name: &str| Fork {
+        let fork = |owner: &str, name: &str, stamp: &str| Fork {
             owner: owner.into(),
             name: name.into(),
+            stamp: stamp.into(),
         };
+        // The stamp changes with a push and with a pull request. Without
+        // a time of the last push there is none.
         assert_eq!(
             parse_fork_list(body).unwrap(),
-            [(fork("bob", "tool"), 2), (fork("eve", "tool-renamed"), 0)]
+            [
+                (fork("bob", "tool", "2026-10-12T01:02:03Z 3"), 2),
+                (fork("eve", "tool-renamed", ""), 0)
+            ]
         );
         assert_eq!(parse_fork_list("[]").unwrap(), []);
         assert_eq!(

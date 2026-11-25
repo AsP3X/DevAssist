@@ -293,6 +293,25 @@ something else is left alone. Only commits are saved: titles and comments of
 pull requests are not. GitHub lists at most 10,000 forks of one repository
 here.
 
+### Updating them all
+
+**Update all cloned forks** in the actions menu (`Enter`, then `a`) brings
+every `-fork` folder up to date in one go: the forks of each repository on
+the overview that has them cloned. What is highlighted or ticked does not
+matter, and a repository whose forks were never cloned is left out.
+
+An update is much quicker than the first run. GitHub says for each fork when
+it was last pushed to and how many pull requests it has open, and a fork
+where both are as they were is not fetched again: of hundreds of forks only
+the few that changed are. Those are fetched eight at a time, as they are the
+first time. The result says how many forks there are and how many were
+fetched now. **Clone the forks** on a repository that has its folder already
+does the same for that one, and also brings in forks made since.
+
+A fork that could not be fetched is tried again every time. A pull request
+opened on a fork from a third repository is seen with the fork's next push
+or pull request.
+
 A limit or a timeout does not end the run. Without a sign-in GitHub answers
 only 60 requests an hour, enough to list about 6,000 forks. When that limit
 is reached, the run pauses until GitHub resets it, at most an hour later, and
@@ -319,6 +338,7 @@ ticked, update, remove, open and move-to-group act on all of them.
 - Auto-pull on or off
 - Fetch the pull requests
 - Clone the forks
+- Update all cloned forks
 - Migrate, which opens a submenu
 - Remove
 
