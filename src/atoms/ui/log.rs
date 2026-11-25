@@ -99,15 +99,19 @@ impl LogView {
         let rows = inner.height as usize - 1;
         self.page = rows;
 
-        let max = buf.count().saturating_sub(rows);
-        if buf.follow || buf.scroll >= max {
-            buf.scroll = max;
-            buf.follow = true;
-        }
+        // The filter runs once: the lines it lets through give the count too.
         let shown: Vec<&str> = buf.shown().collect();
-        for (index, line) in shown.iter().skip(buf.scroll).take(rows).enumerate() {
+        let count = shown.len();
+        let max = count.saturating_sub(rows);
+        let follow = buf.follow || buf.scroll >= max;
+        let scroll = if follow { max } else { buf.scroll };
+        for (index, line) in shown.iter().skip(scroll).take(rows).enumerate() {
             let rect = Rect::new(inner.x, inner.y + index as u16, inner.width, 1);
             frame.render_widget(Paragraph::new(fit(line, width)), rect);
+        }
+        if follow {
+            buf.scroll = max;
+            buf.follow = true;
         }
 
         let (status, colour) = if buf.typing {
@@ -116,7 +120,7 @@ impl LogView {
                 Color::Yellow,
             )
         } else {
-            (buf.status(shown.len()), Color::DarkGray)
+            (buf.status(count), Color::DarkGray)
         };
         let rect = Rect::new(inner.x, inner.y + rows as u16, inner.width, 1);
         let style = Style::default().fg(colour);
