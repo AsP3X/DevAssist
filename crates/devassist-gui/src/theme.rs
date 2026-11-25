@@ -57,6 +57,35 @@ pub const PICTURE_KEEP_FRAMES: u64 = 120;
 pub const CAPTION_BUTTON: f32 = 40.0;
 /// The room kept at the left of the top bar for the traffic lights on macOS.
 pub const TRAFFIC_LIGHT_SPACE: f32 = 90.0;
+/// How far in from the window's edge a press resizes it, where the window draws its frame itself. Quill's value.
+pub const WINDOW_EDGE: f32 = 6.0;
+/// How far along an edge from a corner a press resizes the window both ways. Quill's value.
+pub const WINDOW_CORNER: f32 = 16.0;
+/// The room between the sidebar's sides and foot and its rows.
+pub const SIDEBAR_PADDING: f32 = 8.0;
+/// The room between the sidebar's top and its first row.
+pub const SIDEBAR_TOP: f32 = 16.0;
+/// The room inside a row before its icon or text.
+pub const ROW_PADDING: f32 = 8.0;
+/// The gap between an icon and its text.
+pub const ICON_GAP: f32 = 8.0;
+/// The gap between two rows of the sidebar.
+pub const ROW_GAP: f32 = 4.0;
+/// The gap before each group of the sidebar's rows.
+pub const GROUP_GAP: f32 = 20.0;
+/// The height of a group's label in the sidebar.
+pub const LABEL_ROW: f32 = 24.0;
+/// The gap between a group's label and its first row.
+pub const LABEL_GAP: f32 = 8.0;
+/// The side of the accent square that marks the workspace at the sidebar's top.
+pub const WORKSPACE_MARK: f32 = 32.0;
+/// The gap between the sidebar button and the title.
+pub const BAR_GAP: f32 = 12.0;
+/// The room at either end of the status bar before its text.
+pub const STATUS_PADDING: f32 = 16.0;
+/// How many frames a `--screenshot` run draws before it takes the picture (fonts, layout and the glass have
+/// settled by then).
+pub const FRAMES_BEFORE_SHOT: u64 = 120;
 
 /// Whether the window is drawn light or dark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

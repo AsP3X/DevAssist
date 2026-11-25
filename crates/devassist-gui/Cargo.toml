@@ -9,9 +9,11 @@ publish = false
 [dependencies]
 devassist-core.workspace = true
 devassist-glass.workspace = true
+eframe.workspace = true
 egui.workspace = true
 image.workspace = true
 log.workspace = true
+png.workspace = true
 serde_json.workspace = true
 
 [lints]
