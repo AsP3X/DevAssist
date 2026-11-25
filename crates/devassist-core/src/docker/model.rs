@@ -394,6 +394,7 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod samples {
     //! Lines as Docker 29.7 printed them, shortened, with secrets taken out.

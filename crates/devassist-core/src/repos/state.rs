@@ -3931,6 +3931,7 @@ fn count_label(count: usize) -> String {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod testing {
     use super::*;

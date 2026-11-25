@@ -1165,6 +1165,7 @@ impl DockerState {
 
 /// What tests in both crates use to feed the tool what its threads would
 /// report, and to look at what it keeps to itself.
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub mod testing {
     use super::*;
