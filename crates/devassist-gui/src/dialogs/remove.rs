@@ -251,6 +251,81 @@ mod tests {
         }
     }
 
+    fn shift_tab() -> Event {
+        Event::Key { key: Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::SHIFT }
+    }
+
+    #[test]
+    fn shift_tab_from_nothing_chooses_cancel_and_never_delete() {
+        let mut window = removing();
+        window.frame(Vec::new());
+        assert_eq!(window.ctx.memory(Memory::focused), None);
+        window.frame(vec![shift_tab()]);
+        window.frame(Vec::new());
+        assert_eq!(window.ctx.memory(Memory::focused), Some(button_id(0)), "Shift-Tab chose a button other than Cancel");
+        window.key(Key::Enter);
+        assert!(!window.open() && window.repos().mode == CoreMode::List);
+        assert_ne!(window.repos().status, HELD, "Delete from disk was pressed");
+        assert_eq!(window.repos().installed.len(), 12);
+        assert_eq!(window.repos().marked, ["api", "web"], "Cancel keeps the ticks");
+    }
+
+    #[test]
+    fn the_tables_keys_do_nothing_while_the_remove_dialog_is_open() {
+        let mut window = removing();
+        window.frame(Vec::new());
+        let before = (window.repos().marked.clone(), window.repos().selected.clone());
+        let keys = |window: &mut Window| {
+            window.typed(Key::Space, " ");
+            window.typed(Key::D, "d");
+            window.typed(Key::M, "m");
+            window.key(Key::ArrowDown);
+            window.key(Key::ArrowUp);
+            window.key(Key::Delete);
+        };
+        keys(&mut window);
+        assert!(window.shows(Which::Remove), "{:?}", window.repos().status);
+        assert_eq!((window.repos().marked.clone(), window.repos().selected.clone()), before);
+        // With Cancel chosen, the arrows and letters still reach nothing under the dialog.
+        window.key(Key::Tab);
+        window.typed(Key::D, "d");
+        window.key(Key::ArrowDown);
+        window.key(Key::ArrowUp);
+        assert!(window.shows(Which::Remove));
+        assert_eq!(window.ctx.memory(Memory::focused), Some(button_id(0)));
+        assert_eq!((window.repos().marked.clone(), window.repos().selected.clone()), before);
+        assert_eq!(window.repos().installed.len(), 12);
+    }
+
+    /// A press at `from` released at `to`, over five frames.
+    fn drag(window: &mut Window, from: Pos2, to: Pos2) {
+        let button = |at, pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(to)], vec![button(to, false)], Vec::new()]
+        {
+            window.frame(events);
+        }
+    }
+
+    #[test]
+    fn only_a_press_and_release_on_delete_deletes() {
+        let mut window = removing();
+        window.frame(Vec::new());
+        let delete = window.buttons().into_iter().find(|(_, words)| *words == "Delete from disk").unwrap().0;
+        // Empty glass beside the buttons, left of Cancel: neither a button nor the scrim.
+        let pane = parts(&window).pane;
+        let beside = pos2(pane.left() + DIALOG_PAD + 4.0, delete.center().y);
+        drag(&mut window, beside, delete.center());
+        assert!(window.shows(Which::Remove), "a press begun beside it and released on it deleted");
+        assert_ne!(window.repos().status, HELD);
+        drag(&mut window, delete.center(), beside);
+        assert!(window.shows(Which::Remove), "a press begun on it and released beside it deleted");
+        assert_ne!(window.repos().status, HELD);
+        // A real click on it does.
+        window.click(delete.center());
+        assert!(!window.open());
+        assert_eq!(window.repos().status, HELD);
+    }
+
     #[test]
     fn the_demo_forgets_in_memory_and_deletes_nothing() {
         let mut window = removing();
@@ -271,31 +346,44 @@ mod tests {
 
     #[test]
     fn a_dialog_with_fifty_paths_keeps_its_buttons_in_view() {
-        let size = [960.0, 600.0];
-        let screen = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
-        for count in [1, 2, 8, 9, 50] {
-            let places = remove_places(screen, 83.0, count);
-            assert!(screen.contains_rect(places.pane), "{count}: {places:?}");
-            for part in [places.header, places.list, places.buttons] {
-                assert!(places.pane.contains_rect(part), "{count}: {part:?} leaves {:?}", places.pane);
+        for size in [[960.0, 600.0], [720.0, 400.0]] {
+            let screen = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
+            for count in [1, 2, 8, 9, 50] {
+                let places = remove_places(screen, 83.0, count);
+                assert!(screen.contains_rect(places.pane), "{size:?} {count}: {places:?}");
+                for part in [places.header, places.list, places.buttons] {
+                    assert!(places.pane.contains_rect(part), "{size:?} {count}: {part:?} leaves {:?}", places.pane);
+                }
+                assert!((places.buttons.height() - BUTTON_HEIGHT).abs() < 1e-3);
+                assert!(places.list.bottom() + DIALOG_GAP <= places.buttons.top() + 1e-3);
+                assert!(places.list.height() <= list_height(count.min(REMOVE_ROWS)) + 1e-3);
+                assert!(places.list.height() >= LIST_ROW, "{size:?} {count}: no room for a row: {places:?}");
             }
-            assert!((places.buttons.height() - BUTTON_HEIGHT).abs() < 1e-3);
-            assert!(places.list.bottom() + DIALOG_GAP <= places.buttons.top() + 1e-3);
-            assert!(places.list.height() <= list_height(count.min(REMOVE_ROWS)) + 1e-3);
+        }
+        // In the smallest window, fifty paths still scroll to the last and the buttons stay in view.
+        for size in [[960.0, 600.0], [720.0, 400.0]] {
+            scrolls_to_the_end(size);
         }
         // The drawing's dialog: 480 wide, two paths in a box 80 tall, under a header of 84.
         let places = remove_places(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1])), 84.0, 2);
         assert!((places.pane.width() - 480.0).abs() < 1e-3 && (places.list.height() - 80.0).abs() < 1e-3, "{places:?}");
         assert!((places.pane.height() - 296.0).abs() < 1e-3, "{places:?}");
+    }
 
-        // Fifty in the window: eight rows show, the wheel reaches the last and no further, the buttons stay.
+    /// Fifty paths in a window of `size`: as many rows as fit show (eight when there is room), the wheel reaches
+    /// the last and no further, the buttons stay in view and Cancel still works.
+    fn scrolls_to_the_end(size: [f32; 2]) {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
         let mut session = Session::demo(crate::demo::repos());
         session.repos_mut().unwrap().mode = CoreMode::ConfirmRemove { folders: (0..50).map(|index| format!("repository-{index}")).collect() };
         let mut window = Window::new(session);
         window.size = size;
         window.frame(Vec::new());
         let list = parts(&window).list;
-        assert!((list.height() - list_height(REMOVE_ROWS)).abs() < 1e-3);
+        if size[1] >= 600.0 {
+            assert!((list.height() - list_height(REMOVE_ROWS)).abs() < 1e-3);
+        }
+        assert!(list.height() >= LIST_ROW && list.height() < list_height(50), "{size:?}: {list:?}");
         window.frame(vec![Event::PointerMoved(list.center())]);
         for _ in 0..60 {
             window.frame(vec![wheel(-200.0)]);
@@ -342,6 +430,9 @@ mod tests {
         until(&mut window, "removed", |window| !web.exists() && !window.repos().busy);
         assert!(window.repos().installed.is_empty(), "{:?}", window.repos().installed.iter().map(|repo| &repo.folder).collect::<Vec<_>>());
         assert!(api.exists(), "only web was deleted");
+        for kept in [root.0.clone(), root.0.join("web-origin"), root.0.join("api-origin"), root.0.join("devassist.toml")] {
+            assert!(kept.exists(), "{} went with web", kept.display());
+        }
         assert!(!window.open(), "no dialog came up for it");
         window.session.close();
     }

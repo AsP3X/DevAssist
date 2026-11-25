@@ -27,6 +27,8 @@ const MOVE_TITLE: &str = "Move to a group";
 const RENAME_TITLE: &str = "Rename group";
 /// The note under the field when repositories move.
 const NOTE: &str = "A new name makes a new group. Empty takes it out of its group.";
+/// The quiet line when no repository is chosen and no group is renamed.
+const NOTHING: &str = "No repository is chosen.";
 /// What the field says while it is empty.
 const HINT: &str = "Group name";
 /// The button that closes the dialog.
@@ -52,6 +54,8 @@ fn line(prompt: &GroupPrompt) -> String {
         return format!("The repositories in {old} stay in it.");
     }
     match prompt.repos.as_slice() {
+        // The core opens no such dialog with nothing chosen; were it to, the line says so, not "0 repositories".
+        [] => NOTHING.to_owned(),
         [one] => format!("Moves {one}."),
         many => {
             let shown = many[..many.len().min(3)].join(", ");
@@ -367,6 +371,70 @@ mod tests {
         assert!(window.shows(Which::Group));
         window.click(pos2(40.0, 40.0));
         assert!(!window.open());
+    }
+
+    #[test]
+    fn enter_on_cancel_moves_nothing_and_enter_on_move_moves_the_rows() {
+        let mut window = grouping(None);
+        window.key(Key::Tab);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(cancel_id()));
+        window.key(Key::Enter);
+        assert!(!window.open() && window.repos().mode == CoreMode::List);
+        assert_eq!(window.repos().groups(), ["home", "Tools", "Work"]);
+        assert_eq!(window.repos().installed.iter().filter(|repo| repo.group == "Work").count(), 4, "nothing moved");
+        // Enter comes up, as on a real keyboard: a dialog that opens while it is held takes none of its presses.
+        window.frame(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+
+        window.session.repos_mut().unwrap().open_group_prompt();
+        window.frame(Vec::new());
+        window.click(row(&window, 1));
+        assert_eq!(prompt(&window).input, "Tools");
+        window.key(Key::Tab);
+        window.key(Key::Tab);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(main_id()));
+        window.key(Key::Enter);
+        assert!(!window.open());
+        let group = |name: &str| window.repos().installed.iter().find(|repo| repo.folder == name).unwrap().group.clone();
+        assert_eq!((group("api"), group("web")), ("Tools".to_owned(), "Tools".to_owned()));
+    }
+
+    #[test]
+    fn the_line_never_counts_nothing() {
+        let empty = GroupPrompt { repos: Vec::new(), rename: None, input: String::new(), error: None };
+        assert_eq!(line(&empty), "No repository is chosen.");
+        let many = GroupPrompt { repos: ["a", "b", "c", "d", "e"].map(str::to_owned).to_vec(), ..empty };
+        assert_eq!(line(&many), "Moves 5 repositories: a, b, c and 2 more.");
+        for count in 0..6 {
+            let prompt =
+                GroupPrompt { repos: (0..count).map(|index| format!("r{index}")).collect(), rename: None, input: String::new(), error: None };
+            assert!(!line(&prompt).contains("Moves 0") && !line(&prompt).contains(": ."), "{count}: {}", line(&prompt));
+        }
+    }
+
+    #[test]
+    fn the_tables_keys_do_nothing_while_the_group_dialog_is_open() {
+        let mut window = grouping(None);
+        let before = (window.repos().marked.clone(), window.repos().selected.clone());
+        // With a button chosen, the arrows, Space-less letters and Delete reach nothing under the dialog.
+        window.key(Key::Tab);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(cancel_id()));
+        window.key(Key::ArrowDown);
+        window.key(Key::ArrowUp);
+        window.typed(Key::D, "d");
+        window.typed(Key::M, "m");
+        window.key(Key::Delete);
+        assert!(window.shows(Which::Group));
+        assert_eq!(prompt(&window).input, "Work", "the arrows did not step the groups from a button");
+        assert_eq!((window.repos().marked.clone(), window.repos().selected.clone()), before);
+        // In the field, letters and Space are the name's, and the table's ticks stay.
+        window.key(Key::Tab);
+        window.key(Key::Tab);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()));
+        window.typed(Key::Space, " ");
+        window.typed(Key::D, "d");
+        assert!(window.shows(Which::Group));
+        assert_eq!((window.repos().marked.clone(), window.repos().selected.clone()), before);
+        assert_eq!(prompt(&window).input, "Work d", "Space and d went to the name");
     }
 
     #[test]

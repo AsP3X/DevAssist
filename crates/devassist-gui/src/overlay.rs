@@ -19,7 +19,8 @@
 //!
 //! The keyboard: only the controls in an overlay take egui's focus ([`crate::widgets::button`]). [`walk`] moves it
 //! among them on Tab and Shift-Tab, and nowhere else; Enter and Space press the one that has it, and nothing else.
-//! With no control given to [`open`], Enter and Space do nothing until Tab has chosen one.
+//! With no control given to [`open`], Enter and Space do nothing until Tab or Shift-Tab has chosen one, and either
+//! chooses the first control, never the last.
 
 use egui::{
     Align2, Area, AreaState, Color32, Context, Event, FocusDirection, Id, Key, LayerId, Memory, Mesh, Order, Rect, Sense, Ui, Vec2, pos2, vec2,
@@ -273,8 +274,10 @@ pub fn pane(ui: &Ui, rect: Rect, id: Id) {
     ui.interact(rect, id, Sense::CLICK);
 }
 
-/// Keeps egui's keyboard focus among the controls `ids`, in their Tab order: Tab gives it to the next (the first
-/// when none has it), Shift-Tab to the one before (the last when none has it), round from the end to the start.
+/// Keeps egui's keyboard focus among the controls `ids`, in their Tab order: Tab gives it to the next, Shift-Tab to
+/// the one before, round from the end to the start. When none has it, either key gives it to the first: a dialog
+/// lists its controls so that the first is the safe one (Cancel), and one key press never lands on the last, which
+/// may be the one that deletes.
 /// A focus outside them (the filter's, say) is taken away; the arrows and egui's own Tab move it nowhere. Called
 /// on the overlay before its controls, every frame it is open; the Tab keys are its own, no control sees them.
 pub fn walk(ui: &mut Ui, ids: &[Id]) {
@@ -309,8 +312,8 @@ pub fn walk(ui: &mut Ui, ids: &[Id]) {
 fn step(ids: &[Id], current: Option<Id>, back: bool) -> Option<Id> {
     let last = ids.len().checked_sub(1)?;
     let at = match (current.and_then(|id| ids.iter().position(|known| *known == id)), back) {
-        (None, false) => 0,
-        (None, true) => last,
+        // From no focus, both ways start at the first control, never at the last.
+        (None, _) => 0,
         (Some(at), false) => {
             if at == last {
                 0
@@ -559,7 +562,7 @@ mod tests {
     fn a_tab_moves_to_the_next_round_to_the_start_and_shift_tab_back() {
         let ids = [Id::unique("a"), Id::unique("b"), Id::unique("c")];
         assert_eq!(step(&ids, None, false), Some(ids[0]));
-        assert_eq!(step(&ids, None, true), Some(ids[2]));
+        assert_eq!(step(&ids, None, true), Some(ids[0]), "from no focus, Shift-Tab starts at the first too");
         assert_eq!(step(&ids, Some(ids[0]), false), Some(ids[1]));
         assert_eq!(step(&ids, Some(ids[2]), false), Some(ids[0]));
         assert_eq!(step(&ids, Some(ids[0]), true), Some(ids[2]));
