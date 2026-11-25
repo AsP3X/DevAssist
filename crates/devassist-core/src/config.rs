@@ -261,9 +261,19 @@ pub fn default_path() -> Result<PathBuf, String> {
     Ok(user_config_path())
 }
 
-/// The settings in the file at `path`, with every default resolved as for a
-/// start with no options. A file that does not exist gives the defaults.
-/// It reads no arguments and prints nothing.
+/// The settings as `startup` resolves them for a start with no options at
+/// all: the file at `default_path()`, else the settings under the old name or
+/// in the old managed folder, with the clones found there. It reads no
+/// arguments and prints nothing.
+pub fn load_default() -> Result<Settings, String> {
+    let flags = Flags::default();
+    let loaded = load_file(&flags)?;
+    Ok(settings_from(&flags, loaded))
+}
+
+/// The settings in the file at `path`, as `--config PATH` gives them: no
+/// migration from older places and no scan for clones. A file that does not
+/// exist gives the defaults. It reads no arguments and prints nothing.
 pub fn load(path: &Path) -> Result<Settings, String> {
     let flags = Flags {
         config: Some(path.to_path_buf()),
@@ -1830,6 +1840,16 @@ mod tests {
             load(&path).unwrap_err(),
             format!("{}: line 1: theme is light, dark or system", path.display())
         );
+    }
+
+    #[test]
+    fn a_start_without_options_loads_as_the_terminal_does() {
+        // The home folder cannot be redirected here without touching the real
+        // one, so the migration path is covered by the load_file tests only.
+        let flags = Flags::default();
+        let expected = settings_from(&flags, load_file(&flags).unwrap());
+        let loaded = load_default().unwrap();
+        assert_eq!(format!("{loaded:?}"), format!("{expected:?}"));
     }
 
     /// One checkout in no group, watched every five minutes.
