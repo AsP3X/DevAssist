@@ -138,7 +138,7 @@ impl Session {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::time::Instant;
@@ -155,6 +155,13 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    /// Held by every test of this crate that runs the core on real checkouts. Cancelling a run stops every git
+    /// the process runs and raises one flag for all of it (`process::request_cancel`), so such tests take turns.
+    pub(crate) fn live_git() -> std::sync::MutexGuard<'static, ()> {
+        static LIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn demo() -> Launch {
@@ -189,6 +196,7 @@ mod tests {
 
     #[test]
     fn a_picture_run_reads_the_repositories_and_fetches_and_pulls_nothing() {
+        let _live = live_git();
         let root = std::env::temp_dir().join(format!("devassist-gui-picture-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let origin = root.join("origin");
@@ -275,6 +283,7 @@ mod tests {
 
     #[test]
     fn a_live_session_ticks_fast_while_the_core_waits() {
+        let _live = live_git();
         let root = std::env::temp_dir().join(format!("devassist-gui-session-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();

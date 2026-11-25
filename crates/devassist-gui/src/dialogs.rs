@@ -8,7 +8,14 @@
 //! [`plan`] and [`show`].
 //!
 //! Each frame runs [`before`] (before the bake: the dialog's place, so its glass is baked there) and [`after`]
-//! (after the screen: the dialog itself, and what a person did in it, through the core's methods). A dialog's
+//! (after the screen: the dialog itself, and what a person did in it, through the core's methods). A dialog is
+//! never drawn without its glass: one the screen opens in a frame (`l`, a click on the status bar) comes after the
+//! bake, so in that frame only its shield stands (it keeps the overlay open, its focus, and every press from the
+//! screen) and nothing is painted; the next frame, asked for at once, draws all of it. A dialog that goes asks for
+//! a frame at once too, so the screen has its keys back without waiting.
+//!
+//! A dialog is on the Repositories screen: one that opens while another page is shown brings that page back
+//! ([`page_for`]), so the status bar and `l`, which bring a hidden run back, are always at hand. A dialog's
 //! parts are shared: [`Header`] (the title and the quiet line under it) and [`inset`] (a box with the field's fill
 //! that scrolls with the wheel).
 //!
@@ -28,6 +35,7 @@ use egui::{Color32, Context, CornerRadius, FontFamily, Galley, Id, Key, LayerId,
 use crate::assets;
 use crate::baker::{Drawn, Want};
 use crate::overlay::{self, Kind};
+use crate::shell::Page;
 use crate::theme::{
     self, BUTTON_HEIGHT, DIALOG_GAP, DIALOG_PAD, DIALOG_TITLE, HAIRLINE, HEADER_GAP, HEADER_LINE_HEIGHT, INSET_RADIUS, LINE_OPACITY, Mode,
     OUTPUT_GAP, OUTPUT_LINE, OUTPUT_PAD, OUTPUT_ROWS, OUTPUT_TEXT, PROGRESS_HEIGHT, PROGRESS_LEAST, PROGRESS_TRACK_OPACITY, PROGRESS_WIDTH, Palette,
@@ -247,22 +255,29 @@ pub fn before(ctx: &Context, repos: Option<&Repos>, dialogs: &mut Dialogs) -> Op
     plan(&ctx.layer_painter(LayerId::background()), ctx.content_rect(), repos)
 }
 
+/// The page to show: the Repositories screen while a dialog is open over it, else `page`.
+#[must_use]
+pub fn page_for(repos: Option<&Repos>, page: Page) -> Page {
+    if repos.and_then(which).is_some() { Page::Repositories } else { page }
+}
+
 /// After the screen: brings the overlay in line with what the screen asked of the core ([`sync`]), then draws the
 /// dialog the mode asks for over everything, with `drawn` (the baker's pictures of this frame) for its glass, and
-/// does what a person did in it. `planned` is what [`before`] gave; a dialog the screen opened in this frame has no
-/// glass yet, and gets it in the next frame, which is asked for.
+/// does what a person did in it. `planned` is what [`before`] gave. A dialog the screen opened in this frame has
+/// no glass baked yet: this frame has its shield only, painting nothing, and the next frame, asked for now, draws
+/// it whole.
 pub fn after(ctx: &Context, planned: Option<Plan>, repos: Option<&mut Repos>, drawn: &[Drawn], mode: Mode, dialogs: &mut Dialogs) {
     let Some(repos) = repos else { return };
     sync(ctx, Some(repos), dialogs);
     let Some(want) = which(repos) else { return };
-    let plan = if let Some(plan) = planned.filter(|plan| plan.which == want) {
-        plan
+    if let Some(plan) = planned.filter(|plan| plan.which == want) {
+        show(ctx, &plan, repos, drawn, mode, dialogs);
     } else {
+        // Opened after the bake: the shield alone keeps it open, with its focus, and paints nothing.
+        let window = ctx.content_rect();
+        overlay::show(ctx, |ui| overlay::shield(ui, window, shield_id()));
         ctx.request_repaint();
-        let Some(plan) = plan(&ctx.layer_painter(LayerId::background()), ctx.content_rect(), Some(repos)) else { return };
-        plan
-    };
-    show(ctx, &plan, repos, drawn, mode, dialogs);
+    }
 }
 
 /// Draws the dialog of `plan` on the overlay: the shield, the scrim, its glass among `drawn`, its pane, then the
@@ -271,7 +286,7 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
     let palette = theme::palette(mode);
     let window = ctx.content_rect();
     overlay::show(ctx, |ui| {
-        let scrim = overlay::shield(ui, window, Id::unique("dialog-shield"));
+        let scrim = overlay::shield(ui, window, shield_id());
         overlay::scrim(ui, window, palette);
         overlay::glass(ui, drawn);
         overlay::pane(ui, plan.places.pane, Id::unique("dialog-pane"));
@@ -280,6 +295,15 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
             Which::Progress => progress(ui, plan, repos, palette, dialogs, scrim),
         }
     });
+    if which(repos) != Some(plan.which) {
+        // The dialog went: the screen gets its keys back in the next frame, at once.
+        ctx.request_repaint();
+    }
+}
+
+/// The id of the shield under every dialog.
+fn shield_id() -> Id {
+    Id::unique("dialog-shield")
 }
 
 /// What a button of the progress dialog does when pressed.
@@ -462,7 +486,7 @@ fn task(ui: &Ui, painter: &Painter, row: Rect, item: &Item, palette: Palette) {
     let medium = font(TEXT, assets::medium_family());
     let regular = font(TEXT, FontFamily::Proportional);
     let left = row.left() + TASK_PAD;
-    painter.text(pos2(left, y), egui::Align2::LEFT_CENTER, widgets::ellipsis(&item.name, &medium, TASK_NAME, ui), medium, palette.on_glass);
+    painter.text(pos2(left, y), egui::Align2::LEFT_CENTER, widgets::ellipsis(&item.name, &medium, TASK_NAME, ui), medium.clone(), palette.on_glass);
     let bar = Rect::from_min_size(pos2(left + TASK_NAME + TASK_PAD, y - PROGRESS_HEIGHT / 2.0), vec2(TASK_BAR, PROGRESS_HEIGHT));
     if item.state != ItemState::Waiting {
         painter.rect_filled(bar, PROGRESS_HEIGHT / 2.0, palette.on_glass.gamma_multiply(PROGRESS_TRACK_OPACITY));
@@ -478,9 +502,11 @@ fn task(ui: &Ui, painter: &Painter, row: Rect, item: &Item, palette: Palette) {
         ItemState::Failed => palette.danger,
         ItemState::Running | ItemState::Done => palette.on_glass,
     };
+    // The running task's state is in the medium face, as the design sets it; the others in the regular one.
+    let words = if item.state == ItemState::Running { medium } else { regular };
     let state_left = bar.right() + TASK_PAD;
     let room = row.right() - TASK_PAD - state_left;
-    painter.text(pos2(state_left, y), egui::Align2::LEFT_CENTER, widgets::ellipsis(&item.short_state(), &regular, room, ui), regular, colour);
+    painter.text(pos2(state_left, y), egui::Align2::LEFT_CENTER, widgets::ellipsis(&item.short_state(), &words, room, ui), words, colour);
 }
 
 /// Draws the shown task's output in the box at `rect`, the newest line at the bottom, in the 12-point monospaced
@@ -516,7 +542,7 @@ mod tests {
     use devassist_core::repos::state::JOB_LINGER;
     use devassist_core::repos::state::testing::test_settings;
     use devassist_core::task::job::JobEvent;
-    use egui::{Event, Memory, MouseWheelSource, MouseWheelUnit, PointerButton, Pos2, RawInput, TextureId, TouchPhase};
+    use egui::{Event, Memory, MouseWheelSource, MouseWheelUnit, PointerButton, Pos2, RawInput, TextureId, TouchPhase, ViewportId};
 
     use super::*;
     use crate::baker::Sheet;
@@ -568,11 +594,27 @@ mod tests {
         size: [f32; 2],
         /// The dialog's places in the last frame, when it was drawn.
         places: Option<Places>,
+        /// The last frame baked a dialog's glass (`before` placed one).
+        baked: bool,
+        /// The last frame painted something on the overlay's layer.
+        painted: bool,
+        /// The last frame asked for the next one at once.
+        repaint: bool,
     }
 
     impl Window {
         fn new(session: Session) -> Window {
-            Window { ctx: context(), session, screen: Screen::default(), dialogs: Dialogs::default(), size: WINDOW, places: None }
+            Window {
+                ctx: context(),
+                session,
+                screen: Screen::default(),
+                dialogs: Dialogs::default(),
+                size: WINDOW,
+                places: None,
+                baked: false,
+                painted: false,
+                repaint: false,
+            }
         }
 
         fn frame(&mut self, events: Vec<Event>) {
@@ -583,20 +625,22 @@ mod tests {
             let window = Rect::from_min_size(Pos2::ZERO, vec2(self.size[0], self.size[1]));
             let input = RawInput { screen_rect: Some(window), events, time, ..Default::default() };
             let (session, screen, dialogs) = (&mut self.session, &mut self.screen, &mut self.dialogs);
-            let mut places = None;
-            self.ctx
-                .run_ui(input, |ui| {
-                    let ctx = ui.ctx().clone();
-                    let planned = before(&ctx, session.repos(), dialogs);
-                    let layout = shell::layout(window.size(), true, repos_screen::has_toolbar(session));
-                    let plan = repos_screen::plan(ui.painter(), &layout, session);
-                    let keys = !overlay::is_open(&ctx);
-                    repos_screen::show(ui, &layout, plan.as_ref(), session, Some(&sheet()), Mode::Light, screen, keys);
-                    after(&ctx, planned, session.repos_mut(), &[], Mode::Light, dialogs);
-                    places = session.repos().and_then(|repos| super::plan(ui.painter(), window, Some(repos))).map(|plan| plan.places);
-                })
-                .drop_without_applying_deltas();
-            self.places = places;
+            let (mut places, mut baked, mut painted) = (None, false, false);
+            let output = self.ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                let planned = before(&ctx, session.repos(), dialogs);
+                baked = planned.is_some();
+                let layout = shell::layout(window.size(), true, repos_screen::has_toolbar(session));
+                let plan = repos_screen::plan(ui.painter(), &layout, session);
+                let keys = !overlay::is_open(&ctx);
+                repos_screen::show(ui, &layout, plan.as_ref(), session, Some(&sheet()), Mode::Light, screen, keys);
+                after(&ctx, planned, session.repos_mut(), &[], Mode::Light, dialogs);
+                places = session.repos().and_then(|repos| super::plan(ui.painter(), window, Some(repos))).map(|plan| plan.places);
+                painted = ctx.graphics(|layers| layers.get(overlay::layer()).is_some_and(|list| !list.is_empty()));
+            });
+            self.repaint = output.viewport_output.get(&ViewportId::ROOT).is_some_and(|viewport| viewport.repaint_delay.is_zero());
+            output.drop_without_applying_deltas();
+            (self.places, self.baked, self.painted) = (places, baked, painted);
         }
 
         /// A click at `at`, over four frames.
@@ -807,6 +851,7 @@ mod tests {
         }
         let most = 50.0 * TASK_HEIGHT - tasks.height();
         assert!((window.dialogs.tasks_scroll - most).abs() < 1e-3, "{} of {most}", window.dialogs.tasks_scroll);
+        assert_eq!(window.job().scroll, 0, "the wheel over the tasks left the output alone");
         // The last row is there to click.
         window.click(pos2(tasks.center().x, tasks.bottom() - TASK_HEIGHT / 2.0));
         assert_eq!(window.job().picked, Some(49));
@@ -843,31 +888,40 @@ mod tests {
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
     }
 
-    /// Two checkouts under a fresh temporary folder `name`, each one commit behind its own origin. Gives the root and
-    /// the settings that manage them.
-    fn behind(name: &str) -> (PathBuf, Settings) {
-        let root = std::env::temp_dir().join(format!("devassist-gui-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+    /// A temporary folder, removed when dropped: also when a test fails.
+    struct Temp(PathBuf);
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Checkouts `repos` under a fresh temporary folder `name`, each one commit behind its own origin. Gives the
+    /// folder (removed when dropped) and the settings that manage them.
+    fn behind(name: &str, repos: &[&str]) -> (Temp, Settings) {
+        let root = Temp(std::env::temp_dir().join(format!("devassist-gui-{name}-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&root.0);
+        std::fs::create_dir_all(&root.0).unwrap();
         let mut checkouts = Vec::new();
-        for repo in ["api", "web"] {
-            let origin = root.join(format!("{repo}-origin"));
+        for repo in repos {
+            let origin = root.0.join(format!("{repo}-origin"));
             std::fs::create_dir_all(&origin).unwrap();
             git(&origin, &["init", "-q", "-b", "main"]);
             std::fs::write(origin.join("one"), "one").unwrap();
             git(&origin, &["add", "one"]);
             git(&origin, &["commit", "-q", "-m", "one"]);
-            git(&root, &["clone", "-q", origin.to_str().unwrap(), repo]);
+            git(&root.0, &["clone", "-q", origin.to_str().unwrap(), repo]);
             std::fs::write(origin.join("two"), "two").unwrap();
             git(&origin, &["add", "two"]);
             git(&origin, &["commit", "-q", "-m", "two"]);
-            checkouts.push(root.join(repo));
+            checkouts.push(root.0.join(repo));
         }
         let settings = Settings {
             owners_explicit: true,
             update_check: false,
             update_check_now: false,
-            ..Settings::for_folder(checkouts, root.join("devassist.toml"))
+            ..Settings::for_folder(checkouts, root.0.join("devassist.toml"))
         };
         (root, settings)
     }
@@ -883,12 +937,24 @@ mod tests {
         }
     }
 
+    /// A window on the live repositories of `settings`, `count` of them, read and fetched.
+    fn live(settings: Settings, count: usize) -> Window {
+        let mut window = Window::new(Session::Live(Box::new(Repos::new(settings))));
+        until(&mut window, "read and fetched", |window| !window.repos().waiting() && window.repos().installed.len() == count);
+        assert!(!window.open());
+        window
+    }
+
+    /// The words of the dialog's buttons, from the left.
+    fn said(window: &Window) -> Vec<&'static str> {
+        window.buttons().iter().map(|(_, words)| *words).collect()
+    }
+
     #[test]
     fn a_real_update_opens_the_dialog_shows_its_tasks_and_closes_after_the_linger() {
-        let (root, settings) = behind("update");
-        let mut window = Window::new(Session::Live(Box::new(Repos::new(settings))));
-        until(&mut window, "read and fetched", |window| !window.repos().waiting() && window.repos().installed.len() == 2);
-        assert!(!window.open());
+        let _live = crate::session::tests::live_git();
+        let (root, settings) = behind("update", &["api", "web"]);
+        let mut window = live(settings, 2);
 
         window.session.repos_mut().unwrap().update_all();
         until(&mut window, "open", Window::open);
@@ -903,30 +969,56 @@ mod tests {
         assert!(matches!(window.job().result, Some(Ok(_))), "{:?}", window.job().result);
         // The frame that took in the end has just been drawn, well inside the linger.
         assert!(window.open(), "the dialog stays a moment after a run that went well");
-        assert_eq!(window.buttons().iter().map(|(_, words)| *words).collect::<Vec<_>>(), ["Close"]);
+        assert_eq!(said(&window), ["Close"]);
         assert!(window.job().items.iter().all(|item| item.state == ItemState::Done && item.bar_fill() == Some(1.0)));
         until(&mut window, "closed", |window| !window.open());
         assert!(ended.elapsed() >= JOB_LINGER / 2, "it closed before the linger");
         assert!(window.repos().mode == CoreMode::List);
-        assert!(root.join("api").join("two").exists() && root.join("web").join("two").exists(), "both were updated");
+        assert!(root.0.join("api").join("two").exists() && root.0.join("web").join("two").exists(), "both were updated");
         window.session.close();
-        drop(window);
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cancel_stops_a_real_update_and_reads_cancelling_until_it_has() {
+        let _live = crate::session::tests::live_git();
+        // Enough checkouts that the run is still going when Cancel is pressed.
+        let names = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+        let (_root, settings) = behind("cancel", &names);
+        let mut window = live(settings, names.len());
+
+        window.session.repos_mut().unwrap().update_all();
+        until(&mut window, "open", Window::open);
+        assert_eq!(said(&window), ["Cancel", "Hide"]);
+        // The press and the frames after it take in nothing from the core's workers: the run is still going.
+        window.press("Cancel");
+        assert!(window.job().cancelling, "Cancel asked the core to stop the run");
+        assert_eq!(said(&window), ["Cancelling…", "Hide"]);
+        assert_eq!(progress_buttons(window.job())[0].press, None, "it cannot be pressed again");
+        assert!(window.open(), "Cancel does not close the dialog");
+
+        until(&mut window, "ended", |window| !window.job().running());
+        let job = window.job();
+        assert!(job.cancelled && matches!(job.result, Some(Err(_))), "{:?}", job.result);
+        assert_eq!(job.summary().words, "■ Cancelled.");
+        assert_eq!(said(&window), ["Close"]);
+        assert!(window.open(), "a cancelled run's dialog stays until it is closed");
+        window.session.close();
     }
 
     #[test]
     fn a_run_that_fails_while_hidden_says_so_in_the_status_bar() {
-        let (root, settings) = behind("failure");
-        let mut window = Window::new(Session::Live(Box::new(Repos::new(settings))));
-        until(&mut window, "read and fetched", |window| !window.repos().waiting() && window.repos().installed.len() == 2);
+        let _live = crate::session::tests::live_git();
+        let (root, settings) = behind("failure", &["api", "web"]);
+        let mut window = live(settings, 2);
         // The origins are gone: every fetch fails.
-        std::fs::remove_dir_all(root.join("api-origin")).unwrap();
-        std::fs::remove_dir_all(root.join("web-origin")).unwrap();
+        std::fs::remove_dir_all(root.0.join("api-origin")).unwrap();
+        std::fs::remove_dir_all(root.0.join("web-origin")).unwrap();
 
         window.session.repos_mut().unwrap().update_all();
         until(&mut window, "open", Window::open);
         window.key(Key::Escape);
         assert!(!window.open(), "Esc hides it");
+        assert!(window.job().running(), "it was hidden while it ran");
         until(&mut window, "ended", |window| !window.job().running());
         for _ in 0..5 {
             window.frame(Vec::new());
@@ -941,7 +1033,7 @@ mod tests {
         window.typed(Key::L, "l");
         assert!(window.open());
         assert!(window.job().summary().words.starts_with('✗'), "{}", window.job().summary());
-        assert_eq!(window.buttons().iter().map(|(_, words)| *words).collect::<Vec<_>>(), ["Close"]);
+        assert_eq!(said(&window), ["Close"]);
         std::thread::sleep(JOB_LINGER);
         window.session.tick();
         window.frame(Vec::new());
@@ -949,8 +1041,91 @@ mod tests {
         window.press("Close");
         assert!(!window.open());
         window.session.close();
-        drop(window);
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_run_that_ends_well_while_hidden_says_so_and_stays_hidden() {
+        let _live = crate::session::tests::live_git();
+        let (_root, settings) = behind("hidden", &["api", "web"]);
+        let mut window = live(settings, 2);
+
+        window.session.repos_mut().unwrap().update_all();
+        until(&mut window, "open", Window::open);
+        window.key(Key::Escape);
+        assert!(!window.open() && window.job().running(), "it was hidden while it ran");
+        until(&mut window, "ended", |window| !window.job().running());
+        // No linger for a dialog that is not shown: nothing waits for it, nothing opens.
+        assert!(window.repos().job_close_at.is_none());
+        for _ in 0..5 {
+            window.frame(Vec::new());
+        }
+        assert!(!window.open());
+        let status = repos_view::status(window.repos());
+        assert!(!status.error, "{status:?}");
+        assert!(matches!(&window.job().result, Some(Ok(message)) if *message == status.text), "{status:?}");
+
+        // `l` shows how it ended, with Close; it stays until it is closed.
+        window.typed(Key::L, "l");
+        assert!(window.open());
+        assert!(window.job().summary().words.starts_with('✓'), "{}", window.job().summary());
+        assert_eq!(said(&window), ["Close"]);
+        std::thread::sleep(JOB_LINGER);
+        window.session.tick();
+        window.frame(Vec::new());
+        assert!(window.open(), "a dialog brought back is not closed by the linger");
+        window.session.close();
+    }
+
+    #[test]
+    fn a_dialog_the_screen_opens_paints_nothing_until_its_glass_is_baked() {
+        let mut window = Window::new(session_with(run(&["api", "web"], 3)));
+        // Opened by the core's mode, before the bake: whole in its first frame.
+        window.frame(Vec::new());
+        assert!(window.open() && window.baked && window.painted);
+        window.key(Key::Escape);
+        window.frame(Vec::new());
+        assert!(!window.open() && !window.painted);
+
+        // `l` opens it after the bake: that frame keeps the overlay open, with its focus, and paints nothing.
+        window.frame(vec![
+            Event::Key { key: Key::L, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
+            Event::Text("l".to_owned()),
+        ]);
+        assert!(overlay::is_open(&window.ctx), "the overlay is open");
+        assert!(!window.baked && !window.painted, "a frame without the dialog's glass painted the dialog");
+        assert!(window.repaint, "the next frame is asked for at once");
+        assert_eq!(window.ctx.memory(Memory::focused), Some(main_id()));
+        // The next frame bakes its glass and draws it whole; the focus is still on Hide.
+        window.frame(Vec::new());
+        assert!(window.open() && window.baked && window.painted);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(main_id()));
+    }
+
+    #[test]
+    fn a_dialog_that_goes_gives_the_screen_its_keys_in_the_next_frame_at_once() {
+        let mut window = Window::new(session_with(run(&["api", "web"], 3)));
+        let mut asked = Vec::new();
+        for _ in 0..10 {
+            window.frame(Vec::new());
+            asked.push(window.repaint);
+        }
+        assert!(window.open() && !window.repaint, "an open dialog over a held run asks for no frames: {asked:?}");
+        window.frame(vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+        assert!(window.repos().mode == CoreMode::List);
+        assert!(window.repaint, "the frame that hid it asks for the next at once");
+    }
+
+    #[test]
+    fn a_dialog_brings_the_repositories_page_with_it() {
+        let mut session = Session::demo(crate::demo::repos());
+        assert_eq!(page_for(session.repos(), Page::Docker), Page::Docker);
+        session.repos_mut().unwrap().job = Some(run(&["api"], 1));
+        session.repos_mut().unwrap().show_job();
+        assert_eq!(page_for(session.repos(), Page::Docker), Page::Repositories);
+        assert_eq!(page_for(session.repos(), Page::Repositories), Page::Repositories);
+        session.repos_mut().unwrap().hide_job();
+        assert_eq!(page_for(session.repos(), Page::Docker), Page::Docker);
+        assert_eq!(page_for(None, Page::Docker), Page::Docker);
     }
 
     #[test]

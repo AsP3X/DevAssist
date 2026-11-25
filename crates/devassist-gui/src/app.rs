@@ -175,6 +175,8 @@ impl eframe::App for App {
         }
 
         let size = ctx.content_rect().size();
+        // A dialog is on the Repositories screen: one the core's workers opened brings its page back.
+        self.page = dialogs::page_for(self.session.repos(), self.page);
         let on_repositories = self.page == Page::Repositories;
         let layout = shell::layout(size, self.sidebar_shown, on_repositories && repos_screen::has_toolbar(&self.session));
         let painter = ctx.layer_painter(LayerId::background());

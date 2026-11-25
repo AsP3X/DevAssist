@@ -131,7 +131,8 @@ fn opening_id() -> Id {
 }
 
 /// The overlay's layer: one overlay is open at a time.
-fn layer() -> LayerId {
+#[must_use]
+pub fn layer() -> LayerId {
     LayerId::new(Order::Foreground, Id::unique("overlay"))
 }
 
