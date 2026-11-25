@@ -4,7 +4,7 @@
 pub mod app;
 pub use devassist_core::repos::{github, gitops, gitprogress};
 pub mod settings;
-pub mod state;
+pub use devassist_core::repos::state;
 pub mod ui;
 
 use ratatui::Frame;

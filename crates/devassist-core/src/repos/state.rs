@@ -6,26 +6,28 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use devassist_core::list;
-use devassist_core::prompt::{self as pathprompt, PathPrompt};
-use devassist_core::repos::form::Form;
+use crate::list;
+use crate::prompt::{self as pathprompt, PathPrompt};
+use crate::repos::form::Form;
 
-use crate::atoms::sys::open;
-use crate::atoms::sys::paths;
-use crate::atoms::sys::process;
-use crate::atoms::task::job::{Job, JobEvent};
-use crate::atoms::task::worker::Worker;
-use crate::features::repos::github::{self, AccountQuery, RemoteRepo};
-use crate::features::repos::gitops::{self, LocalRepo};
-use crate::features::repos::gitprogress;
-use crate::shell::config::{self, Settings};
+use crate::config::{self, Settings};
+use crate::repos::github::{self, AccountQuery, RemoteRepo};
+use crate::repos::gitops::{self, LocalRepo};
+use crate::repos::gitprogress;
+use crate::sys::open;
+use crate::sys::paths;
+use crate::sys::process;
+use crate::task::job::{Job, JobEvent};
+use crate::task::worker::Worker;
 
 /// How long the Add search waits after the last key before asking GitHub.
 const LOOKUP_DELAY: Duration = Duration::from_millis(350);
 
 /// How long the progress dialog stays after a run that went well.
 /// Opening more folders than this at once is refused.
+#[doc(hidden)]
 pub const OPEN_LIMIT: usize = 8;
+#[doc(hidden)]
 pub const JOB_LINGER: Duration = Duration::from_millis(1200);
 /// How the status line starts while an automatic pull runs.
 const WATCH_LABEL: &str = "Auto-pull: checking";
@@ -442,6 +444,7 @@ struct Planned {
     gone: bool,
 }
 
+#[doc(hidden)]
 pub enum Msg {
     Status {
         generation: u64,
@@ -504,6 +507,7 @@ pub struct Repos {
     /// The open folder dialog.
     pub prompt: Option<PathPrompt<Purpose>>,
     /// Checkouts a running remove is deleting.
+    #[doc(hidden)]
     pub removing: Vec<PathBuf>,
     /// Which group each checkout is in. Groups only sort the overview.
     pub placement: Vec<(PathBuf, String)>,
@@ -517,6 +521,7 @@ pub struct Repos {
     pub menu: Option<Menu>,
     /// The open fork overview. It stays under the dialogs opened from it.
     pub forks: Option<ForksView>,
+    #[doc(hidden)]
     pub forks_generation: u64,
     pub title: String,
     pub custom_title: Option<String>,
@@ -570,6 +575,7 @@ pub struct Repos {
     /// last fetch found them, by the path of the checkout.
     pub pulls_pending: HashMap<PathBuf, gitops::PendingPulls>,
     /// When the next automatic pull is due.
+    #[doc(hidden)]
     pub watch_due: Instant,
     /// What the status line said before an automatic pull took it over.
     /// A pull that brings nothing puts it back.
@@ -619,7 +625,6 @@ impl Repos {
     }
 
     /// A tool that reads no folder and calls no network.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn offline(settings: Settings) -> Self {
         let first_run = settings.first_run;
         let mut app = Self::empty(settings);
@@ -630,6 +635,7 @@ impl Repos {
         app
     }
 
+    #[doc(hidden)]
     pub fn empty(settings: Settings) -> Self {
         let unsaved = settings.unsaved;
         let mut app = Self {
@@ -1610,7 +1616,7 @@ impl Repos {
             self.notice("Select a repository first.", true);
             return;
         }
-        match crate::atoms::sys::clipboard::set_text(&paths.join("\n")) {
+        match crate::sys::clipboard::set_text(&paths.join("\n")) {
             Err(err) => self.notice(err, true),
             Ok(()) => match paths.as_slice() {
                 [path] => self.notice(format!("Copied {path}."), false),
@@ -3606,6 +3612,7 @@ impl Repos {
         }
     }
 
+    #[doc(hidden)]
     pub fn on_msg(&mut self, message: Msg) {
         match message {
             Msg::Status {
@@ -3924,7 +3931,6 @@ fn count_label(count: usize) -> String {
     }
 }
 
-#[cfg(test)]
 #[doc(hidden)]
 pub mod testing {
     use super::*;
