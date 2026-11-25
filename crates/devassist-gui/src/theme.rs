@@ -39,8 +39,20 @@ pub const TEXT_TITLE: f32 = 16.0;
 pub const ICON: f32 = 16.0;
 /// How far the backdrop is blurred behind the panes.
 pub const BACKDROP_BLUR: f32 = 24.0;
-/// How strong the quiet text colour is, of the full text colour.
-pub const QUIET_OPACITY: f32 = 0.74;
+/// How strong the quiet text colour is in the light mode, of the full text colour.
+pub const QUIET_OPACITY_LIGHT: f32 = 0.74;
+/// How strong the quiet text colour is in the dark mode, of the full text colour: stronger than in the light mode,
+/// so that it holds its contrast on the table's fills (the user's choice of 2026-11-25).
+pub const QUIET_OPACITY_DARK: f32 = 0.89;
+
+/// How strong the quiet text colour is in `mode`, of the full text colour.
+#[must_use]
+pub fn quiet_opacity(mode: Mode) -> f32 {
+    match mode {
+        Mode::Light => QUIET_OPACITY_LIGHT,
+        Mode::Dark => QUIET_OPACITY_DARK,
+    }
+}
 /// How far up from the window's bottom the veil keeps its lower strength, as a share of the height; above, it
 /// rises evenly to its strength at the top.
 pub const VEIL_KNEE: f32 = 0.45;
@@ -286,7 +298,7 @@ pub struct Palette {
     pub on_glass: Color32,
     /// Text on glass that is dark in both modes.
     pub on_dark_glass: Color32,
-    /// Secondary text on glass: `on_glass` at [`QUIET_OPACITY`].
+    /// Secondary text on glass: `on_glass` at [`quiet_opacity`].
     pub quiet: Color32,
     /// The fill of a selected row.
     pub selection: Color32,
@@ -317,13 +329,13 @@ pub fn palette(mode: Mode) -> Palette {
         Mode::Light => Palette {
             on_glass: rgb(0x00, 0x00, 0x00),
             on_dark_glass: Color32::WHITE,
-            quiet: rgb(0x00, 0x00, 0x00).gamma_multiply(QUIET_OPACITY),
+            quiet: rgb(0x00, 0x00, 0x00).gamma_multiply(QUIET_OPACITY_LIGHT),
             selection: rgba(0, 0, 0, 0x1f),
             accent: rgb(0x0a, 0x47, 0xa3),
             field: rgba(255, 255, 255, 0x99),
             scrim: rgba(0, 0, 0, 0x33),
             warning: rgb(0x6e, 0x3a, 0x00),
-            danger: rgb(0xb3, 0x26, 0x1e),
+            danger: rgb(0xa0, 0x22, 0x1b),
             danger_tint: rgba(0xb3, 0x26, 0x1e, 0x1a),
             ok: rgb(0x1c, 0x6b, 0x3a),
             veil: rgb(0xff, 0xff, 0xff),
@@ -331,13 +343,13 @@ pub fn palette(mode: Mode) -> Palette {
         Mode::Dark => Palette {
             on_glass: rgb(0xff, 0xff, 0xff),
             on_dark_glass: Color32::WHITE,
-            quiet: rgb(0xff, 0xff, 0xff).gamma_multiply(QUIET_OPACITY),
+            quiet: rgb(0xff, 0xff, 0xff).gamma_multiply(QUIET_OPACITY_DARK),
             selection: rgba(255, 255, 255, 0x24),
             accent: rgb(0x2a, 0x66, 0xd6),
             field: rgba(255, 255, 255, 0x1a),
             scrim: rgba(0, 0, 0, 0x73),
-            warning: rgb(0xf5, 0xbd, 0x55),
-            danger: rgb(0xff, 0xb9, 0xb1),
+            warning: rgb(0xfa, 0xe1, 0xb0),
+            danger: rgb(0xff, 0xc8, 0xc1),
             danger_tint: rgba(0x6b, 0x1d, 0x18, 0xcc),
             ok: rgb(0x77, 0xdb, 0xa0),
             veil: rgb(0x06, 0x0d, 0x18),
@@ -459,9 +471,9 @@ mod tests {
         assert_eq!(light.accent, Color32::from_rgb(0x0a, 0x47, 0xa3));
         assert_eq!(dark.accent, Color32::from_rgb(0x2a, 0x66, 0xd6));
         assert_eq!(light.warning, Color32::from_rgb(0x6e, 0x3a, 0x00));
-        assert_eq!(dark.warning, Color32::from_rgb(0xf5, 0xbd, 0x55));
-        assert_eq!(light.danger, Color32::from_rgb(0xb3, 0x26, 0x1e));
-        assert_eq!(dark.danger, Color32::from_rgb(0xff, 0xb9, 0xb1));
+        assert_eq!(dark.warning, Color32::from_rgb(0xfa, 0xe1, 0xb0));
+        assert_eq!(light.danger, Color32::from_rgb(0xa0, 0x22, 0x1b));
+        assert_eq!(dark.danger, Color32::from_rgb(0xff, 0xc8, 0xc1));
         assert_eq!(light.ok, Color32::from_rgb(0x1c, 0x6b, 0x3a));
         assert_eq!(dark.ok, Color32::from_rgb(0x77, 0xdb, 0xa0));
         assert_eq!(light.veil, Color32::from_rgb(0xff, 0xff, 0xff));
@@ -476,7 +488,7 @@ mod tests {
         assert_eq!(dark.danger_tint, Color32::from_rgba_unmultiplied(0x6b, 0x1d, 0x18, 0xcc));
         assert_eq!(light.on_dark_glass, Color32::WHITE);
         assert_eq!(light.quiet, Color32::from_rgba_unmultiplied(0, 0, 0, 189));
-        assert_eq!(dark.quiet, Color32::from_rgba_unmultiplied(255, 255, 255, 189));
+        assert_eq!(dark.quiet, Color32::from_rgba_unmultiplied(255, 255, 255, 227));
     }
 
     #[test]

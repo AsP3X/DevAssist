@@ -132,7 +132,8 @@ pub fn show(ui: &mut Ui, rect: Rect, lines: &[Line], sheet: &Sheet, palette: Pal
     ui.set_clip_rect(body.intersect(outer_clip));
     for (index, row) in placed(body, &heights, *scroll) {
         let shown = row.intersect(body);
-        let fill = Fill { row, shown, panel: rect, under_line: index + 1 < lines.len(), hovered: ui.rect_contains_pointer(shown) };
+        let hovered = ui.rect_contains_pointer(shown) && takes_hover(&lines[index]);
+        let fill = Fill { row, shown, panel: rect, under_line: index + 1 < lines.len(), hovered };
         match &lines[index] {
             Line::Group(group) => {
                 let response = ui.interact(shown, ui.scope_id().with(("table-group", &group.key)), Sense::CLICK);
@@ -257,6 +258,16 @@ fn repo_fill(repo: &RepoLine, palette: Palette, mode: Mode) -> Color32 {
         palette.selection
     } else {
         Color32::TRANSPARENT
+    }
+}
+
+/// Whether the hover is painted over a line under the pointer: not over a ticked or highlighted row, nor over a
+/// highlighted group's header, whose own fill already marks it (and the hover over it would leave its text too
+/// little contrast).
+fn takes_hover(line: &Line) -> bool {
+    match line {
+        Line::Group(group) => !group.chosen,
+        Line::Repo(repo) => !repo.ticked && !repo.chosen,
     }
 }
 
@@ -950,6 +961,22 @@ mod tests {
             assert_eq!(repo_fill(&RepoLine { ticked: true, chosen: true, ..api.clone() }, palette, mode), theme::selected_fill(mode));
             assert_eq!(repo_fill(&RepoLine { ticked: false, chosen: false, ..api.clone() }, palette, mode), Color32::TRANSPARENT);
         }
+    }
+
+    #[test]
+    fn the_hover_is_painted_only_over_a_line_without_a_fill_of_its_own() {
+        let lines = demo();
+        let Some(Line::Repo(api)) = lines.iter().find(|line| matches!(line, Line::Repo(repo) if repo.name == "api")).cloned() else {
+            panic!("no api")
+        };
+        let Some(Line::Group(group)) = lines.first().cloned() else { panic!("the demo starts with a header") };
+        let repo = |ticked, chosen| Line::Repo(RepoLine { ticked, chosen, ..api.clone() });
+        assert!(takes_hover(&repo(false, false)));
+        assert!(!takes_hover(&repo(true, false)));
+        assert!(!takes_hover(&repo(false, true)));
+        assert!(!takes_hover(&repo(true, true)));
+        assert!(takes_hover(&Line::Group(GroupLine { chosen: false, ..group.clone() })));
+        assert!(!takes_hover(&Line::Group(GroupLine { chosen: true, ..group })));
     }
 
     #[test]
