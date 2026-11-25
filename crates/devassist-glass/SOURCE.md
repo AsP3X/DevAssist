@@ -45,6 +45,9 @@ Rewritten for one pane that is a single rounded box and never turned:
   paints the backdrop a blur's reach (`REACH` standard deviations) beyond the pane; here the window's picture is
   grown by as much with its own edge mirrored (as the GPU sampler's `MirrorRepeat`), blurred and cut back, so
   it stays opaque up to the window's edge.
+- `to_display` is new code, not from Quill: it takes a picture `prepare` returned (linear light) back to
+  display colours with the copied `recode` and `to_gamma`, so the window can blur its own wallpaper with
+  `prepare`'s mirrored edges. Its test is `a_prepared_picture_comes_back_to_display_colours`.
 - The test `the_rim_bends_what_is_behind_it_and_the_middle_does_not` follows Quill's test of that name
   (`src/render/glass/drawn.rs`), over the photo instead of a checkerboard; `matches_golden` and `shader_runs`
   follow the functions of those names there, with this crate's environment variables (`DEVASSIST_BLESS`,

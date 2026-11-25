@@ -11,6 +11,7 @@ devassist-core.workspace = true
 devassist-glass.workspace = true
 egui.workspace = true
 image.workspace = true
+log.workspace = true
 serde_json.workspace = true
 
 [lints]

@@ -515,6 +515,7 @@ dependencies = [
  "devassist-glass",
  "egui",
  "image",
+ "log",
  "serde_json",
 ]
 

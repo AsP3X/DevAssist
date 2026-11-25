@@ -339,6 +339,12 @@ pub fn prepare(picture: &Bitmap, radius: f32, scale: f32) -> Bitmap {
     bitmap
 }
 
+/// A premultiplied picture in linear light (as [`prepare`] returns it) in display (gamma) colours again.
+#[must_use]
+pub fn to_display(bitmap: &Bitmap) -> Bitmap {
+    Bitmap { w: bitmap.w, h: bitmap.h, px: bitmap.px.iter().map(|pixel| recode(*pixel, to_gamma)).collect() }
+}
+
 /// The glass shader run over `behind`, as a picture of `size` pixels of the pane.
 // Quill's `Builder::glass` for one rounded box that is not turned: the frame is the pane's centre in its own
 // picture, and each map turns an offset from that centre in points into a place on its backdrop picture.
@@ -427,6 +433,22 @@ mod tests {
                 let pixel = prepared.px[y * prepared.w + x];
                 assert!((pixel[3] - 1.0).abs() < 1e-3, "alpha {} at {x}, {y} after a blur of {radius}", pixel[3]);
                 assert!((pixel[0] - to_linear(0.5)).abs() < 1e-3, "colour {} at {x}, {y}", pixel[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_prepared_picture_comes_back_to_display_colours() {
+        let colours = [[0.5, 0.5, 0.5, 1.0], [0.9, 0.2, 0.05, 1.0], [0.0, 0.0, 0.0, 1.0], [0.2, 0.1, 0.05, 0.5], [0.0; 4]];
+        let picture = Bitmap { w: colours.len(), h: 1, px: colours.to_vec() };
+        // Without a blur `prepare` only takes the picture to linear light; `to_display` takes it back.
+        let linear = prepare(&picture, 0.0, 1.0);
+        assert!((linear.px[0][0] - to_linear(0.5)).abs() < 1e-4, "prepare is linear light");
+        let back = to_display(&linear);
+        assert_eq!((back.w, back.h), (picture.w, picture.h));
+        for (was, is) in picture.px.iter().zip(&back.px) {
+            for (a, b) in was.iter().zip(is) {
+                assert!((a - b).abs() < 1e-3, "{was:?} came back as {is:?}");
             }
         }
     }

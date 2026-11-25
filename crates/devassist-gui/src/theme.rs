@@ -43,6 +43,11 @@ pub const BACKDROP_BLUR: f32 = 24.0;
 pub const QUIET_OPACITY: f32 = 0.68;
 /// How long the window must be left alone after a resize before its glass is redrawn at the new size.
 pub const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+/// How far down the window the veil keeps its top opacity, as a share of the height; below, it rises
+/// evenly to its bottom opacity.
+pub const VEIL_KNEE: f32 = 0.45;
+/// A pane's picture that no frame has wanted for this many frames is dropped.
+pub const PICTURE_KEEP_FRAMES: u64 = 120;
 /// The width of one of the window's own caption buttons.
 pub const CAPTION_BUTTON: f32 = 40.0;
 /// The room kept at the left of the top bar for the traffic lights on macOS.
