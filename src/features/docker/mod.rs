@@ -1,9 +1,7 @@
 //! Docker: containers, Compose projects, images and volumes, with live
 //! logs. Everything goes through the `docker` command.
 
-pub mod actions;
-pub mod cli;
-pub mod model;
+pub use devassist_core::docker::{actions, cli, model};
 pub mod state;
 pub mod view;
 

@@ -737,7 +737,7 @@ pub fn count(number: usize, what: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::docker::model::samples;
+    use crate::docker::model::samples;
 
     fn texts(confirm: &Confirm) -> Vec<String> {
         confirm.lines().into_iter().map(|line| line.text).collect()

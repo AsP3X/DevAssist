@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use crate::atoms::sys::process::{self, RunError};
+use crate::sys::process::{self, RunError};
 
 /// One JSON object per line.
 const JSON: &str = "{{json .}}";
