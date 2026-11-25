@@ -28,7 +28,7 @@ pub fn draw(frame: &mut Frame, docker: &mut Docker, area: Rect) {
         frame.render_widget(Paragraph::new("Make the terminal a bit larger."), area);
         return;
     }
-    if let Some(log) = docker.log.as_mut() {
+    if let Some(log) = docker.core.log.as_mut() {
         let view = docker.log_view.get_or_insert_with(LogView::new);
         view.draw(frame, area, log);
         return;

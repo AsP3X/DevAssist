@@ -1,6 +1,7 @@
 //! What the Docker tool knows and what its keys do.
 
 use std::collections::VecDeque;
+use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{
@@ -140,7 +141,8 @@ enum Msg {
     LogEnded(u64, Result<(), String>),
 }
 
-pub struct Docker {
+/// What the Docker tool knows, and what it does, whatever shows it.
+pub struct DockerState {
     pub engine: Engine,
     pub lists: Lists,
     pub tab: usize,
@@ -152,8 +154,6 @@ pub struct Docker {
     pub dialog: Dialog,
     /// The open log view: a container's log, or an action's output.
     pub log: Option<LogBuffer>,
-    /// What the screen adds to the open log.
-    pub log_view: Option<LogView>,
     /// The number of the open log view. Lines for an older one are dropped.
     log_id: u64,
     /// Feeds a container's or project's log. Dropping it stops `docker logs`.
@@ -183,22 +183,17 @@ pub struct Docker {
     /// False in tests: nothing is started and nothing is copied.
     live: bool,
     worker: Worker<Msg>,
-    pub hits: Hits<Action>,
-    /// Where the tab bar drew each tab.
-    pub tab_rects: Vec<Rect>,
-    pub mouse: Option<(u16, u16)>,
     pub tick: usize,
-    last_click: Option<(String, Instant)>,
     pub should_quit: bool,
 }
 
-impl Default for Docker {
+impl Default for DockerState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Docker {
+impl DockerState {
     /// The tool before it is first opened. It asks Docker nothing yet.
     pub fn new() -> Self {
         Self {
@@ -210,7 +205,6 @@ impl Docker {
             filtering: false,
             dialog: Dialog::None,
             log: None,
-            log_view: None,
             log_id: 0,
             log_stream: None,
             action_stream: None,
@@ -229,18 +223,14 @@ impl Docker {
             loaded_at: None,
             live: true,
             worker: Worker::default(),
-            hits: Hits::default(),
-            tab_rects: Vec::new(),
-            mouse: None,
             tick: 0,
-            last_click: None,
             should_quit: false,
         }
     }
 
     /// A tool that holds these lists and never runs `docker`, for tests.
     #[cfg(test)]
-    pub fn for_test(lists: Lists) -> Self {
+    pub fn offline(lists: Lists) -> Self {
         let mut docker = Self::new();
         docker.live = false;
         docker.engine = Engine::Ready;
@@ -644,24 +634,6 @@ impl Docker {
 
     // ---- events -----------------------------------------------------
 
-    pub fn on_event(&mut self, event: Event) {
-        match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
-            Event::Paste(text) => self.paste(&text),
-            Event::Mouse(mouse) => {
-                self.mouse = Some((mouse.column, mouse.row));
-                match mouse.kind {
-                    // The shell passes on a release only for a click.
-                    MouseEventKind::Up(MouseButton::Left) => self.click(mouse.column, mouse.row),
-                    MouseEventKind::ScrollUp => self.wheel(-3),
-                    MouseEventKind::ScrollDown => self.wheel(3),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn paste(&mut self, text: &str) {
         let text: String = text.chars().filter(|ch| !ch.is_control()).collect();
         if let Some(log) = self.log.as_mut() {
@@ -674,102 +646,29 @@ impl Docker {
         }
     }
 
-    fn wheel(&mut self, delta: isize) {
-        if let Some(log) = self.log.as_mut() {
-            let view = self.log_view.get_or_insert_with(LogView::new);
-            view.scroll_by(log, delta);
-        } else if self.dialog == Dialog::None {
-            self.move_by(delta);
+    /// `/`: opens the filter field, empty.
+    fn start_filter(&mut self) {
+        self.filtering = true;
+        self.view_mut().filter.clear();
+        self.filter_changed();
+    }
+
+    /// Esc in the list: drops the ticks, or else the filter.
+    fn clear_ticks_or_filter(&mut self) {
+        let view = self.view_mut();
+        if !view.marked.is_empty() {
+            view.marked.clear();
+        } else if !view.filter.is_empty() {
+            view.filter.clear();
+            self.filter_changed();
         }
     }
 
-    fn on_key(&mut self, key: KeyEvent) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
-            self.should_quit = true;
-            return;
-        }
-        if let Some(log) = self.log.as_mut() {
-            let view = self.log_view.get_or_insert_with(LogView::new);
-            if view.on_key(log, key) == log::Outcome::Close {
-                self.close_log();
-            }
-            return;
-        }
-        match &self.dialog {
-            Dialog::Menu { .. } => self.on_menu_key(key),
-            Dialog::Confirm(_) => self.on_confirm_key(key),
-            Dialog::Error { .. } => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char(' ')
-                ) {
-                    self.dialog = Dialog::None;
-                }
-            }
-            Dialog::None if self.filtering => self.on_filter_key(key),
-            Dialog::None => self.on_list_key(key, ctrl),
-        }
-    }
-
-    fn on_list_key(&mut self, key: KeyEvent, ctrl: bool) {
-        if tabs::on_key(&mut self.tab, key, TABS.len()) {
-            self.ensure_selection();
-            return;
-        }
-        match key.code {
-            KeyCode::Char('a') | KeyCode::Char('A') if ctrl => self.mark_all(),
-            KeyCode::Char(' ') => self.toggle_mark(),
-            KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
-            KeyCode::PageUp => self.move_by(-10),
-            KeyCode::PageDown => self.move_by(10),
-            KeyCode::Home => self.move_to_end(true),
-            KeyCode::End => self.move_to_end(false),
-            KeyCode::Enter => self.enter_row(),
-            KeyCode::Left => self.fold_selected(true),
-            KeyCode::Right => self.fold_selected(false),
-            KeyCode::Char('s') | KeyCode::Char('S') => self.toggle(),
-            KeyCode::Char('R') => self.run_verb(Verb::Restart),
-            KeyCode::Char('l') | KeyCode::Char('L') => self.run_verb(Verb::Logs),
-            KeyCode::Char('d') | KeyCode::Delete => self.remove(),
-            KeyCode::Char('p') | KeyCode::Char('P') => self.prune(),
-            KeyCode::Char('r') | KeyCode::F(5) => self.refresh(),
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('/') => {
-                self.filtering = true;
-                self.view_mut().filter.clear();
-                self.filter_changed();
-            }
-            KeyCode::Esc => {
-                let view = self.view_mut();
-                if !view.marked.is_empty() {
-                    view.marked.clear();
-                } else if !view.filter.is_empty() {
-                    view.filter.clear();
-                    self.filter_changed();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn on_filter_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.filtering = false;
-                self.view_mut().filter.clear();
-                self.filter_changed();
-            }
-            KeyCode::Enter => self.filtering = false,
-            KeyCode::Up => self.move_by(-1),
-            KeyCode::Down => self.move_by(1),
-            _ => {
-                if input::edit(&mut self.view_mut().filter, key, Alt::Ignored) {
-                    self.filter_changed();
-                }
-            }
-        }
+    /// Esc in the filter field: leaves it and drops the filter.
+    fn drop_filter(&mut self) {
+        self.filtering = false;
+        self.view_mut().filter.clear();
+        self.filter_changed();
     }
 
     fn filter_changed(&mut self) {
@@ -888,20 +787,10 @@ impl Docker {
         };
     }
 
-    fn on_menu_key(&mut self, key: KeyEvent) {
-        let Dialog::Menu { verbs, selected } = &mut self.dialog else {
-            return;
-        };
-        let keys: Vec<char> = verbs.iter().map(|verb| verb.key()).collect();
-        match menu::on_key(selected, key, &keys) {
-            menu::Outcome::Stay => {}
-            menu::Outcome::Close => self.dialog = Dialog::None,
-            menu::Outcome::Run(index) => {
-                let verb = verbs[index];
-                self.dialog = Dialog::None;
-                self.run_verb(verb);
-            }
-        }
+    /// A line of the menu was chosen: closes the menu and does what it says.
+    fn run_from_menu(&mut self, verb: Verb) {
+        self.dialog = Dialog::None;
+        self.run_verb(verb);
     }
 
     /// Does what a line of the menu, or its key in the list, says.
@@ -1074,24 +963,6 @@ impl Docker {
 
     // ---- confirmations ----------------------------------------------
 
-    fn on_confirm_key(&mut self, key: KeyEvent) {
-        let Dialog::Confirm(confirm) = &mut self.dialog else {
-            return;
-        };
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
-                self.dialog = Dialog::None;
-            }
-            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let choice = confirm.default_choice();
-                self.answer(choice);
-            }
-            KeyCode::Char('f') | KeyCode::Char('F') => self.answer(Choice::Force),
-            KeyCode::Char(' ') => confirm.toggle(),
-            _ => {}
-        }
-    }
-
     /// A button of the confirmation was chosen.
     pub fn answer(&mut self, choice: Choice) {
         let Dialog::Confirm(confirm) = &self.dialog else {
@@ -1224,7 +1095,6 @@ impl Docker {
         self.log_stream = None;
         self.log_id += 1;
         self.log = Some(LogBuffer::new(title));
-        self.log_view = Some(LogView::new());
         self.log_id
     }
 
@@ -1259,53 +1129,21 @@ impl Docker {
     /// output was shown goes on.
     fn close_log(&mut self) {
         self.log = None;
-        self.log_view = None;
         self.log_stream = None;
     }
 
     // ---- the mouse --------------------------------------------------
 
-    fn click(&mut self, x: u16, y: u16) {
-        if self.log.is_some() {
-            return;
-        }
-        if let Some(action) = self.hits.button_at(x, y) {
-            self.run(action);
-            return;
-        }
-        if self.dialog == Dialog::None
-            && let Some(index) = self.tab_rects.iter().position(|rect| contains(*rect, x, y))
-        {
-            self.tab = index;
-            self.filtering = false;
-            self.ensure_selection();
-            return;
-        }
-        if let Some(name) = self.hits.row_at(x, y) {
-            self.click_row(name);
-        }
+    /// Goes to the tab with this number, out of the filter field.
+    fn switch_tab(&mut self, index: usize) {
+        self.tab = index;
+        self.filtering = false;
+        self.ensure_selection();
     }
 
-    fn click_row(&mut self, name: String) {
-        if let Dialog::Menu { verbs, .. } = &self.dialog {
-            if let Some(verb) = name
-                .strip_prefix("menu:")
-                .and_then(|index| index.parse::<usize>().ok())
-                .and_then(|index| verbs.get(index).copied())
-            {
-                self.dialog = Dialog::None;
-                self.run_verb(verb);
-            }
-            return;
-        }
-        if self.dialog != Dialog::None {
-            return;
-        }
-        let now = Instant::now();
-        let double = self.last_click.as_ref().is_some_and(|(previous, at)| {
-            *previous == name && now.duration_since(*at) < Duration::from_millis(400)
-        });
-        self.last_click = Some((name.clone(), now));
+    /// Highlights the row with this key. On a project's header it folds or
+    /// unfolds the project; `double`, on any other row, opens the actions.
+    fn select_row(&mut self, name: String, double: bool) {
         self.view_mut().selected = Some(name.clone());
         // A click on a project's header folds or unfolds it.
         if let Some(group) = name.strip_prefix(GROUP_KEY) {
@@ -1335,8 +1173,307 @@ impl Docker {
     }
 }
 
+/// The Docker tool in the terminal: its state, and what the screen and
+/// the mouse add to it.
+pub struct Docker {
+    pub core: DockerState,
+    pub hits: Hits<Action>,
+    /// Where the tab bar drew each tab.
+    pub tab_rects: Vec<Rect>,
+    pub mouse: Option<(u16, u16)>,
+    last_click: Option<(String, Instant)>,
+    /// What the screen adds to the core's open log. There is one exactly
+    /// while the core has a log.
+    pub log_view: Option<LogView>,
+}
+
+impl Deref for Docker {
+    type Target = DockerState;
+
+    fn deref(&self) -> &DockerState {
+        &self.core
+    }
+}
+
+impl DerefMut for Docker {
+    fn deref_mut(&mut self) -> &mut DockerState {
+        &mut self.core
+    }
+}
+
+impl Default for Docker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Docker {
+    /// The tool before it is first opened. It asks Docker nothing yet.
+    pub fn new() -> Self {
+        Self::wrap(DockerState::new())
+    }
+
+    /// A tool that holds these lists and never runs `docker`, for tests.
+    #[cfg(test)]
+    pub fn for_test(lists: Lists) -> Self {
+        Self::wrap(DockerState::offline(lists))
+    }
+
+    fn wrap(core: DockerState) -> Self {
+        Self {
+            core,
+            hits: Hits::default(),
+            tab_rects: Vec::new(),
+            mouse: None,
+            last_click: None,
+            log_view: None,
+        }
+    }
+
+    /// Takes in what the threads reported, as the core does, and keeps
+    /// the log view in step with the core's log.
+    pub fn drain(&mut self) -> bool {
+        let changed = self.core.drain();
+        self.sync_log_view();
+        changed
+    }
+
+    /// A log view is made when the core opens a log and dropped when the
+    /// core closes it.
+    fn sync_log_view(&mut self) {
+        if self.core.log.is_none() {
+            self.log_view = None;
+        } else if self.log_view.is_none() {
+            self.log_view = Some(LogView::new());
+        }
+    }
+
+    pub fn on_event(&mut self, event: Event) {
+        self.sync_log_view();
+        match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
+            Event::Paste(text) => self.paste(&text),
+            Event::Mouse(mouse) => {
+                self.mouse = Some((mouse.column, mouse.row));
+                match mouse.kind {
+                    // The shell passes on a release only for a click.
+                    MouseEventKind::Up(MouseButton::Left) => self.click(mouse.column, mouse.row),
+                    MouseEventKind::ScrollUp => self.wheel(-3),
+                    MouseEventKind::ScrollDown => self.wheel(3),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        self.sync_log_view();
+    }
+
+    fn wheel(&mut self, delta: isize) {
+        if let Some(log) = self.core.log.as_mut() {
+            let view = self.log_view.get_or_insert_with(LogView::new);
+            view.scroll_by(log, delta);
+        } else if self.dialog == Dialog::None {
+            self.move_by(delta);
+        }
+    }
+
+    fn on_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
+            self.should_quit = true;
+            return;
+        }
+        if let Some(log) = self.core.log.as_mut() {
+            let view = self.log_view.get_or_insert_with(LogView::new);
+            if view.on_key(log, key) == log::Outcome::Close {
+                self.close_log();
+            }
+            return;
+        }
+        match &self.dialog {
+            Dialog::Menu { .. } => self.on_menu_key(key),
+            Dialog::Confirm(_) => self.on_confirm_key(key),
+            Dialog::Error { .. } => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char(' ')
+                ) {
+                    self.dialog = Dialog::None;
+                }
+            }
+            Dialog::None if self.filtering => self.on_filter_key(key),
+            Dialog::None => self.on_list_key(key, ctrl),
+        }
+    }
+
+    fn on_list_key(&mut self, key: KeyEvent, ctrl: bool) {
+        if tabs::on_key(&mut self.tab, key, TABS.len()) {
+            self.ensure_selection();
+            return;
+        }
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') if ctrl => self.mark_all(),
+            KeyCode::Char(' ') => self.toggle_mark(),
+            KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
+            KeyCode::PageUp => self.move_by(-10),
+            KeyCode::PageDown => self.move_by(10),
+            KeyCode::Home => self.move_to_end(true),
+            KeyCode::End => self.move_to_end(false),
+            KeyCode::Enter => self.enter_row(),
+            KeyCode::Left => self.fold_selected(true),
+            KeyCode::Right => self.fold_selected(false),
+            KeyCode::Char('s') | KeyCode::Char('S') => self.toggle(),
+            KeyCode::Char('R') => self.run_verb(Verb::Restart),
+            KeyCode::Char('l') | KeyCode::Char('L') => self.run_verb(Verb::Logs),
+            KeyCode::Char('d') | KeyCode::Delete => self.remove(),
+            KeyCode::Char('p') | KeyCode::Char('P') => self.prune(),
+            KeyCode::Char('r') | KeyCode::F(5) => self.refresh(),
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('/') => self.start_filter(),
+            KeyCode::Esc => self.clear_ticks_or_filter(),
+            _ => {}
+        }
+    }
+
+    fn on_filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.drop_filter(),
+            KeyCode::Enter => self.filtering = false,
+            KeyCode::Up => self.move_by(-1),
+            KeyCode::Down => self.move_by(1),
+            _ => {
+                if input::edit(&mut self.view_mut().filter, key, Alt::Ignored) {
+                    self.filter_changed();
+                }
+            }
+        }
+    }
+
+    fn on_menu_key(&mut self, key: KeyEvent) {
+        let Dialog::Menu { verbs, selected } = &mut self.core.dialog else {
+            return;
+        };
+        let keys: Vec<char> = verbs.iter().map(|verb| verb.key()).collect();
+        match menu::on_key(selected, key, &keys) {
+            menu::Outcome::Stay => {}
+            menu::Outcome::Close => self.dialog = Dialog::None,
+            menu::Outcome::Run(index) => {
+                let verb = verbs[index];
+                self.run_from_menu(verb);
+            }
+        }
+    }
+
+    fn on_confirm_key(&mut self, key: KeyEvent) {
+        let Dialog::Confirm(confirm) = &mut self.core.dialog else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {
+                self.dialog = Dialog::None;
+            }
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let choice = confirm.default_choice();
+                self.answer(choice);
+            }
+            KeyCode::Char('f') | KeyCode::Char('F') => self.answer(Choice::Force),
+            KeyCode::Char(' ') => confirm.toggle(),
+            _ => {}
+        }
+    }
+
+    fn click(&mut self, x: u16, y: u16) {
+        if self.log.is_some() {
+            return;
+        }
+        if let Some(action) = self.hits.button_at(x, y) {
+            self.run(action);
+            return;
+        }
+        if self.dialog == Dialog::None
+            && let Some(index) = self.tab_rects.iter().position(|rect| contains(*rect, x, y))
+        {
+            self.switch_tab(index);
+            return;
+        }
+        if let Some(name) = self.hits.row_at(x, y) {
+            self.click_row(name);
+        }
+    }
+
+    fn click_row(&mut self, name: String) {
+        if let Dialog::Menu { verbs, .. } = &self.dialog {
+            if let Some(verb) = name
+                .strip_prefix("menu:")
+                .and_then(|index| index.parse::<usize>().ok())
+                .and_then(|index| verbs.get(index).copied())
+            {
+                self.run_from_menu(verb);
+            }
+            return;
+        }
+        if self.dialog != Dialog::None {
+            return;
+        }
+        let now = Instant::now();
+        let double = self.last_click.as_ref().is_some_and(|(previous, at)| {
+            *previous == name && now.duration_since(*at) < Duration::from_millis(400)
+        });
+        self.last_click = Some((name.clone(), now));
+        self.select_row(name, double);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::features::docker::model::samples;
+
+    fn docker() -> DockerState {
+        DockerState::offline(samples::lists())
+    }
+
+    #[test]
+    fn nothing_is_asked_of_docker_until_the_tool_is_opened() {
+        let docker = DockerState::new();
+        assert_eq!(docker.engine, Engine::Idle);
+        assert!(!docker.waiting());
+        assert!(!docker.modal());
+    }
+
+    #[test]
+    fn an_answer_to_a_load_that_was_given_up_is_dropped() {
+        let mut docker = docker();
+        docker.load_id = 7;
+        docker.loading = true;
+        docker.on_msg(Msg::Loaded(6, Err(Failure::Missing)));
+        assert_eq!(docker.engine, Engine::Ready);
+        assert!(docker.loading);
+        docker.on_msg(Msg::Loaded(7, Err(Failure::Missing)));
+        assert_eq!(docker.engine, Engine::Missing);
+        assert!(!docker.loading);
+    }
+
+    #[test]
+    fn docker_missing_or_down_is_told_apart() {
+        let mut docker = docker();
+        docker.on_msg(Msg::Loaded(0, Err(Failure::Missing)));
+        assert_eq!(docker.engine, Engine::Missing);
+        assert!(docker.lists.containers.is_empty());
+        docker.on_msg(Msg::Loaded(
+            0,
+            Err(Failure::Failed("pipe not found".into())),
+        ));
+        assert_eq!(docker.engine, Engine::Down("pipe not found".into()));
+        docker.on_msg(Msg::Loaded(0, Ok(samples::lists())));
+        assert_eq!(docker.engine, Engine::Ready);
+        assert_eq!(docker.lists.containers.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
     use super::*;
     use crate::features::docker::model::samples;
 
@@ -1376,14 +1513,6 @@ mod tests {
             .iter()
             .find(|c| c.id == key)
             .map_or(key, |c| c.name.clone())
-    }
-
-    #[test]
-    fn nothing_is_asked_of_docker_until_the_tool_is_opened() {
-        let docker = Docker::new();
-        assert_eq!(docker.engine, Engine::Idle);
-        assert!(!docker.waiting());
-        assert!(!docker.modal());
     }
 
     #[test]
@@ -1635,19 +1764,6 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_to_a_load_that_was_given_up_is_dropped() {
-        let mut docker = docker();
-        docker.load_id = 7;
-        docker.loading = true;
-        docker.on_msg(Msg::Loaded(6, Err(Failure::Missing)));
-        assert_eq!(docker.engine, Engine::Ready);
-        assert!(docker.loading);
-        docker.on_msg(Msg::Loaded(7, Err(Failure::Missing)));
-        assert_eq!(docker.engine, Engine::Missing);
-        assert!(!docker.loading);
-    }
-
-    #[test]
     fn several_projects_are_not_taken_down_at_once() {
         let mut docker = docker();
         docker.tab = COMPOSE;
@@ -1771,22 +1887,6 @@ mod tests {
         assert!(docker.view().marked.is_empty());
         assert!(docker.view().selected.is_some());
         assert_ne!(selected_name(&docker), "backups");
-    }
-
-    #[test]
-    fn docker_missing_or_down_is_told_apart() {
-        let mut docker = docker();
-        docker.on_msg(Msg::Loaded(0, Err(Failure::Missing)));
-        assert_eq!(docker.engine, Engine::Missing);
-        assert!(docker.lists.containers.is_empty());
-        docker.on_msg(Msg::Loaded(
-            0,
-            Err(Failure::Failed("pipe not found".into())),
-        ));
-        assert_eq!(docker.engine, Engine::Down("pipe not found".into()));
-        docker.on_msg(Msg::Loaded(0, Ok(samples::lists())));
-        assert_eq!(docker.engine, Engine::Ready);
-        assert_eq!(docker.lists.containers.len(), 4);
     }
 
     #[test]

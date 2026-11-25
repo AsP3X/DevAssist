@@ -57,7 +57,7 @@ impl Feature for Docker {
     }
 
     fn modal(&self) -> bool {
-        Docker::modal(self)
+        self.core.modal()
     }
 
     fn help(&self) -> &'static str {
@@ -65,7 +65,7 @@ impl Feature for Docker {
     }
 
     fn shown(&mut self) {
-        Docker::shown(self);
+        self.core.shown();
     }
 
     fn on_event(&mut self, event: Event) {
@@ -77,7 +77,7 @@ impl Feature for Docker {
     }
 
     fn waiting(&self) -> bool {
-        Docker::waiting(self)
+        self.core.waiting()
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect) {
