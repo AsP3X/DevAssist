@@ -253,7 +253,7 @@ pub fn startup() -> Result<Startup, String> {
     let watched: Vec<PathBuf> = stored
         .watched
         .into_iter()
-        .filter(|path| checkouts.iter().any(|known| same_path(known, path)))
+        .filter(|path| listed(&checkouts, path))
         .collect();
     let watch_interval = stored.watch_interval;
     let pull_requests = stored.pull_requests;
@@ -681,8 +681,9 @@ pub fn save_changes(path: &Path, before: &Saved, after: &Saved) -> Result<(), St
 
 /// `after` where it differs from `before`, otherwise `file`. Lists take
 /// over the entries this program added or removed, not the whole list.
-/// Every field is named, so a new one does not compile until it is
-/// merged here too.
+/// Watches and groups of checkouts that are not listed are dropped, as
+/// at the start. Every field is named, so a new one does not compile
+/// until it is merged here too.
 fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
     fn pick<T: Clone + PartialEq>(before: &T, after: &T, file: T) -> T {
         if after == before { file } else { after.clone() }
@@ -718,7 +719,7 @@ fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
     } else {
         (owners, owners_set)
     };
-    Saved {
+    let mut merged = Saved {
         title: pick(&before.title, &after.title, title),
         owners,
         owners_set,
@@ -747,7 +748,19 @@ fn merge(before: &Saved, after: &Saved, file: Saved) -> Saved {
         pull_requests: pick(&before.pull_requests, &after.pull_requests, pull_requests),
         shell: pick(&before.shell, &after.shell, shell),
         look: pick(&before.look, &after.look, look),
-    }
+    };
+    merged
+        .watched
+        .retain(|path| listed(&merged.checkouts, path));
+    merged
+        .placement
+        .retain(|(path, _)| listed(&merged.checkouts, path));
+    merged
+}
+
+/// Whether `path` is one of `checkouts`.
+fn listed(checkouts: &[PathBuf], path: &Path) -> bool {
+    checkouts.iter().any(|known| same_path(known, path))
 }
 
 /// The file's list with the entries this program added since `before`
@@ -1900,6 +1913,25 @@ mod tests {
             read.owners,
             vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
         );
+    }
+
+    #[test]
+    fn a_save_drops_a_watch_on_a_checkout_that_is_not_listed() {
+        // Were it kept, the checkout would be pulled on its own as soon as
+        // it is listed again, without anyone asking for that.
+        let path = temp_file("merge-stale-watch");
+        let before = one_checkout();
+        other_program_writes(&path, &before, |theirs| {
+            theirs.watched.push(PathBuf::from("/srv/code/gone"))
+        });
+        let after = Saved {
+            watch_interval: 10,
+            ..before.clone()
+        };
+        save_changes(&path, &before, &after).unwrap();
+        let read = read_back(&path);
+        assert_eq!(read.watch_interval, 10);
+        assert_eq!(read.watched, Vec::<PathBuf>::new());
     }
 
     #[test]
