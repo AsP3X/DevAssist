@@ -636,11 +636,13 @@ fn pull_prefix(branches: &[String]) -> &'static str {
         .unwrap_or("devassist-pull")
 }
 
-/// Checks an address a repository is to be pushed to, and tidies it.
-/// Web and SSH addresses pass, and a folder that exists, for a bare
-/// repository on a disk. Anything Git would read as an option or as a
-/// command to run does not.
-pub fn push_address(input: &str) -> Result<String, String> {
+/// Checks an address the checkout at `checkout` is to be pushed to, and
+/// tidies it. Web and SSH addresses pass, and the full path of a folder
+/// that exists, for a bare repository on a disk: a relative path is
+/// refused, since Git would read it from inside the checkout, and so is
+/// the checkout itself or a folder inside it. Anything Git would read as
+/// an option or as a command to run does not pass.
+pub fn push_address(input: &str, checkout: &Path) -> Result<String, String> {
     let url = input.trim();
     if url.is_empty() {
         return Err("Type the address of the empty repository on the other service.".into());
@@ -651,11 +653,41 @@ pub fn push_address(input: &str) -> Result<String, String> {
         .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len());
     let plain =
         !url.starts_with('-') && !url.chars().any(|ch| ch.is_control() || ch.is_whitespace());
-    if plain && (scheme || scp_host(url).is_some() || Path::new(url).is_dir()) {
+    let refused = || {
+        Err("That is not an address Git can push to. It looks like https://host/you/name.git or git@host:you/name.git.".into())
+    };
+    if !plain {
+        return refused();
+    }
+    if scheme || scp_host(url).is_some() {
+        return Ok(url.to_string());
+    }
+    let folder = Path::new(url);
+    if !folder.is_absolute() {
+        return Err("Type the full path of the folder, or the address of the repository.".into());
+    }
+    if paths::is_within(folder, checkout) {
+        return Err("That folder is this repository itself, or inside it.".into());
+    }
+    if folder.is_dir() {
         Ok(url.to_string())
     } else {
-        Err("That is not an address Git can push to. It looks like https://host/you/name.git or git@host:you/name.git.".into())
+        refused()
     }
+}
+
+/// The remotes the checkout at `path` has, each with its address; none
+/// when Git cannot tell.
+pub fn remote_urls(path: &Path) -> Vec<(String, String)> {
+    git_lines(path, &["config", "--get-regexp", r"^remote\..*\.url$"])
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|line| {
+            let (key, url) = line.split_once(' ')?;
+            let name = key.strip_prefix("remote.")?.strip_suffix(".url")?;
+            Some((name.to_string(), url.trim().to_string()))
+        })
+        .collect()
 }
 
 /// The host of an address written the short SSH way, `git@host:you/name`.
@@ -759,7 +791,7 @@ pub fn migrate_to(
     token: Option<&str>,
     mut on_line: impl FnMut(&str, bool),
 ) -> Result<Migrated, String> {
-    let url = push_address(url)?;
+    let url = push_address(url, path)?;
     let same = |a: &str, b: &str| {
         let tidy = |text: &str| {
             text.trim()
@@ -3463,7 +3495,10 @@ refs/remotes/fork/dev\tiii\t\t
             "  git@codeberg.org:you/api.git ",
             "ssh://git@git.example.com:2222/you/api",
         ] {
-            assert_eq!(push_address(good).unwrap(), good.trim());
+            assert_eq!(
+                push_address(good, Path::new("/srv/api")).unwrap(),
+                good.trim()
+            );
         }
         // Nothing Git would take as an option or as a command to run.
         for bad in [
@@ -3475,7 +3510,7 @@ refs/remotes/fork/dev\tiii\t\t
             "gitlab.com/you/api",
             "https://gitlab.com/you/a pi.git",
         ] {
-            assert!(push_address(bad).is_err(), "{bad}");
+            assert!(push_address(bad, Path::new("/srv/api")).is_err(), "{bad}");
         }
         assert_eq!(remote_name_for("https://gitlab.com/you/api.git"), "gitlab");
         assert_eq!(remote_name_for("git@codeberg.org:you/api.git"), "codeberg");
@@ -3489,6 +3524,40 @@ refs/remotes/fork/dev\tiii\t\t
             address_host("ssh://git@git.example.com:2222/you/api").as_deref(),
             Some("git.example.com")
         );
+    }
+
+    #[test]
+    fn a_folder_to_push_to_is_a_full_path_outside_the_checkout() {
+        let root = std::env::temp_dir().join(format!("devassist-push-path-{}", std::process::id()));
+        let checkout = root.join("api");
+        let inside = checkout.join("sub");
+        let target = root.join("target.git");
+        for dir in [&inside, &target] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let full = "Type the full path of the folder, or the address of the repository.";
+        // Git reads a relative path from inside the checkout: "." would be the checkout itself.
+        for relative in [".", "..", "target.git", "../target.git", "api"] {
+            assert_eq!(
+                push_address(relative, &checkout).unwrap_err(),
+                full,
+                "{relative}"
+            );
+        }
+        let itself = "That folder is this repository itself, or inside it.";
+        for own in [&checkout, &inside] {
+            assert_eq!(
+                push_address(&own.display().to_string(), &checkout).unwrap_err(),
+                itself,
+                "{}",
+                own.display()
+            );
+        }
+        let address = target.display().to_string();
+        assert_eq!(push_address(&address, &checkout).unwrap(), address);
+        // A full path that is no folder is no address.
+        assert!(push_address(&root.join("nothing").display().to_string(), &checkout).is_err());
+        let _ = remove_tree(&root);
     }
 
     #[test]

@@ -31,6 +31,9 @@ pub const OPEN_LIMIT: usize = 8;
 pub const JOB_LINGER: Duration = Duration::from_millis(1200);
 /// What the status line says when held work was asked for (see `Repos::hold_work`).
 pub const HELD: &str = "This is a demo. Nothing is run or changed.";
+/// What the status line says when a push to another service was cancelled.
+const PUSH_CANCELLED: &str =
+    "Cancelled. What was already sent stays on the other service; the address was not kept.";
 /// How the status line starts while an automatic pull runs.
 const WATCH_LABEL: &str = "Auto-pull: checking";
 
@@ -673,6 +676,15 @@ pub struct Repos {
     /// while local work runs as always: set by `testing::hold_github`, for
     /// the tests that run real work on checkouts whose origin names GitHub.
     github_held: bool,
+    /// Where a token for GitHub comes from: `github::token`, or a test's own
+    /// (`testing::token_source`). Never asked while GitHub is held.
+    token_source: fn() -> Option<String>,
+    /// The remotes of the checkout the service dialog is open for, with
+    /// their addresses: read once when it opens.
+    service_remotes: Vec<(String, String)>,
+    /// The run is a push to another service: a cancel of it says what
+    /// stays there.
+    push_running: bool,
     /// What the status line said before an automatic pull took it over.
     /// A pull that brings nothing puts it back.
     watch_status: Option<(String, bool)>,
@@ -830,6 +842,9 @@ impl Repos {
             watch_due: Instant::now(),
             work_held: false,
             github_held: false,
+            token_source: github::token,
+            service_remotes: Vec::new(),
+            push_running: false,
             watch_status: None,
             pulls: HashMap::new(),
             pulls_generation: 0,
@@ -1646,14 +1661,21 @@ impl Repos {
     /// Asks for the address of the repository on another service. One
     /// repository at a time: each goes to an address of its own.
     fn open_service(&mut self) {
-        let repos: Vec<(String, PathBuf)> = self
+        let repos: Vec<(String, PathBuf, String)> = self
             .chosen_repos()
             .iter()
-            .map(|repo| (repo.folder.clone(), repo.path.clone()))
+            .map(|repo| (repo.folder.clone(), repo.path.clone(), repo.origin.clone()))
             .collect();
         match repos.as_slice() {
             [] => self.notice("Select a repository first.", true),
-            [(repo, path)] => {
+            [(repo, path, origin)] => {
+                // Held (a demo), the row's origin stands for its remotes:
+                // no git is run.
+                self.service_remotes = if self.work_held {
+                    vec![("origin".to_string(), origin.clone())]
+                } else {
+                    gitops::remote_urls(path)
+                };
                 self.service_prompt = Some(ServicePrompt {
                     repo: repo.clone(),
                     path: path.clone(),
@@ -1692,7 +1714,7 @@ impl Repos {
         let Some(prompt) = self.service_prompt.as_mut() else {
             return;
         };
-        let url = match gitops::push_address(&prompt.input) {
+        let url = match gitops::push_address(&prompt.input, &prompt.path) {
             Ok(url) => url,
             Err(err) => {
                 prompt.error = Some(err);
@@ -1711,19 +1733,35 @@ impl Repos {
         self.submit(Queued::Service(prompt.repo, prompt.path, url));
     }
 
-    /// What a push to another service takes over (`goes`) and what it
-    /// leaves as it is or does not do, as `gitops::migrate_to` works. The
-    /// last line names the remote the address is kept as, once the
-    /// service dialog has an address a push can use.
+    /// What a push to another service takes over or does (`goes`) and what
+    /// it leaves as it is or does not do, as `gitops::migrate_to` works.
+    /// The fourth names the remote the address is kept as once the service
+    /// dialog has an address a push can use, and says when a remote of
+    /// that name this checkout has already is pointed at it.
     pub fn service_facts(&self) -> Vec<Fact> {
-        let remote = self
+        let url = self
             .service_prompt
             .as_ref()
-            .and_then(|prompt| gitops::push_address(&prompt.input).ok())
-            .map_or_else(
-                || "one more remote, named after its host".to_string(),
-                |url| format!("the remote {}", gitops::remote_name_for(&url)),
-            );
+            .and_then(|prompt| gitops::push_address(&prompt.input, &prompt.path).ok());
+        let kept = url.as_ref().map_or_else(
+            || "This checkout keeps its files and origin, and keeps the address as one more remote, named after its host.".to_string(),
+            |url| {
+                let name = gitops::remote_name_for(url);
+                let repointed = self
+                    .service_remotes
+                    .iter()
+                    .any(|(known, address)| *known == name && address.trim() != url);
+                let mut words = format!(
+                    "This checkout keeps its files and origin, and keeps the address as the remote {name}."
+                );
+                if repointed {
+                    words.push_str(
+                        " A remote of that name that this checkout already has is pointed at the new address.",
+                    );
+                }
+                words
+            },
+        );
         let fact = |goes: bool, words: &str| Fact {
             goes,
             words: words.to_string(),
@@ -1735,12 +1773,13 @@ impl Repos {
             ),
             fact(
                 true,
-                "Origin is fetched first; if it cannot be reached, what is saved here goes.",
+                "Origin, if there is one, is fetched first; if it cannot be reached, what is saved here goes.",
             ),
             fact(
                 true,
-                "Every pull request, open, merged or closed, goes over as a branch pull/<number> (or under another name if pull is taken here), replaced on every push.",
+                "Every GitHub pull request, open, merged or closed, goes over as a branch pull/<number> (or under another name if pull is taken here), replaced on every push.",
             ),
+            fact(true, &kept),
             fact(
                 false,
                 "Apart from those pull-request branches, nothing there is overwritten or deleted: a branch there only moves forward, so no commit there is lost.",
@@ -1749,13 +1788,21 @@ impl Repos {
                 false,
                 "A branch there that has commits the pushed branch lacks, or a tag there that differs from the pushed one, stops the push part-way with an error, before the address is kept.",
             ),
-            Fact {
-                goes: false,
-                words: format!(
-                    "No pull request is opened there, and no issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as {remote}."
-                ),
-            },
+            fact(
+                false,
+                "No pull request is opened there, and no issue, comment or release goes over.",
+            ),
         ]
+    }
+
+    /// Where a token for GitHub comes from now: nowhere while GitHub is
+    /// held (`testing::hold_github`), so a test never asks `gh` for one.
+    fn token_getter(&self) -> fn() -> Option<String> {
+        if self.github_held {
+            || None
+        } else {
+            self.token_source
+        }
     }
 
     /// Pushes every branch, tag and pull request of one checkout to
@@ -1764,12 +1811,14 @@ impl Repos {
     fn push_to_service(&mut self, name: String, path: PathBuf, url: String) {
         let host = gitops::address_host(&url).unwrap_or_else(|| url.clone());
         let job = gitprogress::job(format!("Pushing {name} to {host}"), vec![name.clone()], 0);
+        let token = self.token_getter();
+        self.push_running = true;
         self.start_job(
             format!("Pushing {name} to {host}…"),
             Some(job),
             move |tx| {
                 send(tx, JobEvent::Start(0));
-                let token = github::token();
+                let token = token();
                 let done = gitops::migrate_to(&path, &url, token.as_deref(), |line, progress| {
                     send_line(tx, line, progress)
                 })?;
@@ -4270,7 +4319,7 @@ impl Repos {
             }
             return;
         }
-        let token = if fetch { github::token() } else { None };
+        let token = if fetch { self.token_getter()() } else { None };
         let pull_requests = self.pull_requests;
         let queue = std::sync::Arc::new(std::sync::Mutex::new(repos));
         let workers = (if fetch { 4 } else { 8 }).min(self.status_pending.max(1));
@@ -4445,11 +4494,9 @@ impl Repos {
                         self.job_close_at = Some(Instant::now() + JOB_LINGER);
                     }
                 }
-                match result {
-                    Err(_) if cancelled => self.notice("Cancelled.".to_string(), false),
-                    Ok(message) => self.notice(message, false),
-                    Err(err) => self.notice(err, true),
-                }
+                let push = std::mem::take(&mut self.push_running);
+                let (words, error) = finished_words(result, cancelled, push);
+                self.notice(words, error);
                 process::clear_cancel();
                 self.generation += 1;
                 self.fetching = false;
@@ -4461,6 +4508,18 @@ impl Repos {
                 self.load_forks();
             }
         }
+    }
+}
+
+/// What the status line says when a run ends with `result`: "Cancelled."
+/// when it was `cancelled`, and for a `push` to another service also what
+/// stays there; else its message, or its error (true).
+fn finished_words(result: Result<String, String>, cancelled: bool, push: bool) -> (String, bool) {
+    match result {
+        Err(_) if cancelled && push => (PUSH_CANCELLED.to_string(), false),
+        Err(_) if cancelled => ("Cancelled.".to_string(), false),
+        Ok(message) => (message, false),
+        Err(err) => (err, true),
     }
 }
 
@@ -4735,6 +4794,12 @@ pub mod testing {
     /// always. For tests whose checkouts' origins name GitHub.
     pub fn hold_github(repos: &mut Repos) {
         repos.github_held = true;
+    }
+
+    /// Makes `source` where `repos` gets a token for GitHub from, in place
+    /// of `gh` and the environment: for a test that counts the asks.
+    pub fn token_source(repos: &mut Repos, source: fn() -> Option<String>) {
+        repos.token_source = source;
     }
 
     /// Four repositories at paths of their own, so groups can be saved.
@@ -6699,6 +6764,98 @@ mod tests {
         );
     }
 
+    /// How often [`counted_token`] was asked for a token.
+    static TOKENS_ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A token source that counts its asks and gives none.
+    fn counted_token() -> Option<String> {
+        TOKENS_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+
+    #[test]
+    fn a_push_while_github_is_held_asks_for_no_token() {
+        let temp = Temp::new("push-token");
+        let root = temp.0.clone();
+        let tool = root.join("tool");
+        std::fs::create_dir_all(&tool).unwrap();
+        git(&tool, &["init", "-q", "-b", "main"]);
+        std::fs::write(tool.join("one"), "one").unwrap();
+        git(&tool, &["add", "one"]);
+        git(&tool, &["commit", "-q", "-m", "one"]);
+        git(&root, &["init", "-q", "--bare", "target.git"]);
+        let address = root.join("target.git").display().to_string();
+        let settings = Settings {
+            config_path: root.join("devassist.toml"),
+            ..test_settings()
+        };
+        let mut app = Repos::empty(settings);
+        let mut repo = installed("acme", "tool");
+        repo.path = tool.clone();
+        app.checkouts.push(tool.clone());
+        app.installed.push(repo);
+        testing::token_source(&mut app, counted_token);
+        let push = |app: &mut Repos| {
+            app.clear_marks();
+            app.pick("tool");
+            app.run_migrate(MigrateItem::Service);
+            assert!(app.mode == Mode::Service, "{}", app.status);
+            app.set_service_input(&address);
+            app.accept_service();
+            finish(app);
+            assert!(
+                matches!(
+                    app.job.as_ref().and_then(|job| job.result.clone()),
+                    Some(Ok(_))
+                ),
+                "{}",
+                app.status
+            );
+        };
+        testing::hold_github(&mut app);
+        push(&mut app);
+        assert_eq!(
+            TOKENS_ASKED.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "held, a token was asked for"
+        );
+        // Not held, the same push asks the source: it is the one the push uses.
+        app.github_held = false;
+        push(&mut app);
+        assert_eq!(TOKENS_ASKED.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_cancelled_push_says_what_stays_there_and_other_runs_do_not() {
+        let cancelled = Err("cancelled".to_string());
+        assert_eq!(
+            finished_words(cancelled.clone(), true, true),
+            (
+                "Cancelled. What was already sent stays on the other service; the address was not kept.".to_string(),
+                false
+            )
+        );
+        assert_eq!(
+            finished_words(cancelled.clone(), true, false),
+            ("Cancelled.".to_string(), false)
+        );
+        // A push that failed, or went well, says so as every run does.
+        assert_eq!(
+            finished_words(Err("rejected".into()), false, true),
+            ("rejected".to_string(), true)
+        );
+        assert_eq!(
+            finished_words(Ok("Pushed.".into()), false, true),
+            ("Pushed.".to_string(), false)
+        );
+        // Only a push's run is marked as one, and the mark goes with it.
+        let mut app = Repos::empty(test_settings());
+        app.busy = true;
+        app.push_running = true;
+        app.on_msg(Msg::JobFinished(Ok("Pushed.".into())));
+        assert!(!app.push_running);
+    }
+
     #[test]
     fn the_push_facts_match_what_a_push_does() {
         let temp = Temp::new("push-facts");
@@ -6779,6 +6936,12 @@ mod tests {
         );
         let theirs = tip(&target, "refs/heads/theirs");
 
+        // Here, a remote of the name the address gets, at another address.
+        git(
+            &clone,
+            &["remote", "add", "mirror", "https://example.invalid/old.git"],
+        );
+
         let mut app = Repos::empty(test_settings());
         app.service_prompt = Some(ServicePrompt {
             repo: "tool".into(),
@@ -6786,6 +6949,8 @@ mod tests {
             input: address.clone(),
             error: None,
         });
+        // As the dialog reads them when it opens.
+        app.service_remotes = gitops::remote_urls(&clone);
         let facts = app.service_facts();
         let words: Vec<(bool, &str)> = facts
             .iter()
@@ -6800,11 +6965,15 @@ mod tests {
                 ),
                 (
                     true,
-                    "Origin is fetched first; if it cannot be reached, what is saved here goes."
+                    "Origin, if there is one, is fetched first; if it cannot be reached, what is saved here goes."
                 ),
                 (
                     true,
-                    "Every pull request, open, merged or closed, goes over as a branch pull/<number> (or under another name if pull is taken here), replaced on every push."
+                    "Every GitHub pull request, open, merged or closed, goes over as a branch pull/<number> (or under another name if pull is taken here), replaced on every push."
+                ),
+                (
+                    true,
+                    "This checkout keeps its files and origin, and keeps the address as the remote mirror. A remote of that name that this checkout already has is pointed at the new address."
                 ),
                 (
                     false,
@@ -6816,16 +6985,25 @@ mod tests {
                 ),
                 (
                     false,
-                    "No pull request is opened there, and no issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as the remote mirror."
+                    "No pull request is opened there, and no issue, comment or release goes over."
                 ),
             ]
         );
+        let kept = |app: &Repos| app.service_facts()[3].words.clone();
+        // No remote of that name: the second sentence is left out.
+        let remotes = std::mem::take(&mut app.service_remotes);
+        assert_eq!(
+            kept(&app),
+            "This checkout keeps its files and origin, and keeps the address as the remote mirror."
+        );
+        app.service_remotes = remotes;
         // Without a usable address, the remote is not named yet.
         app.service_prompt.as_mut().unwrap().input = "nowhere".into();
         assert_eq!(
-            app.service_facts().last().unwrap().words,
-            "No pull request is opened there, and no issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as one more remote, named after its host."
+            kept(&app),
+            "This checkout keeps its files and origin, and keeps the address as one more remote, named after its host."
         );
+        app.service_prompt.as_mut().unwrap().input = address.clone();
 
         // The push the dialog's Enter runs.
         let done = gitops::migrate_to(&clone, &address, None, |_, _| {}).unwrap();
@@ -6892,6 +7070,20 @@ mod tests {
         );
         assert_eq!(done.remote, "mirror");
         assert!(saved.contains("[remote \"mirror\"]"), "{saved}");
+        // 4. The remote of that name that was here points at the address now;
+        // it was not added twice.
+        let remotes = gitops::remote_urls(&clone);
+        assert!(
+            remotes.contains(&("mirror".to_string(), address.clone())),
+            "{remotes:?}"
+        );
+        assert_eq!(saved.matches("[remote \"mirror\"]").count(), 1, "{saved}");
+        app.service_remotes = remotes;
+        assert_eq!(
+            kept(&app),
+            "This checkout keeps its files and origin, and keeps the address as the remote mirror.",
+            "a remote at the address already is not repointed"
+        );
 
         // 3. Replaced on every push, though that is no fast-forward.
         git(&upstream, &["checkout", "-q", "--detach", "main"]);
