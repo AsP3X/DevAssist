@@ -6151,7 +6151,17 @@ mod tests {
             .clone();
         let forks = gitops::forks_folder(&path).unwrap();
         std::fs::create_dir_all(forks.join(".git")).unwrap();
+        // Held (a demo), the menu looks for no folder: the forks count as not cloned.
         app.enter_row();
+        assert_eq!(
+            app.menu.as_ref().unwrap().label(MenuItem::Forks),
+            "Clone the forks"
+        );
+        app.close_menu();
+        // Not held, it looks; opening the menu starts no work.
+        app.work_held = false;
+        app.enter_row();
+        assert!(!app.busy && app.queue.is_empty());
         let menu = app.menu.as_ref().unwrap();
         assert_eq!(menu.label(MenuItem::Forks), "Update the forks");
         assert_eq!(
