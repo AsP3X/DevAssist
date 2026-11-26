@@ -1005,7 +1005,7 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
     }
     let repos = app.remove_lines();
     let many = repos.len() > 1;
-    let dirty = repos.iter().filter(|line| line.dirty).count();
+    let dirty = repos.iter().filter(|line| line.dirty()).count();
     let listed = if repos.len() > LISTED {
         LISTED - 1
     } else {
@@ -1052,7 +1052,7 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, screen: Rect) {
     if many {
         for line in repos.iter().take(listed) {
             let mut spans = vec![Span::styled(line.name.clone(), name_style)];
-            if line.dirty {
+            if line.dirty() {
                 spans.push(Span::styled(
                     "  uncommitted changes",
                     Style::default().fg(Color::Yellow),

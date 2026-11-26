@@ -22,11 +22,13 @@ pub enum Reach {
     Clipboard,
     /// A request sent over the network.
     Network,
+    /// A folder deleted from disk.
+    Disk,
 }
 
 #[cfg(feature = "testing")]
-static REACHED: [std::sync::atomic::AtomicUsize; 3] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+static REACHED: [std::sync::atomic::AtomicUsize; 4] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 4];
 
 /// Notes that the core reaches outside itself in the way `reach`.
 #[cfg(feature = "testing")]

@@ -4,7 +4,7 @@
 //! one: the dialog opens with no control focused, and Enter does nothing until Tab has chosen a button. Esc and a
 //! click on the scrim cancel. Deleting goes to the core's queue; how it went is said on the status line.
 
-use devassist_core::repos::state::{RemoveLine, Repos};
+use devassist_core::repos::state::{RemoveLine, RemoveState, Repos};
 use egui::{Align2, FontFamily, Id, Key, Modifiers, Painter, Rect, Stroke, Ui, pos2, vec2};
 
 use super::{Dialogs, Header, Parts, Plan, inset, list_height, most_scroll, rows};
@@ -23,6 +23,8 @@ const LINE: &str =
 const CLEAN: &str = "clean";
 /// The note of a folder with uncommitted changes, in the warning colour.
 const DIRTY: &str = "uncommitted changes";
+/// The note of a folder whose changes are not known: its state is not read yet, or the read failed.
+const UNREAD: &str = "not read yet";
 
 /// What a button of the remove dialog does when pressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,9 +64,15 @@ pub fn remove_title(names: &[String]) -> String {
     }
 }
 
-/// The note at the right of `line`'s path, and whether it is a warning.
-fn note(line: &RemoveLine) -> (&'static str, bool) {
-    if line.dirty { (DIRTY, true) } else { (CLEAN, false) }
+/// The note at the right of `line`'s path, and whether it is a warning: "clean" only for a folder read without
+/// changes. A folder no longer on the list has none, as in the terminal app's dialog.
+fn note(line: &RemoveLine) -> Option<(&'static str, bool)> {
+    match line.state {
+        RemoveState::Clean => Some((CLEAN, false)),
+        RemoveState::Dirty => Some((DIRTY, true)),
+        RemoveState::Unread => Some((UNREAD, false)),
+        RemoveState::Gone => None,
+    }
 }
 
 /// What `line` shows: where its folder is, or its name once it is no longer on the list.
@@ -156,10 +164,13 @@ fn list(ui: &Ui, rect: Rect, lines: &[RemoveLine], palette: Palette, dialogs: &m
         }
         let y = row.center().y;
         widgets::draw_icon(painter, pos2(row.left() + ICON / 2.0, y), Icon::FolderGit2, ICON, palette.quiet);
-        let (words, warning) = note(line);
-        painter.text(pos2(row.right(), y), Align2::RIGHT_CENTER, words, small.clone(), if warning { palette.warning } else { palette.quiet });
+        let mut right = row.right();
+        if let Some((words, warning)) = note(line) {
+            painter.text(pos2(row.right(), y), Align2::RIGHT_CENTER, words, small.clone(), if warning { palette.warning } else { palette.quiet });
+            right -= widgets::width(painter, words, &small) + LIST_GAP;
+        }
         let left = row.left() + ICON + LIST_GAP;
-        let room = row.right() - widgets::width(painter, words, &small) - LIST_GAP - left;
+        let room = right - left;
         let path = widgets::path_to_fit(&shown_path(line), &regular, room, ui);
         painter.text(pos2(left, y), Align2::LEFT_CENTER, path, regular.clone(), palette.on_glass);
     }
@@ -169,7 +180,7 @@ fn list(ui: &Ui, rect: Rect, lines: &[RemoveLine], palette: Palette, dialogs: &m
 mod tests {
     use std::path::PathBuf;
 
-    use devassist_core::repos::state::{HELD, Mode as CoreMode};
+    use devassist_core::repos::state::{HELD, Mode as CoreMode, RemoveState};
     use egui::{Event, Memory, Pos2};
 
     use super::super::Which;
@@ -212,13 +223,46 @@ mod tests {
 
     #[test]
     fn each_path_says_whether_it_is_clean() {
-        let clean = RemoveLine { name: "api".to_owned(), path: PathBuf::from(r"D:\code\work\api"), dirty: false };
-        let dirty = RemoveLine { dirty: true, ..clean.clone() };
-        assert_eq!(note(&clean), ("clean", false));
-        assert_eq!(note(&dirty), ("uncommitted changes", true));
+        let clean = RemoveLine { name: "api".to_owned(), path: PathBuf::from(r"D:\code\work\api"), state: RemoveState::Clean };
+        let dirty = RemoveLine { state: RemoveState::Dirty, ..clean.clone() };
+        let unread = RemoveLine { state: RemoveState::Unread, ..clean.clone() };
+        assert_eq!(note(&clean), Some(("clean", false)));
+        assert_eq!(note(&dirty), Some(("uncommitted changes", true)));
+        assert_eq!(note(&unread), Some(("not read yet", false)), "never clean while nobody knows");
         assert_eq!(shown_path(&clean), r"D:\code\work\api");
-        let gone = RemoveLine { name: "gone".to_owned(), path: PathBuf::new(), dirty: false };
-        assert_eq!(shown_path(&gone), "gone", "a folder no longer on the list shows its name");
+        // A folder no longer on the list shows its name and no note, as the terminal app's dialog shows it.
+        let gone = RemoveLine { name: "gone".to_owned(), path: PathBuf::new(), state: RemoveState::Gone };
+        assert_eq!(shown_path(&gone), "gone");
+        assert_eq!(note(&gone), None);
+    }
+
+    #[test]
+    fn the_quiet_line_is_never_cut() {
+        let mut header = None;
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        crate::widgets::tests::context()
+            .run_ui(input, |ui| header = Some(Header::new(ui.painter(), "Remove api and web?", LINE, DIALOG_WIDTH - 2.0 * DIALOG_PAD)))
+            .drop_without_applying_deltas();
+        let header = header.unwrap();
+        assert!(!header.line.elided, "the remove dialog's line ends with an ellipsis");
+        assert!(header.line.rows.len() < crate::theme::HEADER_LINES + 1);
+    }
+
+    #[test]
+    fn a_checkout_not_read_yet_is_not_called_clean() {
+        // The demo's old-blog could not be read: the dialog does not call it clean.
+        let mut session = Session::demo(crate::demo::repos());
+        let repos = session.repos_mut().unwrap();
+        repos.marked = vec!["dotfiles".to_owned(), "old-blog".to_owned(), "portal".to_owned()];
+        repos.installed.iter_mut().filter(|repo| repo.folder == "dotfiles").for_each(|repo| repo.ready = false);
+        repos.begin_remove();
+        let notes: Vec<Option<(&str, bool)>> = session.repos().unwrap().remove_lines().iter().map(note).collect();
+        // In the list's order: dotfiles, portal, old-blog.
+        assert_eq!(notes, [Some(("not read yet", false)), Some(("uncommitted changes", true)), Some(("not read yet", false))]);
+        let mut window = Window::new(session);
+        window.frame(Vec::new());
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Remove));
     }
 
     #[test]
@@ -425,9 +469,11 @@ mod tests {
         window.session.repos_mut().unwrap().marked = vec!["web".to_owned()];
         window.session.repos_mut().unwrap().begin_remove();
         window.frame(Vec::new());
+        let deleted = devassist_core::sys::reached(devassist_core::sys::Reach::Disk);
         window.press("Delete from disk");
         assert!(!window.shows(Which::Remove));
         until(&mut window, "removed", |window| !web.exists() && !window.repos().busy);
+        assert_eq!(devassist_core::sys::reached(devassist_core::sys::Reach::Disk), deleted + 1, "the deletion is counted");
         assert!(window.repos().installed.is_empty(), "{:?}", window.repos().installed.iter().map(|repo| &repo.folder).collect::<Vec<_>>());
         assert!(api.exists(), "only web was deleted");
         for kept in [root.0.clone(), root.0.join("web-origin"), root.0.join("api-origin"), root.0.join("devassist.toml")] {

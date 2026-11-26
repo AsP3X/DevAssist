@@ -1,5 +1,6 @@
 //! What git's output says about how far a clone, fetch or update is.
 
+pub use crate::task::job::split_progress;
 use crate::task::job::{Job, parse_percent};
 
 /// The share of a clone or fetch each of git's phases takes, as the range
@@ -42,28 +43,6 @@ fn overall_progress(line: &str) -> Option<f64> {
         .iter()
         .find(|(name, _, _)| *name == phase)
         .map(|(_, from, to)| from + (to - from) * percent)
-}
-
-/// Splits git's progress line into what it is doing and the numbers after
-/// the percentage: "Receiving objects:  45% (120/266), 1.2 MiB | 2 MiB/s"
-/// becomes ("Receiving objects", "120/266, 1.2 MiB · 2 MiB/s").
-pub fn split_progress(line: &str) -> (String, String) {
-    let line = line.trim();
-    let line = line.strip_prefix("remote: ").unwrap_or(line);
-    let Some(percent) = line.find('%') else {
-        return (line.trim_end_matches(['.', ':']).to_string(), String::new());
-    };
-    let phase = line[..percent]
-        .trim_end_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace())
-        .trim_end_matches(':')
-        .to_string();
-    let rest = line[percent + 1..]
-        .replace(['(', ')'], "")
-        .replace(" | ", " · ")
-        .trim()
-        .trim_end_matches(", done.")
-        .to_string();
-    (phase, rest)
 }
 
 /// "2 of 3 branches updated", or "nothing new". None while the branches

@@ -80,9 +80,29 @@ pub struct RemoveLine {
     pub name: String,
     /// Where it is on disk. Empty when it is no longer on the list.
     pub path: PathBuf,
-    /// It has uncommitted changes. False while its state is not read yet,
-    /// and for a folder that is no longer on the list.
-    pub dirty: bool,
+    /// What is known of its uncommitted changes.
+    pub state: RemoveState,
+}
+
+impl RemoveLine {
+    /// It has uncommitted changes. False while that is not known: not
+    /// read yet, the read failed, or no longer on the list.
+    pub fn dirty(&self) -> bool {
+        self.state == RemoveState::Dirty
+    }
+}
+
+/// What the remove dialog knows of a folder's uncommitted changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveState {
+    /// Read: it has none.
+    Clean,
+    /// It has some.
+    Dirty,
+    /// Not known: its state is not read yet, or the read failed.
+    Unread,
+    /// It is no longer on the list.
+    Gone,
 }
 
 /// The line under the Add search box.
@@ -2322,6 +2342,9 @@ impl Repos {
             Action::Cancel if self.mode == Mode::Menu => self.close_menu(),
             Action::Cancel if self.mode == Mode::Group => self.close_group(),
             Action::Cancel if self.mode == Mode::Service => self.close_service(),
+            Action::Cancel if matches!(self.mode, Mode::ConfirmRemove { .. }) => {
+                self.cancel_remove();
+            }
             Action::Confirm => self.confirm_remove(),
             Action::Forget => self.forget_chosen(),
             Action::Import => self.open_import(),
@@ -3276,10 +3299,16 @@ impl Repos {
             .iter()
             .map(|folder| {
                 let repo = self.installed.iter().find(|repo| &repo.folder == folder);
+                let state = match repo {
+                    None => RemoveState::Gone,
+                    Some(repo) if repo.dirty => RemoveState::Dirty,
+                    Some(repo) if !repo.ready || repo.error.is_some() => RemoveState::Unread,
+                    Some(_) => RemoveState::Clean,
+                };
                 RemoveLine {
                     name: folder.clone(),
                     path: repo.map(|repo| repo.path.clone()).unwrap_or_default(),
-                    dirty: repo.is_some_and(|repo| repo.dirty),
+                    state,
                 }
             })
             .collect()
@@ -3616,6 +3645,12 @@ impl Repos {
     }
 
     pub fn cancel_work(&mut self) {
+        // Held, a run on screen is the demo's: nothing runs to stop, and
+        // the status line says so, as for every other held action.
+        if self.work_held && self.job.as_ref().is_some_and(Job::running) {
+            self.held();
+            return;
+        }
         if self.busy || self.fetching {
             process::request_cancel();
             if let Some(job) = self.job.as_mut().filter(|job| job.running()) {
@@ -4151,6 +4186,8 @@ fn clean_group_name(input: &str) -> Result<String, String> {
 /// Deletes a checkout. One whose folder is gone already counts as removed.
 fn remove_or_gone(path: &Path) -> Result<(), String> {
     if path.exists() {
+        #[cfg(feature = "testing")]
+        crate::sys::note(crate::sys::Reach::Disk);
         gitops::remove_checkout(path)
     } else {
         Ok(())
@@ -5207,25 +5244,41 @@ mod tests {
     }
 
     #[test]
-    fn remove_lines_name_each_folder_and_whether_it_is_clean() {
+    fn remove_lines_name_each_folder_and_what_is_known_of_its_changes() {
         let mut app = grouped_app();
         app.installed[1].dirty = true;
-        // Its state is not read yet: it counts as clean, as it always did.
+        // Its state is not read yet: nobody knows whether it is clean.
         app.installed[3].ready = false;
         assert!(app.remove_lines().is_empty(), "no dialog, no lines");
         app.marked = vec!["api".into(), "docs".into(), "web".into()];
         app.begin_remove();
         let lines = app.remove_lines();
-        let line = |name: &str, dirty: bool| RemoveLine {
+        let line = |name: &str, state: RemoveState| RemoveLine {
             name: name.into(),
             path: PathBuf::from("/srv/code").join(name),
-            dirty,
+            state,
         };
+        assert_eq!(app.installed[3].folder, "web");
         assert_eq!(
             lines,
-            [line("api", false), line("docs", true), line("web", false)]
+            [
+                line("api", RemoveState::Clean),
+                line("docs", RemoveState::Dirty),
+                line("web", RemoveState::Unread)
+            ]
         );
-        // A folder that left the list meanwhile has no path and is clean.
+        assert_eq!(
+            lines.iter().map(RemoveLine::dirty).collect::<Vec<_>>(),
+            [false, true, false],
+            "only what has changes counts as dirty"
+        );
+        // Read, but the read failed: not known either.
+        app.installed[3].ready = true;
+        app.installed[3].error = Some("could not read".into());
+        assert_eq!(app.remove_lines()[2].state, RemoveState::Unread);
+        app.installed[3].error = None;
+        assert_eq!(app.remove_lines()[2].state, RemoveState::Clean);
+        // A folder that left the list meanwhile has no path and says so.
         app.mode = Mode::ConfirmRemove {
             folders: vec!["gone".into()],
         };
@@ -5234,15 +5287,16 @@ mod tests {
             [RemoveLine {
                 name: "gone".into(),
                 path: PathBuf::new(),
-                dirty: false,
+                state: RemoveState::Gone,
             }]
         );
+        assert!(!app.remove_lines()[0].dirty());
         // Held, it reads the same.
         app.hold_work();
         app.mode = Mode::ConfirmRemove {
             folders: vec!["docs".into()],
         };
-        assert_eq!(app.remove_lines(), [line("docs", true)]);
+        assert_eq!(app.remove_lines(), [line("docs", RemoveState::Dirty)]);
         app.mode = Mode::List;
         assert!(app.remove_lines().is_empty());
     }
@@ -5418,6 +5472,18 @@ mod tests {
         assert!(
             !root.join("devassist.toml").exists(),
             "the settings file is not written"
+        );
+        // A run shown while held (a demo's) is cancelled by nobody, and
+        // its Cancel says so rather than nothing.
+        let mut job = Job::new("Updating", vec!["tool".into()], 0);
+        job.on(JobEvent::Start(0));
+        app.job = Some(job);
+        app.notice("before", false);
+        app.cancel_work();
+        assert_eq!(app.status, HELD, "cancel");
+        assert!(
+            !app.job.as_ref().unwrap().cancelling,
+            "nothing was asked to stop"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -5,8 +5,6 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use crate::repos::gitprogress::split_progress;
-
 const OUTPUT_LIMIT: usize = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +128,28 @@ pub enum JobEvent {
     /// Steps done, out of the steps there are, for the item that is
     /// running.
     Steps(u32, u32),
+}
+
+/// Splits git's progress line into what it is doing and the numbers after
+/// the percentage: "Receiving objects:  45% (120/266), 1.2 MiB | 2 MiB/s"
+/// becomes ("Receiving objects", "120/266, 1.2 MiB · 2 MiB/s").
+pub fn split_progress(line: &str) -> (String, String) {
+    let line = line.trim();
+    let line = line.strip_prefix("remote: ").unwrap_or(line);
+    let Some(percent) = line.find('%') else {
+        return (line.trim_end_matches(['.', ':']).to_string(), String::new());
+    };
+    let phase = line[..percent]
+        .trim_end_matches(|ch: char| ch.is_ascii_digit() || ch.is_whitespace())
+        .trim_end_matches(':')
+        .to_string();
+    let rest = line[percent + 1..]
+        .replace(['(', ')'], "")
+        .replace(" | ", " · ")
+        .trim()
+        .trim_end_matches(", done.")
+        .to_string();
+    (phase, rest)
 }
 
 /// Reads how far an item is, from 0 to 1, out of a line of its output.
