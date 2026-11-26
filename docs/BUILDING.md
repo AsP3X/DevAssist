@@ -140,6 +140,11 @@ The glass has tests of its own:
   runners of CI), the glass pictures are still drawn and checked for their
   size and for not being frosted, but not compared with the kept ones; the
   test says so on its output. The frosted pictures are always compared.
+- The contrast tests of `devassist-gui` measure the window's text over the
+  frosted panes everywhere, and over the glass only on a real GPU. On a
+  software adapter they skip the glass and say so on their output, because a
+  pane can take longer there than the shader waits. With
+  `DEVASSIST_REQUIRE_GPU=1` they measure the glass on a software adapter too.
 - One test in `devassist-gui` measures how long a bake of the glass takes. It
   is marked `#[ignore]`, so it only runs when asked for:
 

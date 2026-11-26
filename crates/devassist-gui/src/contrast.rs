@@ -515,15 +515,24 @@ fn measure_all(rendering: Rendering) -> Vec<Row> {
     })
 }
 
-/// Whether the glass shader can run here. A machine without a GPU adapter skips the glass rendering, said on
-/// the test's output, unless `DEVASSIST_REQUIRE_GPU` is set, as it should be where the tests must not be skipped.
+/// Whether the glass rendering is measured here. A machine without a GPU adapter skips it, and so does one whose
+/// adapter is a software one (WARP on the Windows runners of CI): there a pane can take longer than the shader
+/// waits, and the window then draws frost in its place. Either is said on the test's output. With
+/// `DEVASSIST_REQUIRE_GPU` set, as it should be where the tests must not be skipped, a missing adapter is a failure
+/// and a software one is measured.
 fn shader_runs() -> bool {
     let ready = devassist_glass::gpu::install_own_device();
-    assert!(ready || std::env::var_os("DEVASSIST_REQUIRE_GPU").is_none(), "no GPU adapter was found for the glass rendering");
+    let required = std::env::var_os("DEVASSIST_REQUIRE_GPU").is_some();
+    assert!(ready || !required, "no GPU adapter was found for the glass rendering");
     if !ready {
         eprintln!("no GPU adapter: the glass rendering is not measured");
+        return false;
     }
-    ready
+    if devassist_glass::gpu::software() && !required {
+        eprintln!("a software adapter: the glass rendering is not measured");
+        return false;
+    }
+    true
 }
 
 #[test]
