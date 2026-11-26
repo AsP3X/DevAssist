@@ -13,7 +13,7 @@ use egui::{
     pos2, vec2,
 };
 
-use super::{Dialogs, Parts, Plan, Planned, Which, after, before, group, progress, remove, which};
+use super::{Dialogs, Parts, Plan, Planned, Which, add, after, before, group, progress, remove, which};
 use crate::baker::Sheet;
 use crate::overlay;
 use crate::repos_screen::{self, Screen};
@@ -120,7 +120,7 @@ impl Window {
             let keys = !overlay::is_open(&ctx);
             repos_screen::show(ui, &layout, screen_plan.as_ref(), session, Some(&sheet()), Mode::Light, screen, keys);
             after(&ctx, planned, session.repos_mut(), &[], Mode::Light, dialogs);
-            plan = super::plan(ui.painter(), window, session.repos(), repos_screen::menu_anchor(screen));
+            plan = super::plan(ui.painter(), window, session.repos(), repos_screen::menu_anchor(screen), dialogs);
             painted = ctx.graphics(|layers| layers.get(overlay::layer()).is_some_and(|list| !list.is_empty()));
         });
         self.repaint = output.viewport_output.get(&ViewportId::ROOT).is_some_and(|viewport| viewport.repaint_delay.is_zero());
@@ -181,6 +181,8 @@ impl Window {
             Parts::Progress(places) => (places.buttons, progress::button_words(self.job())),
             Parts::Remove(places) => (places.buttons, remove::button_words()),
             Parts::Group(places) => (places.buttons, group::said(self.repos())),
+            // The main button's words are made each frame; a test's copy of them lives as long as the test.
+            Parts::Add(places) => (places.buttons, add::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()

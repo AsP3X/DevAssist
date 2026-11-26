@@ -40,9 +40,9 @@ use crate::repos_view::{self, Line};
 use crate::session::Session;
 use crate::shell::{Page, Shown as ShellShown};
 use crate::theme::{
-    self, BUTTON_OFF_OPACITY, CHECK_MARK, FOCUS_RING, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, MIN_WINDOW,
-    Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING, RULE_LABEL_GAP, RULE_WIDTH,
-    SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
+    self, ADD_INSTALLED_OPACITY, BUTTON_OFF_OPACITY, CHECK_MARK, FOCUS_RING, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT,
+    HOVER_OPACITY, MIN_WINDOW, Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING,
+    RULE_LABEL_GAP, RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
 };
 use crate::{demo, frost, overlay, shell, table, widgets};
 
@@ -588,6 +588,9 @@ enum Over {
     Nothing,
     /// A dialog, on its scrim.
     Dialog,
+    /// A dialog, on its scrim, with Enter pressed once it is open: the Add dialog then says, under its folder field,
+    /// why the core refused the folder.
+    Entered,
     /// The row's menu, without a scrim.
     Menu,
     /// The test dialog with a folder field (`widgets::tests::show_folder_dialog`), on its scrim.
@@ -609,7 +612,7 @@ enum FolderShot {
 impl Over {
     /// A dialog is over the screen: one the core's mode asks for, or the test dialog with a folder field.
     fn is_dialog(self) -> bool {
-        matches!(self, Over::Dialog | Over::Folder(_))
+        matches!(self, Over::Dialog | Over::Entered | Over::Folder(_))
     }
 }
 
@@ -626,8 +629,12 @@ struct Shot {
 /// pressed); the remove dialog for a clean and a dirty repository ("clean", "uncommitted changes"); the group dialog
 /// moving api and web with its name, and renaming home with none (its hint, and the danger note the core gives when the rename is pressed then); the menu
 /// on the ticked api, its first line highlighted and its last (Remove, in the danger colour); the folder field in a
-/// test dialog, with its rows (resting, under the pointer, lit) and empty with its hint.
-const SHOTS: [Shot; 11] = [
+/// test dialog, with its rows (resting, under the pointer, lit) and empty with its hint; the Add dialog as the demo
+/// opens it with an installed row highlighted (its ticks, the installed rows at half strength, "archived" and
+/// "private", the status line, the note), searched so that a tick is hidden ("Also ticked") with the folder refused
+/// (the danger note), and with GitHub failed and a plain word typed (the status line in the danger colour, "Retry",
+/// the row that lists the account).
+const SHOTS: [Shot; 14] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -682,6 +689,33 @@ const SHOTS: [Shot; 11] = [
     Shot { name: "folder field", over: Over::Folder(FolderShot::Lit), set_up: |_| {} },
     Shot { name: "folder field hovered", over: Over::Folder(FolderShot::Hovered), set_up: |_| {} },
     Shot { name: "folder field empty", over: Over::Folder(FolderShot::Empty), set_up: |_| {} },
+    Shot {
+        name: "add",
+        over: Over::Dialog,
+        set_up: |repos| {
+            demo::show(repos, "add").unwrap();
+            repos.pick_add("acme/api");
+        },
+    },
+    Shot {
+        name: "add searched and refused",
+        over: Over::Entered,
+        set_up: |repos| {
+            demo::show(repos, "add").unwrap();
+            repos.set_add_filter("docs");
+            // A relative folder: the core refuses it when Enter clones.
+            repos.clone_dir = std::path::PathBuf::from("dev");
+        },
+    },
+    Shot {
+        name: "add failed",
+        over: Over::Dialog,
+        set_up: |repos| {
+            demo::show(repos, "add").unwrap();
+            repos.remotes_state = devassist_core::repos::state::RemoteState::Failed("GitHub answered 502 Bad Gateway".to_owned());
+            repos.set_add_filter("zzzz");
+        },
+    },
 ];
 
 /// The window sizes a shot is drawn at: the design's, and for an overlay also the smallest the window allows, where
@@ -725,6 +759,8 @@ fn colour_name(colour: Color32, mode: Mode) -> String {
         (p.danger_tint, "danger tint"),
         (p.selection.gamma_multiply(BUTTON_OFF_OPACITY), "off fill"),
         (p.on_glass.gamma_multiply(BUTTON_OFF_OPACITY), "off"),
+        // The quiet words of an installed row of the Add dialog, which cannot be ticked.
+        (p.quiet.gamma_multiply(ADD_INSTALLED_OPACITY), "off quiet"),
         (theme::selected_fill(mode), "ticked"),
         (p.on_glass.gamma_multiply(GROUP_FILL_OPACITY), "group"),
         (p.on_glass.gamma_multiply(HEAD_FILL_OPACITY), "head"),
@@ -783,10 +819,11 @@ fn text_of(text: &TextShape, clip: Rect) -> Option<(String, Rect, Color32, FontI
 }
 
 /// The contrast a text in `font` whose ink is named `ink` needs: a graphic's for an icon, and for the words of a
-/// button that cannot be pressed ("Cancelling…": WCAG 1.4.3 leaves disabled controls out of the text rule, so they
-/// are held to the graphics' 3.0 to stay seen); 6.0 for 12-point text; 4.5 for the rest.
+/// button that cannot be pressed ("Cancelling…") or of an installed row of the Add dialog, which cannot be ticked
+/// (WCAG 1.4.3 leaves disabled controls out of the text rule, so they are held to the graphics' 3.0 to stay seen);
+/// 6.0 for 12-point text; 4.5 for the rest.
 fn least_for(font: &FontId, ink: &str) -> f64 {
-    if font.family == assets::icons_family() || ink == "off" {
+    if font.family == assets::icons_family() || ink == "off" || ink == "off quiet" {
         LEAST_GRAPHIC
     } else if font.size <= TEXT_SMALL {
         LEAST_QUIET
@@ -939,6 +976,9 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         let mut drew = None;
         let events = match (shot.over, pointer) {
             (Over::Folder(kind), Some(at)) if kind != FolderShot::Empty => widgets::tests::folder_shot_events(frame, at, kind == FolderShot::Lit),
+            (Over::Entered, _) if frame == 2 => {
+                vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]
+            }
             _ => Vec::new(),
         };
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
@@ -1040,7 +1080,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                 if let Some((words, rect, ink, font)) = text_of(text, clipped.clip_rect) {
                     let wanted = match shot.over {
                         Over::Nothing => words == dots || controls.iter().any(|(_, control)| control.contains(rect.center())),
-                        Over::Dialog | Over::Folder(_) => on_overlay,
+                        Over::Dialog | Over::Entered | Over::Folder(_) => on_overlay,
                         Over::Menu => on_overlay || words == dots,
                     };
                     if wanted {

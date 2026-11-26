@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use devassist_core::config::Settings;
-use devassist_core::repos::github::PullCounts;
+use devassist_core::repos::github::{PullCounts, RemoteRepo};
 use devassist_core::repos::gitops::{LocalRepo, PendingPulls};
-use devassist_core::repos::state::Repos;
+use devassist_core::repos::state::{Action, Repos};
 use devassist_core::task::job::{Job, JobEvent};
 
 /// The folder, under the system's temporary folder, of the demo's settings path, which is never written.
@@ -159,7 +159,8 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 4] = [("progress", show_progress), ("remove", show_remove), ("group", show_group), ("menu", show_menu)];
+pub const SHOWS: [(&str, Opener); 5] =
+    [("progress", show_progress), ("remove", show_remove), ("group", show_group), ("menu", show_menu), ("add", show_add)];
 
 /// What sets an overlay up in the demo's repositories.
 pub type Opener = fn(&mut Repos);
@@ -231,6 +232,53 @@ fn show_menu(repos: &mut Repos) {
     repos.enter_row();
 }
 
+/// The folder the demo's Add dialog offers for a clone: the drawing's `D:\code\work` (a full path elsewhere too,
+/// one that is nowhere, so its folder field suggests nothing).
+pub const CLONE_DIR: &str = if cfg!(windows) { r"D:\code\work" } else { "/srv/code/work" };
+
+/// What the demo's GitHub knows: a made-up list of eight, by owner, name, description, archived and private.
+/// Two of them are installed (acme's api and portal); one is of another owner, so every row names its owner.
+const CATALOG: [(&str, &str, &str, bool, bool); 8] = [
+    (OWNER, "api", "The public HTTP API", false, false),
+    (OWNER, "artcraft", "Tools for drawing and exporting canvas designs", false, false),
+    (OWNER, "artcraft-docs", "The documentation site of artcraft", false, false),
+    (OWNER, "artcraft-plugins", "Example plugins and the plugin template", false, false),
+    (OWNER, "billing-legacy", "The billing service before the rewrite", true, false),
+    (OWNER, "design-tokens", "Colours, sizes and type of every product", false, true),
+    ("octo-labs", "glass-kit", "A liquid glass toolkit for egui", false, false),
+    (OWNER, "portal", "The customer portal", false, false),
+];
+
+/// The repositories the demo's Add dialog opens with ticked.
+const ADD_TICKED: [&str; 2] = ["acme/artcraft", "acme/artcraft-docs"];
+
+/// The Add dialog as the drawing has it: the demo's catalog of eight found, two of them installed and two ticked, the
+/// folder field at [`CLONE_DIR`]. Opened through the core (`Action::Add`), as the window opens it.
+fn show_add(repos: &mut Repos) {
+    repos.remotes = CATALOG
+        .iter()
+        .map(|&(owner, name, description, archived, private)| RemoteRepo {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+            description: description.to_owned(),
+            clone_url: format!("https://github.com/{owner}/{name}.git"),
+            language: String::new(),
+            archived,
+            private,
+            pushed: String::new(),
+            direct: false,
+        })
+        .collect();
+    // The demo's own account, so the status line counts what it found there, as the core words it.
+    repos.owners = vec![OWNER.to_owned()];
+    repos.clone_dir = PathBuf::from(CLONE_DIR);
+    repos.run(Action::Add);
+    for id in ADD_TICKED {
+        repos.toggle_add_mark_of(id);
+    }
+    repos.ensure_selection();
+}
+
 #[cfg(test)]
 mod tests {
     use devassist_core::repos::state::Mode;
@@ -262,7 +310,7 @@ mod tests {
             repos.drain();
         }
         assert!(repos.mode == Mode::Progress && !repos.waiting());
-        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, not nothing");
+        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, add, not nothing");
     }
 
     #[test]
@@ -276,6 +324,20 @@ mod tests {
         assert!(repos.mode == Mode::Group);
         let prompt = repos.group_prompt.as_ref().unwrap();
         assert_eq!((prompt.repos.as_slice(), prompt.input.as_str()), (["api".to_owned(), "web".to_owned()].as_slice(), "Work"));
+    }
+
+    #[test]
+    fn the_demo_opens_add_with_eight_found_two_installed_and_two_ticked() {
+        let mut repos = repos();
+        show(&mut repos, "add").unwrap();
+        assert!(repos.mode == Mode::Add);
+        let found = repos.add_list();
+        assert_eq!(found.len(), 8);
+        assert_eq!(found.iter().filter(|remote| repos.is_installed(remote)).count(), 2);
+        assert_eq!(repos.add_marked.iter().map(RemoteRepo::id).collect::<Vec<_>>(), ADD_TICKED);
+        assert_eq!(repos.add_selected.as_deref(), Some("acme/artcraft"));
+        assert!(!repos.waiting() && repos.work_held());
+        assert_eq!(repos.add_status().text, "8 repositories · 2 cloned · type owner/ or paste a link to list any account");
     }
 
     #[test]
@@ -528,7 +590,25 @@ mod tests {
     /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
     fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 4]) {
         // Forget takes api and web off the list (in memory only); Delete from disk is refused.
-        let dialogs: [Dialog; 6] = [
+        let dialogs: [Dialog; 9] = [
+            ("add", show_add, &[("Cancel", Expect::Free), ("Clone 2 repositories", Expect::Held)]),
+            (
+                "add on one",
+                |repos| {
+                    show_add(repos);
+                    repos.toggle_add_mark_of("acme/artcraft");
+                    repos.toggle_add_mark_of("acme/artcraft-docs");
+                },
+                &[("Clone acme/artcraft", Expect::Held)],
+            ),
+            (
+                "add failed",
+                |repos| {
+                    show_add(repos);
+                    repos.remotes_state = devassist_core::repos::state::RemoteState::Failed("GitHub answered 502".to_owned());
+                },
+                &[("Cancel", Expect::Free)],
+            ),
             ("remove", show_remove, &[("Cancel", Expect::Free), ("Forget", Expect::Forgot(&["api", "web"])), ("Delete from disk", Expect::Held)]),
             ("group", show_group, &[("Cancel", Expect::Free), ("Move", Expect::Free)]),
             (
@@ -574,7 +654,7 @@ mod tests {
             }
         }
         // A click on each dialog's scrim.
-        for open in [show_remove, show_group, show_progress] {
+        for open in [show_remove, show_group, show_progress, show_add] {
             fresh(window, open);
             window.click(pos(30.0, 450.0));
             still_held(window, "a click on the scrim", Expect::Free, before);

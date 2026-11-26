@@ -367,6 +367,45 @@ pub const GROUP_DIALOG_GAP: f32 = 12.0;
 /// The room between the group list's box and a picked row's fill at either side, and that fill's corner radius:
 /// a menu's row in its pane (`MENU_PAD`, `MENU_ROW_RADIUS`; not the design's: it draws no group dialog).
 pub const GROUP_PICK: [f32; 2] = [4.0, 12.0];
+/// The width of the Add dialog (`dialog("Add a repository", 600, …)`).
+pub const ADD_WIDTH: f32 = 600.0;
+/// The height of a row of the Add dialog's found repositories (`Found / …`'s `height: 52`).
+pub const ADD_ROW: f32 = 52.0;
+/// The room at either side of a found repository's row, and the gap between its checkbox, its words and its note
+/// at the right (`Found / …`'s `padding: [0, 12]`, `gap: 12`).
+pub const ADD_ROW_PAD: f32 = 12.0;
+/// The gap between a found repository's name and its description (`Text`'s `gap: 2`).
+pub const ADD_TEXT_GAP: f32 = 2.0;
+/// How strong an installed row of the found repositories is drawn (`opacity: 0.5`).
+pub const ADD_INSTALLED_OPACITY: f32 = 0.5;
+/// The fewest rows of the found repositories the Add dialog keeps in view while its folder field shows no rows (the
+/// plan's own: the design draws five).
+pub const ADD_LEAST_ROWS: usize = 3;
+/// The height of the line under the Add dialog's search field that says what the core is doing (the plan's own:
+/// the design draws none; room for its Retry button).
+pub const ADD_STATUS_ROW: f32 = 28.0;
+/// The gap above and below that line (the plan's own, a sixth of a dialog's gap: with the line that names the
+/// hidden ticks, three rows still fit the smallest window).
+pub const ADD_STATUS_GAP: f32 = 4.0;
+/// The gap between "Clone into", the folder field and the note under it (`Folder`'s `gap: 8`); also the gap
+/// between the line that names the ticked repositories the search hides and the buttons.
+pub const ADD_FOLDER_GAP: f32 = 8.0;
+/// The room between the found repositories' box and the highlighted row's fill at either side, and that fill's
+/// corner radius (the group dialog's, `GROUP_PICK`: the design draws no highlight).
+pub const ADD_PICK: [f32; 2] = GROUP_PICK;
+/// The size of the spinner on the Add dialog's status line while the core looks something up (the plan's own: a
+/// small icon's, `ICON_SMALL`'s width less the arc's stroke).
+pub const SPINNER: f32 = 12.0;
+/// The width of the spinner's arc.
+pub const SPINNER_STROKE: f32 = 1.5;
+/// How much of a full turn the spinner's arc covers.
+pub const SPINNER_SWEEP: f32 = 0.75;
+/// How many straight pieces the spinner's arc is drawn with.
+pub const SPINNER_STEPS: u16 = 24;
+/// How long the spinner takes for one turn, in seconds.
+pub const SPINNER_TURN: f64 = 1.0;
+/// The gap between the spinner and the status line's words.
+pub const SPINNER_GAP: f32 = 8.0;
 /// The width of the ring around the control of an overlay that Enter and Space act on (not the design's: it has
 /// no keyboard; the accent, as egui marks its focus).
 pub const FOCUS_RING: f32 = 2.0;

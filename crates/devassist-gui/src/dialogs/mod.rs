@@ -20,7 +20,9 @@
 //! that scrolls with the wheel).
 //!
 //! The dialogs: [`progress`], the run the core keeps; [`remove`], which deletes or forgets the chosen
-//! repositories; [`group`], which moves them into a group or renames one. A dialog with a main button opens with
+//! repositories; [`group`], which moves them into a group or renames one; [`add`], which finds repositories on
+//! GitHub and clones the ticked ones into a folder (the group and Add dialogs open with the focus in their first
+//! field). A dialog with a main button opens with
 //! the focus on it, the group dialog with the focus in its name field, the remove dialog (which has no main
 //! button) with no focus at all.
 //!
@@ -28,14 +30,19 @@
 //! has a shield but no scrim, and stands under the row's button that `repos_screen` places ([`before`] takes it).
 //! When one of its lines opens a dialog, the core's mode changes and the bridge hands the overlay over to that
 //! dialog in the next frame, opened as every dialog is.
+//!
+//! The window never asks the core for its folder question of a clone (`Mode::Path` for `Purpose::Clone`): Add
+//! asks for the folder itself. Should the core stand there all the same, [`which`] says Add, and [`after`] closes
+//! that question (`Repos::close_path`) before drawing, which brings Add back: no empty overlay is drawn.
 
+mod add;
 mod group;
 mod progress;
 mod remove;
 
 use std::sync::Arc;
 
-use devassist_core::repos::state::{Mode as CoreMode, Repos};
+use devassist_core::repos::state::{Mode as CoreMode, Purpose, Repos};
 use egui::text::LayoutJob;
 use egui::{Color32, Context, FontFamily, Galley, Id, LayerId, Painter, Rect, Ui, pos2};
 
@@ -59,6 +66,8 @@ pub enum Which {
     Group,
     /// The row's menu ([`crate::menu`], `Mode::Menu`): no dialog, but an overlay on the same bridge.
     Menu,
+    /// The repositories found on GitHub, to tick and clone into a folder (`Mode::Add`).
+    Add,
 }
 
 /// The dialog or the menu `repos`'s mode asks for, if any.
@@ -69,6 +78,10 @@ pub fn which(repos: &Repos) -> Option<Which> {
         CoreMode::ConfirmRemove { .. } => Some(Which::Remove),
         CoreMode::Group if repos.group_prompt.is_some() => Some(Which::Group),
         CoreMode::Menu if repos.menu.is_some() => Some(Which::Menu),
+        CoreMode::Add => Some(Which::Add),
+        // The core's own folder question of a clone, which the window never asks for: Add stands for it until
+        // `after` closes it, and Add is back.
+        CoreMode::Path if repos.prompt.as_ref().is_some_and(|prompt| matches!(prompt.purpose, Purpose::Clone(_))) => Some(Which::Add),
         _ => None,
     }
 }
@@ -88,6 +101,9 @@ pub struct Dialogs {
     list_scroll: f32,
     /// The group the group dialog's list showed picked last, so the list follows Up and Down.
     list_shown: Option<usize>,
+    /// What the Add dialog keeps of its own: the folder field's text, its suggestions, the reason a folder was
+    /// refused, the row its list showed highlighted last. Made when Add opens.
+    add: Option<add::State>,
 }
 
 /// The id of a dialog's main button, the one Enter presses: every dialog's, so that the focus [`sync`] gives it
@@ -112,6 +128,10 @@ pub fn sync(ctx: &Context, repos: Option<&Repos>, dialogs: &mut Dialogs) {
         // The remove dialog has no main button; the menu's lines take no focus, the arrows move its highlight.
         Some(Which::Remove | Which::Menu) => overlay::open(ctx, None),
         Some(Which::Group) => overlay::open(ctx, Some(group::field_id())),
+        Some(Which::Add) => {
+            dialogs.add = repos.map(add::State::new);
+            overlay::open(ctx, Some(add::search_id()));
+        }
         None => {}
     }
 }
@@ -207,6 +227,8 @@ enum Parts {
     Remove(remove::Places),
     /// The group dialog's.
     Group(group::Places),
+    /// The Add dialog's.
+    Add(add::Places),
 }
 
 impl Parts {
@@ -216,6 +238,7 @@ impl Parts {
             Parts::Progress(_) => Which::Progress,
             Parts::Remove(_) => Which::Remove,
             Parts::Group(_) => Which::Group,
+            Parts::Add(_) => Which::Add,
         }
     }
 
@@ -225,6 +248,7 @@ impl Parts {
             Parts::Progress(places) => places.pane,
             Parts::Remove(places) => places.pane,
             Parts::Group(places) => places.pane,
+            Parts::Add(places) => places.pane,
         }
     }
 }
@@ -262,15 +286,17 @@ impl Plan {
 }
 
 /// Where the dialog or the menu the core's mode asks for stands in `window`, a dialog's header laid out with
-/// `painter`'s faces, the menu under the row's button at `anchor` (from `repos_screen::menu_anchor`); `None` when
-/// the mode asks for none, or for the menu while the screen has not placed its button yet.
+/// `painter`'s faces, the menu under the row's button at `anchor` (from `repos_screen::menu_anchor`), with what
+/// `dialogs` keep (the Add dialog's folder field and its rows); `None` when the mode asks for none, or for the menu
+/// while the screen has not placed its button yet.
 #[must_use]
-pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Option<Rect>) -> Option<Plan> {
+pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Option<Rect>, dialogs: &Dialogs) -> Option<Plan> {
     let repos = repos?;
     match which(repos)? {
         Which::Progress => progress::plan(painter, window, repos),
         Which::Remove => Some(remove::plan(painter, window, repos)),
         Which::Group => group::plan(painter, window, repos),
+        Which::Add => dialogs.add.as_ref().map(|state| add::plan(painter, window, repos, state)),
         Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(window, anchor)))),
     }
 }
@@ -280,7 +306,7 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Opti
 /// ([`Plan::want`]).
 pub fn before(ctx: &Context, repos: Option<&Repos>, anchor: Option<Rect>, dialogs: &mut Dialogs) -> Option<Plan> {
     sync(ctx, repos, dialogs);
-    plan(&ctx.layer_painter(LayerId::background()), ctx.content_rect(), repos, anchor)
+    plan(&ctx.layer_painter(LayerId::background()), ctx.content_rect(), repos, anchor, dialogs)
 }
 
 /// The page to show: the Repositories screen while a dialog is open over it, else `page`.
@@ -296,6 +322,10 @@ pub fn page_for(repos: Option<&Repos>, page: Page) -> Page {
 /// it whole.
 pub fn after(ctx: &Context, planned: Option<Plan>, repos: Option<&mut Repos>, drawn: &[Drawn], mode: Mode, dialogs: &mut Dialogs) {
     let Some(repos) = repos else { return };
+    if repos.mode == CoreMode::Path && matches!(repos.prompt.as_ref().map(|prompt| &prompt.purpose), Some(Purpose::Clone(_))) {
+        // The core's own folder question of a clone, which the window never asks for: Add asks for the folder.
+        repos.close_path();
+    }
     sync(ctx, Some(repos), dialogs);
     let Some(want) = which(repos) else { return };
     if let Some(plan) = planned.filter(|plan| plan.which() == want) {
@@ -326,6 +356,7 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
             Planned::Dialog(header, Parts::Progress(places)) => progress::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Remove(places)) => remove::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Group(places)) => group::show(ui, header, *places, repos, palette, dialogs, outside),
+            Planned::Dialog(header, Parts::Add(places)) => add::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Menu(places) => menu::show(ui, *places, repos, palette, outside),
         }
     });
