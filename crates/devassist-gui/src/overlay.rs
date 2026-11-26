@@ -394,6 +394,49 @@ pub fn submenu_events(ctx: &Context) -> Vec<Event> {
     events
 }
 
+/// The keys that were down as a menu's side menu closed (the Esc, `q` or Left that closed it): until each comes up,
+/// its presses (its repeats) are not the menu's, and while any is down, no text is.
+#[derive(Clone, Debug, Default)]
+struct SideClosing {
+    held: Vec<Key>,
+}
+
+/// Where egui keeps the [`SideClosing`].
+fn side_closing_id() -> Id {
+    Id::unique("overlay-side-closing")
+}
+
+/// Closes a menu's side menu on the open overlay, as the window closes one: from now on the keys that are down (the
+/// one that closed it) do nothing in the menu while they stay down ([`menu_events`]).
+pub fn close_submenu(ctx: &Context) {
+    let held = ctx.input(|input| input.keys_down.iter().copied().collect());
+    ctx.data_mut(|data| data.insert_temp(side_closing_id(), SideClosing { held }));
+}
+
+/// This frame's events for an open menu whose side menu is closed: without the presses of a key held since the side
+/// menu closed (its repeats), and without text while such a key is down. Called once every such frame.
+#[must_use]
+pub fn menu_events(ctx: &Context) -> Vec<Event> {
+    let mut closing = ctx.data(|data| data.get_temp::<SideClosing>(side_closing_id())).unwrap_or_default();
+    let events = ctx.input(|input| {
+        let held = closing.held.clone();
+        closing.held.retain(|key| input.key_down(*key));
+        let typing = !closing.held.is_empty();
+        input
+            .events
+            .iter()
+            .filter(|event| match event {
+                Event::Key { key, pressed: true, .. } => !held.contains(key),
+                Event::Text(_) => !typing,
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    });
+    ctx.data_mut(|data| data.insert_temp(side_closing_id(), closing));
+    events
+}
+
 /// Whether `response`, of a line of a menu whose side menu is open, was clicked by a person: as [`fresh_click`], and
 /// with every press of the click made after the side menu opened, so the second click of a double click whose first
 /// click opened it does nothing in it, nor on the menu's line that opened it.

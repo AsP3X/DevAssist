@@ -55,6 +55,9 @@ fn sheet() -> Sheet {
     Sheet { texture: TextureId::User(0), uv: Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), edge: Stroke::NONE }
 }
 
+/// What a test does to the session once, between a frame's bake and its draw.
+pub(crate) type Between = Box<dyn FnOnce(&mut Session)>;
+
 /// The window as the app runs it: the dialog placed before the bake, the screen, then the dialog.
 pub(crate) struct Window {
     pub(crate) ctx: Context,
@@ -74,6 +77,10 @@ pub(crate) struct Window {
     pub(crate) repaint: bool,
     /// The filled rectangles the last frame painted, with their fills.
     pub(crate) fills: Vec<(Rect, egui::Color32)>,
+    /// Where the menu stands under, in place of the row's button the screen placed: for a menu at another place.
+    pub(crate) anchor: Option<Rect>,
+    /// What the next frame does to the session between the bake (`before`) and the draw (`after`), once.
+    pub(crate) between: Option<Between>,
     /// The texts the last frame painted, in their order: each one's words, where its galley lies, and whether it was
     /// cut short.
     pub(crate) texts: Vec<(String, Rect, bool)>,
@@ -93,6 +100,8 @@ impl Window {
             painted: false,
             repaint: false,
             fills: Vec::new(),
+            anchor: None,
+            between: None,
             texts: Vec::new(),
         }
     }
@@ -120,18 +129,22 @@ impl Window {
         let window = Rect::from_min_size(Pos2::ZERO, vec2(self.size[0], self.size[1]));
         let input = RawInput { screen_rect: Some(window), events, time, ..Default::default() };
         let (session, screen, dialogs) = (&mut self.session, &mut self.screen, &mut self.dialogs);
+        let (anchor, mut between) = (self.anchor, self.between.take());
         let (mut plan, mut baked, mut baked_side, mut painted) = (None, false, None, false);
         let output = self.ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
-            let planned = before(&ctx, session.repos(), repos_screen::menu_anchor(screen), dialogs);
+            let planned = before(&ctx, session.repos(), anchor.or_else(|| repos_screen::menu_anchor(screen)), dialogs);
             baked = planned.is_some();
             baked_side = planned.as_ref().and_then(|plan| plan.wants().into_iter().find(|want| want.id == overlay::SUBMENU)).map(|want| want.rect);
             let layout = shell::layout(window.size(), true, repos_screen::has_toolbar(session));
             let screen_plan = repos_screen::plan(ui.painter(), &layout, session);
             let keys = !overlay::is_open(&ctx);
             repos_screen::show(ui, &layout, screen_plan.as_ref(), session, Some(&sheet()), Mode::Light, screen, keys);
+            if let Some(between) = between.take() {
+                between(session);
+            }
             after(&ctx, planned, session.repos_mut(), &[], Mode::Light, dialogs);
-            plan = super::plan(ui.painter(), window, session.repos(), repos_screen::menu_anchor(screen), dialogs);
+            plan = super::plan(ui.painter(), window, session.repos(), anchor.or_else(|| repos_screen::menu_anchor(screen)), dialogs);
             painted = ctx.graphics(|layers| layers.get(overlay::layer()).is_some_and(|list| !list.is_empty()));
         });
         self.repaint = output.viewport_output.get(&ViewportId::ROOT).is_some_and(|viewport| viewport.repaint_delay.is_zero());

@@ -119,6 +119,22 @@ pub struct Places {
 }
 
 impl Places {
+    /// The strip between the menu's pane and its side menu's, over the side menu's height (`theme::SUBMENU_GAP` wide):
+    /// part of the overlay, so a click or the pointer there changes nothing. None without a side menu, or when the
+    /// side menu lies over the menu (a window too narrow for it at either side).
+    #[must_use]
+    pub fn gap(&self) -> Option<Rect> {
+        let side = self.side?;
+        let (left, right) = if side.right() <= self.pane.left() {
+            (side.right(), self.pane.left())
+        } else if side.left() >= self.pane.right() {
+            (self.pane.right(), side.left())
+        } else {
+            return None;
+        };
+        Some(Rect::from_min_max(pos2(left, side.top()), pos2(right, side.bottom())))
+    }
+
     /// The room both panes take, where the overlay's controls are.
     #[must_use]
     pub fn whole(&self) -> Rect {
@@ -307,7 +323,11 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
     if let Some(side) = side {
         overlay::pane(ui, side, Id::unique("submenu-pane"));
     }
-    let events = if open { overlay::submenu_events(ui.ctx()) } else { ui.input(|input| input.events.clone()) };
+    // The gap between the two panes is theirs: a click there closes nothing.
+    if let Some(gap) = side.and(places.gap()) {
+        overlay::pane(ui, gap, Id::unique("submenu-gap"));
+    }
+    let events = if open { overlay::submenu_events(ui.ctx()) } else { overlay::menu_events(ui.ctx()) };
     // While the side menu is open, a click counts only once every press of it came after the side menu opened.
     let fresh = |ui: &Ui, response: &Response| if open { overlay::fresh_submenu_click(ui, response) } else { overlay::fresh_click(ui, response) };
     let rows = layout(places.pane).0;
@@ -365,7 +385,10 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
         }
         Some(Done::Run(item)) => repos.run_menu(item),
         Some(Done::Close) => repos.close_menu(),
-        Some(Done::Back) => repos.close_migrate(),
+        Some(Done::Back) => {
+            repos.close_migrate();
+            overlay::close_submenu(ui.ctx());
+        }
         Some(Done::Side(item)) => repos.run_migrate(item),
         None => {}
     }
@@ -1440,5 +1463,230 @@ mod tests {
         let status = crate::repos_screen::status(&window.session).unwrap();
         assert_eq!((status.text.as_str(), status.error), (probe.status.as_str(), true), "the status line shows the core's words");
         assert_eq!(window.repos().marked, ["api", "web"], "the ticks stay");
+    }
+
+    /// The menu on homelab with its side menu open by its letter, drawn.
+    fn side_open_on_homelab() -> Window {
+        let mut window = demo();
+        open_on(&mut window, "homelab");
+        tap(&mut window, Key::T, Some("t"));
+        assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "the side menu did not open");
+        assert!(window.submenu_pane().is_some());
+        window
+    }
+
+    /// The strip between the menu's pane and the side menu's, over the side menu's height, in the last frame.
+    fn gap_strip(window: &Window) -> Rect {
+        let (pane, side) = (window.menu_pane().unwrap(), window.submenu_pane().unwrap());
+        let (left, right) = if side.right() <= pane.left() { (side.right(), pane.left()) } else { (pane.right(), side.left()) };
+        Rect::from_min_max(pos2(left, side.top()), pos2(right, side.bottom()))
+    }
+
+    #[test]
+    fn a_held_esc_closes_the_side_menu_and_the_menu_stays() {
+        // Esc, q and Left, each held over several frames (its repeats, and for q its text again), then let go.
+        for (key, text) in [(Key::Escape, None), (Key::Q, Some("q")), (Key::ArrowLeft, None)] {
+            let mut window = side_open_on_homelab();
+            let pressed = |repeat| {
+                let mut events = vec![key_down(key, repeat)];
+                events.extend(text.map(|text: &str| Event::Text(text.to_owned())));
+                events
+            };
+            window.frame(pressed(false));
+            assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_none(), "{key:?} did not close the side menu");
+            for _ in 0..4 {
+                window.frame(pressed(true));
+                window.frame(Vec::new());
+                assert!(window.shows(Which::Menu), "{key:?} held closed the menu");
+                assert_eq!((window.repos().menu_highlight(), window.repos().migrate_highlight()), (Some(MenuItem::Migrate), None), "{key:?} held");
+            }
+            window.frame(vec![key_up(key)]);
+            window.frame(Vec::new());
+            assert!(window.shows(Which::Menu), "{key:?}: its release closed the menu");
+            assert_ne!(window.repos().status, HELD);
+            // A fresh Esc closes it.
+            tap(&mut window, Key::Escape, None);
+            assert!(window.repos().mode == CoreMode::List, "{key:?}: a fresh Esc did nothing");
+        }
+    }
+
+    #[test]
+    fn a_click_in_the_gap_between_the_panes_does_nothing() {
+        let mut window = demo();
+        open_at_time(&mut window, "homelab");
+        let migrate = rows(&window)[migrate_line()].center();
+        click_at_time(&mut window, migrate, 2.0);
+        window.frame_at(Vec::new(), Some(2.1));
+        let gap = gap_strip(&window);
+        assert!((gap.width() - SUBMENU_GAP).abs() < 1e-3 && gap.height() > 0.0, "{gap:?}");
+        click_at_time(&mut window, gap.center(), 4.0);
+        window.frame_at(Vec::new(), Some(4.1));
+        assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_some(), "a click in the gap closed them");
+        // Just above the strip, outside both: both close.
+        click_at_time(&mut window, pos2(gap.center().x, gap.top() - 3.0), 6.0);
+        assert!(window.repos().mode == CoreMode::List, "a click outside both left them open");
+    }
+
+    #[test]
+    fn the_pointer_reaches_the_side_menu_through_the_gap_in_both_placements() {
+        // The menu under homelab's "…" at the right of the table (the side menu at its left), and under a button at
+        // the window's left (the side menu flipped to its right).
+        for anchor in [None, Some(Rect::from_min_size(pos2(30.0, 300.0), vec2(32.0, 32.0)))] {
+            let mut window = demo();
+            window.anchor = anchor;
+            let repos = window.session.repos_mut().unwrap();
+            repos.clear_marks();
+            repos.pick("homelab");
+            repos.enter_row();
+            window.frame(Vec::new());
+            window.frame(Vec::new());
+            tap(&mut window, Key::T, Some("t"));
+            let (pane, side) = (window.menu_pane().unwrap(), window.submenu_pane().unwrap());
+            assert_eq!(side.left() > pane.right(), anchor.is_some(), "the side menu is not where this placement puts it");
+            let lines = rows(&window);
+            let (migrate, rule) = (lines[migrate_line()], lines[migrate_line() - 1].bottom() + MENU_LINE / 2.0);
+            let push = side_rows(&window)[1];
+            let gap = gap_strip(&window);
+            // Over Migrate, over the rule above it and the pane's padding, through the gap, onto Push.
+            let path = [
+                migrate.center(),
+                pos2(migrate.center().x, rule),
+                pos2(pane.left() + MENU_PAD / 2.0, migrate.center().y),
+                pos2(pane.right() - MENU_PAD / 2.0, migrate.center().y),
+                gap.center(),
+                push.center(),
+            ];
+            for at in path {
+                window.frame(vec![Event::PointerMoved(at)]);
+                assert!(window.repos().migrate_highlight().is_some(), "{anchor:?}: the side menu closed at {at:?}");
+                assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Migrate), "{anchor:?} at {at:?}");
+            }
+            assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Service), "{anchor:?}: Push is not highlighted");
+            // Onto another line of the menu, it closes.
+            window.frame(vec![Event::PointerMoved(lines[1].center())]);
+            assert_eq!((window.repos().menu_highlight(), window.repos().migrate_highlight()), (Some(MenuItem::Open), None), "{anchor:?}");
+        }
+    }
+
+    #[test]
+    fn the_menu_and_its_side_menu_close_together_when_the_row_goes() {
+        let mut window = side_open_on_homelab();
+        window.session.repos_mut().unwrap().installed.retain(|repo| repo.folder != "homelab");
+        window.frame(Vec::new());
+        assert!(window.repos().mode == CoreMode::List, "the menu stayed for a row that is gone");
+        assert!(!window.painted, "a pane was drawn in the frame they closed");
+        assert!(!painted(&window, "Migrate") && !painted(&window, MigrateItem::Folder.label()));
+        window.frame(Vec::new());
+        assert!(!window.open() && window.submenu_pane().is_none());
+        assert_eq!(window.screen_menu(), None);
+    }
+
+    #[test]
+    fn the_core_closing_the_side_menu_after_the_bake_draws_no_side_menu() {
+        let mut window = side_open_on_homelab();
+        window.between = Some(Box::new(|session: &mut Session| session.repos_mut().unwrap().close_migrate()));
+        window.frame(Vec::new());
+        assert!(window.baked_side.is_some(), "the bake placed it");
+        assert!(painted(&window, "Migrate"), "the menu is drawn");
+        assert!(MigrateItem::ALL.iter().all(|item| !painted(&window, item.label())), "the side menu was drawn after the core closed it");
+        window.frame(Vec::new());
+        assert!(window.baked_side.is_none() && window.shows(Which::Menu));
+    }
+
+    #[test]
+    fn a_held_key_that_opens_the_side_menu_runs_none_of_its_lines() {
+        for (key, text) in [(Key::Enter, None), (Key::ArrowRight, None), (Key::T, Some("t"))] {
+            let mut window = demo();
+            open_on(&mut window, "homelab");
+            tap(&mut window, Key::End, None);
+            tap(&mut window, Key::ArrowUp, None);
+            let pressed = |repeat| {
+                let mut events = vec![key_down(key, repeat)];
+                events.extend(text.map(|text: &str| Event::Text(text.to_owned())));
+                events
+            };
+            window.frame(pressed(false));
+            for _ in 0..5 {
+                window.frame(pressed(true));
+                window.frame(Vec::new());
+            }
+            window.frame(vec![key_up(key)]);
+            window.frame(Vec::new());
+            assert!(window.shows(Which::Menu), "{key:?} held ran a line");
+            assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "{key:?} held");
+            assert!(window.repos().prompt.is_none() && window.repos().service_prompt.is_none(), "{key:?} held");
+            assert_ne!(window.repos().status, HELD);
+        }
+    }
+
+    /// The main button (the last) of the dialog the side menu's `item` opens for `key` alone, in a window of `size`.
+    fn main_button(item: MigrateItem, key: &str, size: [f32; 2]) -> Rect {
+        let mut probe = Window::new(Session::demo(crate::demo::repos()));
+        probe.size = size;
+        let repos = probe.session.repos_mut().unwrap();
+        repos.clear_marks();
+        repos.pick(key);
+        repos.run_migrate(item);
+        probe.frame(Vec::new());
+        probe.frame(Vec::new());
+        probe.buttons().last().unwrap().0
+    }
+
+    /// A window size the app allows (from 960 by 600) and a row alone where the side menu's line `item`, its menu
+    /// opened on that row, lies over the main button of the dialog that line opens, with the point of the overlap.
+    fn side_overlap(item: MigrateItem) -> Option<([f32; 2], &'static str, Pos2)> {
+        let index = MigrateItem::ALL.iter().position(|known| *known == item).unwrap();
+        let keys =
+            ["dotfiles", "homelab", "recipes", "DevAssist", "release-scripts", "customer-portal-i18n", "portal", "notes", "old-blog", "sandbox"];
+        let lines = crate::repos_view::lines(&crate::demo::repos());
+        for width in (960_u16..=1600).step_by(40) {
+            for height in (600_u16..=1100).step_by(50) {
+                let size = [f32::from(width), f32::from(height)];
+                let screen = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
+                let panel = crate::shell::layout(screen.size(), true, true).panel;
+                let button = main_button(item, "homelab", size);
+                for key in keys {
+                    let Some(anchor) = table::dots_rect(panel, &lines, 0.0, key) else { continue };
+                    let line = side_layout(plan(screen, anchor, true).side.unwrap())[index];
+                    let both = line.intersect(button);
+                    if both.width() > 4.0 && both.height() > 4.0 {
+                        return Some((size, key, both.center()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn the_second_click_of_a_double_click_on_a_side_line_presses_no_button_of_its_dialog() {
+        for item in MigrateItem::ALL {
+            let Some((size, key, at)) = side_overlap(item) else {
+                panic!("{item:?}: no window size puts its line over its dialog's main button");
+            };
+            eprintln!("{item:?}: {size:?} on {key} at {at:?}");
+            let mut window = Window::new(Session::demo(crate::demo::repos()));
+            window.size = size;
+            window.frame(Vec::new());
+            open_at_time(&mut window, key);
+            window.frame_at(vec![key_down(Key::T, false), Event::Text("t".to_owned())], Some(1.0));
+            window.frame_at(vec![key_up(Key::T)], Some(1.1));
+            window.frame_at(Vec::new(), Some(1.2));
+            let index = MigrateItem::ALL.iter().position(|known| *known == item).unwrap();
+            assert!(side_rows(&window)[index].contains(at), "{item:?}: the point is not on its line");
+            let dialog = if item == MigrateItem::Folder { Which::Folder } else { Which::Push };
+            double_click(&mut window, at, |window| {
+                window.frame_at(Vec::new(), Some(5.1));
+                assert!(window.shows(dialog), "{item:?}: no dialog");
+                assert!(window.buttons().last().unwrap().0.contains(at), "{item:?}: the point is not on the main button");
+            });
+            assert!(window.shows(dialog), "{item:?}: the second click pressed the main button");
+            assert_ne!(window.repos().status, HELD, "{item:?}: the second click pressed the main button");
+            let refused = match item {
+                MigrateItem::Folder => window.repos().prompt.as_ref().map(|prompt| prompt.error.is_some()),
+                MigrateItem::Service => window.repos().service_prompt.as_ref().map(|prompt| prompt.error.is_some()),
+            };
+            assert_eq!(refused, Some(false), "{item:?}: the second click pressed the main button");
+        }
     }
 }
