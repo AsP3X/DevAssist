@@ -939,20 +939,22 @@ pub fn move_checkout(
 
 /// Whether two paths are on one volume, so that `move_checkout` between
 /// them is a rename and not a copy. A path that does not exist yet is
-/// judged by the nearest folder above it that does. None when it cannot
-/// be told: nothing of a path exists, or it cannot be read.
+/// judged by the nearest folder above it that does, with its links and
+/// junctions followed. None when it cannot be told: nothing of a path
+/// exists, or it cannot be read.
 ///
-/// On Windows the drive letters or network shares are compared once the
-/// paths are made full; a volume mounted into a folder, or a drive made
-/// with `subst`, is not seen. On Unix the devices of the nearest existing
-/// folders are compared.
+/// On Windows the drive letters or network shares are compared; a volume
+/// mounted into a folder, or a drive made with `subst`, is not seen. On
+/// Unix the devices are compared. It asks the disk, which for a network
+/// share can take seconds.
 pub fn same_volume(a: &Path, b: &Path) -> Option<bool> {
     let nearest = |path: &Path| {
         std::path::absolute(path)
             .ok()?
             .ancestors()
-            .find(|part| part.exists())
-            .map(Path::to_path_buf)
+            .find(|part| part.exists())?
+            .canonicalize()
+            .ok()
     };
     same_device(&nearest(a)?, &nearest(b)?)
 }
@@ -3644,8 +3646,16 @@ refs/remotes/fork/dev\tiii\t\t
 
     #[test]
     fn two_folders_on_one_volume_are_told() {
+        /// Deletes the test's folder when the test ends, also by a panic.
+        struct Gone(PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = remove_tree(&self.0);
+            }
+        }
         let root = std::env::temp_dir().join(format!("devassist-volume-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
+        let _gone = Gone(root.clone());
         fs::create_dir_all(root.join("one")).unwrap();
         fs::create_dir_all(root.join("two")).unwrap();
         assert_eq!(
@@ -3676,7 +3686,6 @@ refs/remotes/fork/dev\tiii\t\t
                 Some(true)
             );
         }
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

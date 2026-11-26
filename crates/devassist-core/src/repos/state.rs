@@ -105,7 +105,8 @@ pub enum RemoveState {
     Gone,
 }
 
-/// One checkout the move question asks about.
+/// One checkout the move question asks about. A line that is `there` or
+/// `taken` does not move: the dialog shows it as staying where it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MoveLine {
     /// Its name on the list.
@@ -115,8 +116,13 @@ pub struct MoveLine {
     /// Where the move puts it: the typed folder and its folder name. None
     /// while the typed folder is not one a move can use.
     pub to: Option<PathBuf>,
-    /// It is in that folder already: the move leaves it where it is.
+    /// It is in that folder already (`from` is `to`): the move leaves it
+    /// where it is and says so.
     pub there: bool,
+    /// The move of this one will be refused: something is at `to`
+    /// already, an earlier line of the same move goes to the same `to`,
+    /// or `to` lies inside the checkout itself. The others still move.
+    pub taken: bool,
 }
 
 /// One thing a push to another service does or leaves, in a sentence.
@@ -125,6 +131,7 @@ pub struct Fact {
     /// It goes over or is done there; false for what stays as it is or is
     /// not done.
     pub goes: bool,
+    /// One or two short sentences a person reads, as they are shown.
     pub words: String,
 }
 
@@ -1704,37 +1711,28 @@ impl Repos {
         vec![
             fact(
                 true,
-                "Every branch goes over; origin's where the one here is missing or behind.",
-            ),
-            fact(true, "Every tag goes over."),
-            fact(
-                true,
-                "Every pull request goes over as a branch, pull/<number>, or under another prefix when a branch here already uses pull.",
+                "Every branch and tag goes over; where origin's branch is newer, or missing here, origin's goes.",
             ),
             fact(
                 true,
-                "Origin is fetched first, so what goes over is what it has now. When it cannot be reached, what is saved here goes over.",
+                "Origin is fetched first; if it cannot be reached, what is saved here goes.",
             ),
             fact(
                 true,
-                "The pull request branches there are replaced by what each pull request is now.",
+                "Every pull request, open, merged or closed, goes over as a branch pull/<number> (or under another name if pull is taken here), replaced on every push.",
             ),
             fact(
                 false,
-                "No branch or tag already there is overwritten. A branch only moves forward; where it cannot, the push stops with an error.",
+                "Apart from those pull-request branches, nothing there is overwritten or deleted.",
             ),
             fact(
                 false,
-                "Nothing there is deleted: branches it has that are not here stay.",
-            ),
-            fact(
-                false,
-                "No pull request is opened there. Comments, issues and releases do not go over.",
+                "A branch or tag there that went another way stops the push part-way with an error, before the address is kept.",
             ),
             Fact {
                 goes: false,
                 words: format!(
-                    "The repository here keeps its files and its origin. The address is kept as {remote}."
+                    "No pull request, issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as {remote}."
                 ),
             },
         ]
@@ -2294,8 +2292,10 @@ impl Repos {
     }
 
     /// Each checkout of the open move question, with where a move into the
-    /// typed folder puts it, as the move itself works that out. Empty
-    /// while no move question is open.
+    /// typed folder puts it and whether that move will be refused, as the
+    /// move itself works that out (`move_checkouts`, `gitops::move_checkout`).
+    /// Empty while no move question is open. It looks at the disk on every
+    /// call: ask again only when the text changed.
     pub fn move_lines(&self) -> Vec<MoveLine> {
         let Some(prompt) = &self.prompt else {
             return Vec::new();
@@ -2304,33 +2304,47 @@ impl Repos {
             return Vec::new();
         };
         let dir = prompt.folder().ok();
-        repos
-            .iter()
-            .map(|(name, from)| {
-                let to = dir.as_deref().and_then(|dir| move_target(dir, from));
-                let there = to.as_deref().is_some_and(|to| paths::same_path(from, to));
-                MoveLine {
-                    name: name.clone(),
-                    from: from.clone(),
-                    to,
-                    there,
-                }
-            })
-            .collect()
+        let mut lines: Vec<MoveLine> = Vec::with_capacity(repos.len());
+        for (name, from) in repos {
+            let to = dir.as_deref().and_then(|dir| move_target(dir, from));
+            let there = to.as_deref().is_some_and(|to| paths::same_path(from, to));
+            let taken = !there
+                && to.as_deref().is_some_and(|to| {
+                    // The moves run in this order: an earlier one that
+                    // moves takes the place first.
+                    let earlier = lines.iter().any(|line| {
+                        !line.there
+                            && !line.taken
+                            && line
+                                .to
+                                .as_deref()
+                                .is_some_and(|other| paths::same_path(other, to))
+                    });
+                    to.exists() || earlier || to.starts_with(from)
+                });
+            lines.push(MoveLine {
+                name: name.clone(),
+                from: from.clone(),
+                to,
+                there,
+                taken,
+            });
+        }
+        lines
     }
 
     /// Whether the open move question would take a checkout onto another
     /// volume, where a move copies everything and then deletes the old
     /// folder. True when one is known to; None while no move question is
     /// open, its folder is not usable, or a checkout's volume cannot be
-    /// told. Checkouts that are there already do not count.
+    /// told. Checkouts that do not move (`there` or `taken`) do not count.
     pub fn move_crosses_volumes(&self) -> Option<bool> {
         let lines = self.move_lines();
         if lines.is_empty() {
             return None;
         }
         let mut known = true;
-        for line in lines.iter().filter(|line| !line.there) {
+        for line in lines.iter().filter(|line| !line.there && !line.taken) {
             match line
                 .to
                 .as_deref()
@@ -3703,8 +3717,12 @@ impl Repos {
     /// Held, it is `Ok` with the mode the list, `HELD` on the status line,
     /// the ticks and `clone_dir` kept, and nothing made or started.
     /// `Err` holds Add's words or the question's; nothing changed and the
-    /// mode is still Add.
+    /// mode is still Add. Outside Add it is `Err("Add is not open.")` and
+    /// changes nothing, whatever else is open.
     pub fn clone_marked_into(&mut self, folder: &str) -> Result<(), String> {
+        if self.mode != Mode::Add {
+            return Err("Add is not open.".into());
+        }
         let remotes = match self.add_choice()? {
             AddChoice::Clone(remotes) => remotes,
             AddChoice::ListAccount => {
@@ -6117,6 +6135,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A scratch folder that is deleted when the test ends, also when it
+    /// panics. Git's read-only files go too.
+    struct Temp(PathBuf);
+
+    impl Temp {
+        fn new(name: &str) -> Self {
+            Self(scratch(name))
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = gitops::remove_tree(&self.0);
+        }
+    }
+
     /// A file URL Git clones from, for a folder on this disk.
     fn file_url(path: &Path) -> String {
         let text = path.display().to_string().replace('\\', "/");
@@ -6161,7 +6195,8 @@ mod tests {
 
     #[test]
     fn cloning_into_a_folder_from_add_is_one_step() {
-        let root = scratch("clone-from-add");
+        let temp = Temp::new("clone-from-add");
+        let root = temp.0.clone();
         let settings = Settings {
             config_path: root.join("devassist.toml"),
             ..test_settings()
@@ -6211,19 +6246,41 @@ mod tests {
             app.status
         );
         assert!(code.join("other").join(".git").is_dir());
-        let _ = gitops::remove_tree(&root);
     }
 
     #[test]
     fn a_bad_folder_leaves_add_as_it_was() {
-        let root = scratch("bad-add-folder");
+        let temp = Temp::new("bad-add-folder");
+        let root = temp.0.clone();
         let mut app = Repos::empty(test_settings());
         app.remotes_state = RemoteState::Ready;
         app.remotes = vec![remote("storytold", "tool"), remote("storytold", "web")];
+
+        // Only from Add: another question stays as it is.
+        app.add_selected = Some("storytold/tool".into());
+        app.notice("before", false);
+        let folder = root.display().to_string();
+        assert_eq!(
+            app.clone_marked_into(&folder),
+            Err("Add is not open.".into())
+        );
+        assert!(app.mode == Mode::List && app.status == "before");
+        app.open_import();
+        assert_eq!(
+            app.clone_marked_into(&folder),
+            Err("Add is not open.".into())
+        );
+        assert!(app.mode == Mode::Path);
+        assert!(matches!(
+            app.prompt.as_ref().map(|prompt| &prompt.purpose),
+            Some(Purpose::Import)
+        ));
+        assert!(!app.busy && app.queue.is_empty() && app.status == "before");
+        app.close_path();
+
         app.open_add();
         app.add_selected = Some("storytold/tool".into());
         app.add_marked = vec![remote("storytold", "web")];
-        app.notice("before", false);
         let clone_dir = app.clone_dir.clone();
         let file = root.join("file.txt");
         std::fs::write(&file, "x").unwrap();
@@ -6261,19 +6318,19 @@ mod tests {
         // Add's own words, before the folder is looked at.
         app.installed.push(installed("storytold", "web"));
         assert_eq!(
-            app.clone_marked_into(&root.display().to_string()),
+            app.clone_marked_into(&folder),
             Err("Those repositories are on the list already.".into())
         );
         unchanged(&app, "ticked ones on the list");
         app.add_marked.clear();
         app.installed.push(installed("storytold", "tool"));
         assert_eq!(
-            app.clone_marked_into(&root.display().to_string()),
+            app.clone_marked_into(&folder),
             Err("storytold/tool is on the list already.".into())
         );
         app.add_selected = None;
         assert_eq!(
-            app.clone_marked_into(&root.display().to_string()),
+            app.clone_marked_into(&folder),
             Err("Select a repository to add.".into())
         );
         assert!(app.mode == Mode::Add && app.status == "before");
@@ -6283,24 +6340,34 @@ mod tests {
         app.hold_work();
         app.add_filter = "someone".into();
         assert!(app.add_list().is_empty());
-        assert_eq!(app.clone_marked_into(&root.display().to_string()), Ok(()));
+        assert_eq!(app.clone_marked_into(&folder), Ok(()));
         assert!(app.mode == Mode::Add);
         assert_eq!(app.add_filter, "someone/");
         assert_eq!(app.clone_dir, clone_dir);
         assert!(!app.busy && app.queue.is_empty());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn move_lines_say_from_and_to_and_what_is_there_already() {
-        let root = scratch("move-lines");
+        let temp = Temp::new("move-lines");
+        let root = temp.0.clone();
         let here = root.join("here");
         let there = root.join("there");
+        let busy = root.join("busy");
         std::fs::create_dir_all(&there).unwrap();
+        // Something called docs sits in busy already.
+        std::fs::create_dir_all(busy.join("docs")).unwrap();
         let mut app = Repos::empty(test_settings());
-        for name in ["api", "docs", "web"] {
+        // api-copy is a second checkout in a folder called api.
+        for (name, path) in [
+            ("api", here.join("api")),
+            ("docs", here.join("docs")),
+            ("web", here.join("web")),
+            ("api-copy", root.join("else").join("api")),
+        ] {
             let mut repo = installed("acme", name);
-            repo.path = here.join(name);
+            repo.folder = name.into();
+            repo.path = path;
             std::fs::create_dir_all(&repo.path).unwrap();
             app.checkouts.push(repo.path.clone());
             app.installed.push(repo);
@@ -6311,27 +6378,32 @@ mod tests {
         app.marked = vec!["api".into(), "docs".into()];
         app.run_migrate(MigrateItem::Folder);
         assert!(app.mode == Mode::Path);
-        let line = |name: &str, to: Option<PathBuf>, there: bool| MoveLine {
-            name: name.into(),
-            from: here.join(name),
-            to,
-            there,
-        };
+        let line =
+            |name: &str, from: &Path, to: Option<PathBuf>, there: bool, taken: bool| MoveLine {
+                name: name.into(),
+                from: from.to_path_buf(),
+                to,
+                there,
+                taken,
+            };
+        let api = here.join("api");
+        let docs = here.join("docs");
 
         // It starts where the first one is: both are there already.
         assert_eq!(
             app.move_lines(),
             [
-                line("api", Some(here.join("api")), true),
-                line("docs", Some(here.join("docs")), true),
+                line("api", &api, Some(api.clone()), true, false),
+                line("docs", &docs, Some(docs.clone()), true, false),
             ]
         );
+        assert_eq!(app.move_crosses_volumes(), Some(false), "nothing moves");
         app.set_path_input(&there.display().to_string());
         assert_eq!(
             app.move_lines(),
             [
-                line("api", Some(there.join("api")), false),
-                line("docs", Some(there.join("docs")), false),
+                line("api", &api, Some(there.join("api")), false, false),
+                line("docs", &docs, Some(there.join("docs")), false, false),
             ]
         );
         assert_eq!(app.move_crosses_volumes(), Some(false));
@@ -6341,12 +6413,34 @@ mod tests {
         assert_eq!(app.move_lines()[0].to, Some(later.join("api")));
         assert_eq!(app.move_crosses_volumes(), Some(false));
 
+        // Refused: something is at the target already.
+        app.set_path_input(&busy.display().to_string());
+        assert_eq!(
+            app.move_lines(),
+            [
+                line("api", &api, Some(busy.join("api")), false, false),
+                line("docs", &docs, Some(busy.join("docs")), false, true),
+            ]
+        );
+        // Refused: the target is inside the checkout itself.
+        app.set_path_input(&api.display().to_string());
+        assert_eq!(
+            app.move_lines(),
+            [
+                line("api", &api, Some(api.join("api")), false, true),
+                line("docs", &docs, Some(api.join("docs")), false, false),
+            ]
+        );
+
         // Not a usable folder: nowhere to go yet.
         for bad in ["", "dev"] {
             app.set_path_input(bad);
             assert_eq!(
                 app.move_lines(),
-                [line("api", None, false), line("docs", None, false)],
+                [
+                    line("api", &api, None, false, false),
+                    line("docs", &docs, None, false, false)
+                ],
                 "{bad:?}"
             );
             assert_eq!(app.move_crosses_volumes(), None, "{bad:?}");
@@ -6359,12 +6453,25 @@ mod tests {
         assert_eq!(app.prompt.as_ref().unwrap().input, typed);
         app.close_path();
         assert!(app.path_suggestions().is_empty());
-        let _ = std::fs::remove_dir_all(&root);
+
+        // Refused: an earlier one of the same move goes to the same place.
+        let copy = root.join("else").join("api");
+        app.marked = vec!["api".into(), "api-copy".into()];
+        app.run_migrate(MigrateItem::Folder);
+        app.set_path_input(&there.display().to_string());
+        assert_eq!(
+            app.move_lines(),
+            [
+                line("api", &api, Some(there.join("api")), false, false),
+                line("api-copy", &copy, Some(there.join("api")), false, true),
+            ]
+        );
     }
 
     #[test]
     fn the_push_facts_match_what_a_push_does() {
-        let root = scratch("push-facts");
+        let temp = Temp::new("push-facts");
+        let root = temp.0.clone();
         let upstream = root.join("upstream");
         let clone = root.join("clone");
         let target = root.join("target.git");
@@ -6394,6 +6501,7 @@ mod tests {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         };
+        let config = || std::fs::read_to_string(clone.join(".git").join("config")).unwrap();
         std::fs::create_dir_all(&upstream).unwrap();
         git(&upstream, &["init", "-q", "-b", "main"]);
         commit(&upstream, "one");
@@ -6405,8 +6513,9 @@ mod tests {
         git(&root, &["clone", "-q", "upstream", "clone"]);
         git(&root, &["init", "-q", "--bare", "target.git"]);
         // Here: main has a commit of its own, old is behind origin's, mine
-        // is here only. Origin gets a branch and a pull request after the
-        // clone; the other service has a branch of its own.
+        // is here only. Origin gets a branch and two pull requests after
+        // the clone: 1 is open, 2 was closed and its branch deleted, as
+        // GitHub keeps the ref of a closed or merged one.
         commit(&clone, "local");
         git(&clone, &["branch", "-q", "old", "origin/old~1"]);
         git(&clone, &["branch", "-q", "mine"]);
@@ -6415,11 +6524,21 @@ mod tests {
         git(&upstream, &["checkout", "-q", "--detach", "main"]);
         commit(&upstream, "pull-1");
         git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
+        git(&upstream, &["checkout", "-q", "-b", "fix", "main"]);
+        commit(&upstream, "pull-2");
+        git(&upstream, &["update-ref", "refs/pull/2/head", "HEAD"]);
         git(&upstream, &["checkout", "-q", "main"]);
+        git(&upstream, &["branch", "-q", "-D", "fix"]);
+        // The other service has a branch of its own, and a pull/1 that
+        // went another way.
         let address = target.display().to_string();
         git(
             &upstream,
             &["push", "-q", &address, "main:refs/heads/theirs"],
+        );
+        git(
+            &upstream,
+            &["push", "-q", &address, "dev:refs/heads/pull/1"],
         );
         let theirs = tip(&target, "refs/heads/theirs");
 
@@ -6440,36 +6559,27 @@ mod tests {
             [
                 (
                     true,
-                    "Every branch goes over; origin's where the one here is missing or behind."
-                ),
-                (true, "Every tag goes over."),
-                (
-                    true,
-                    "Every pull request goes over as a branch, pull/<number>, or under another prefix when a branch here already uses pull."
+                    "Every branch and tag goes over; where origin's branch is newer, or missing here, origin's goes."
                 ),
                 (
                     true,
-                    "Origin is fetched first, so what goes over is what it has now. When it cannot be reached, what is saved here goes over."
+                    "Origin is fetched first; if it cannot be reached, what is saved here goes."
                 ),
                 (
                     true,
-                    "The pull request branches there are replaced by what each pull request is now."
+                    "Every pull request, open, merged or closed, goes over as a branch pull/<number> (or under another name if pull is taken here), replaced on every push."
                 ),
                 (
                     false,
-                    "No branch or tag already there is overwritten. A branch only moves forward; where it cannot, the push stops with an error."
+                    "Apart from those pull-request branches, nothing there is overwritten or deleted."
                 ),
                 (
                     false,
-                    "Nothing there is deleted: branches it has that are not here stay."
+                    "A branch or tag there that went another way stops the push part-way with an error, before the address is kept."
                 ),
                 (
                     false,
-                    "No pull request is opened there. Comments, issues and releases do not go over."
-                ),
-                (
-                    false,
-                    "The repository here keeps its files and its origin. The address is kept as the remote mirror."
+                    "No pull request, issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as the remote mirror."
                 ),
             ]
         );
@@ -6477,13 +6587,12 @@ mod tests {
         app.service_prompt.as_mut().unwrap().input = "nowhere".into();
         assert_eq!(
             app.service_facts().last().unwrap().words,
-            "The repository here keeps its files and its origin. The address is kept as one more remote, named after its host."
+            "No pull request, issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as one more remote, named after its host."
         );
 
         // The push the dialog's Enter runs.
         let done = gitops::migrate_to(&clone, &address, None, |_, _| {}).unwrap();
-        assert!(done.stale.is_none());
-        // Every branch; origin's where the one here is missing or behind.
+        // 1. Every branch and tag; origin's where it is newer or missing here.
         assert_eq!(
             tip(&target, "refs/heads/main"),
             tip(&clone, "refs/heads/main")
@@ -6500,41 +6609,45 @@ mod tests {
             tip(&target, "refs/heads/old"),
             tip(&clone, "refs/remotes/origin/old")
         );
-        // Every tag.
         assert_eq!(tip(&target, "refs/tags/v1"), tip(&clone, "refs/tags/v1"));
-        // Pull requests as branches pull/<number>.
-        assert_eq!(done.pull_prefix, "pull");
-        assert_eq!(
-            tip(&target, "refs/heads/pull/1"),
-            tip(&upstream, "refs/pull/1/head")
-        );
-        // Origin was fetched first: what it got after the clone went too.
+        // 2. Origin was fetched first: what it got after the clone went too.
+        assert!(done.stale.is_none());
         assert_eq!(
             tip(&target, "refs/heads/late"),
             tip(&upstream, "refs/heads/late")
         );
-        // Nothing there was deleted.
+        // 3. Open and closed pull requests as branches pull/<number>; the
+        // pull/1 that was there is replaced.
+        assert_eq!(done.pull_prefix, "pull");
+        assert_eq!(done.pulls, 2);
+        for number in ["1", "2"] {
+            assert_eq!(
+                tip(&target, &format!("refs/heads/pull/{number}")),
+                tip(&upstream, &format!("refs/pull/{number}/head")),
+                "pull {number}"
+            );
+        }
+        // 4. Nothing else there was overwritten or deleted.
         assert_eq!(tip(&target, "refs/heads/theirs"), theirs);
-        // Only branches and tags went over: no pull request, nothing else.
+        // 6. Only branches and tags went over; here, the files, the branch,
+        // origin, and the address as "mirror".
         for name in refs(&target) {
             assert!(
                 name.starts_with("refs/heads/") || name.starts_with("refs/tags/"),
                 "{name}"
             );
         }
-        // Here: the files, the branch, origin, and the address as "mirror".
         assert!(clone.join("local").is_file() && clone.join("one").is_file());
         assert_eq!(tip(&clone, "HEAD"), tip(&clone, "refs/heads/main"));
-        let config = std::fs::read_to_string(clone.join(".git").join("config")).unwrap();
+        let saved = config();
         assert!(
-            config.contains("[remote \"origin\"]") && config.contains("upstream"),
-            "{config}"
+            saved.contains("[remote \"origin\"]") && saved.contains("upstream"),
+            "{saved}"
         );
         assert_eq!(done.remote, "mirror");
-        assert!(config.contains("[remote \"mirror\"]"), "{config}");
+        assert!(saved.contains("[remote \"mirror\"]"), "{saved}");
 
-        // A pull request that changed is replaced there, though that is
-        // no fast-forward.
+        // 3. Replaced on every push, though that is no fast-forward.
         git(&upstream, &["checkout", "-q", "--detach", "main"]);
         commit(&upstream, "pull-1-again");
         git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
@@ -6545,7 +6658,7 @@ mod tests {
             tip(&upstream, "refs/pull/1/head")
         );
 
-        // Origin cannot be reached: what is saved here goes over.
+        // 2. Origin cannot be reached: what is saved here goes.
         gitops::remove_tree(&upstream).unwrap();
         commit(&clone, "offline");
         let done = gitops::migrate_to(&clone, &address, None, |_, _| {}).unwrap();
@@ -6555,8 +6668,28 @@ mod tests {
             tip(&clone, "refs/heads/main")
         );
 
-        // A branch there that went another way is not overwritten: the
-        // push stops with an error, and the branch stays as it was.
+        // 5. A tag there that went another way stops the push, and stays.
+        let main = tip(&clone, "refs/heads/main");
+        git(
+            &clone,
+            &["push", "-q", "--force", &address, "main:refs/tags/v1"],
+        );
+        assert!(gitops::migrate_to(&clone, &address, None, |_, _| {}).is_err());
+        assert_eq!(tip(&target, "refs/tags/v1^{commit}"), main);
+        git(
+            &clone,
+            &[
+                "push",
+                "-q",
+                "--force",
+                &address,
+                "refs/tags/v1:refs/tags/v1",
+            ],
+        );
+
+        // 5. So does a branch there that went another way; it stays as it
+        // was, and the address is not kept.
+        git(&clone, &["remote", "remove", "mirror"]);
         git(&clone, &["checkout", "-q", "-b", "side", "v1"]);
         commit(&clone, "elsewhere");
         git(
@@ -6568,6 +6701,6 @@ mod tests {
         let moved = tip(&target, "refs/heads/dev");
         assert!(gitops::migrate_to(&clone, &address, None, |_, _| {}).is_err());
         assert_eq!(tip(&target, "refs/heads/dev"), moved);
-        let _ = gitops::remove_tree(&root);
+        assert!(!config().contains("[remote \"mirror\"]"), "{}", config());
     }
 }
