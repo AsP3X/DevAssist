@@ -77,6 +77,10 @@ gives `group` as `e464`, `eye` as `e0ba` and `git-pull-request` as `e0e5`, as `s
 | `copy` | `e09e` |
 | `trash-2` | `e18e` (the font maps `e18d`, Lucide's `trash`, to the same glyph) |
 
+The folder field's icon, `folder` (`e0d7`, the design's `field(…, { iconName: "folder" })`), was read on 2026-11-26 the
+same way from the bundled `lucide.ttf`, with a short script of the standard library; nothing was downloaded. The same
+reading gives `folder-open` as `e247`, `folder-git-2` as `e40a` and `search` as `e151`, as `src/assets.rs` has them.
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

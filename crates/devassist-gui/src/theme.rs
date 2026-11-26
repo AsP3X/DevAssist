@@ -344,6 +344,21 @@ pub const REMOVE_ROWS: usize = 8;
 pub const GROUP_ROWS: usize = 6;
 /// The height of a dialog's text field; its ends are round (`field`'s `height: 36`, `cornerRadius: 18`).
 pub const DIALOG_FIELD_HEIGHT: f32 = 36.0;
+/// The corner radius of a dialog's text field: half its height, so its ends are round (`field`'s `cornerRadius: 18`).
+pub const DIALOG_FIELD_RADIUS: f32 = DIALOG_FIELD_HEIGHT / 2.0;
+/// The height of a row of the folders a folder field suggests (the plan's own: the design draws no suggestions;
+/// a menu's row, `MENU_ROW`).
+pub const FOLDER_ROW: f32 = MENU_ROW;
+/// How many suggested folders a folder field shows before its rows scroll.
+pub const FOLDER_ROWS: usize = 6;
+/// The gap between a folder field and the box of its suggestions (a menu's gap under its button, `MENU_GAP`).
+pub const FOLDER_GAP: f32 = MENU_GAP;
+/// The room inside the box of a folder field's suggestions above its first row and below its last (a menu's pad,
+/// `MENU_PAD`).
+pub const FOLDER_INSET_PAD: f32 = MENU_PAD;
+/// The room between the box of a folder field's suggestions and a lit row's fill at either side, and that fill's
+/// corner radius: a menu's row in its pane (`MENU_PAD`, `MENU_ROW_RADIUS`).
+pub const FOLDER_PICK: [f32; 2] = [MENU_PAD, MENU_ROW_RADIUS];
 /// How strong the outline of a dialog's text field is, of the text colour (`field`'s `stroke: soft(0.16)`).
 pub const FIELD_EDGE_OPACITY: f32 = 0.16;
 /// The gap between the group dialog's field, its note and its list of groups (not the design's: it draws no group
@@ -827,8 +842,11 @@ mod tests {
             ("LIST_ROW", LIST_ROW, 36.0),
             ("LIST_GAP", LIST_GAP, 8.0),
             ("DIALOG_FIELD_HEIGHT", DIALOG_FIELD_HEIGHT, 36.0),
+            ("DIALOG_FIELD_RADIUS", DIALOG_FIELD_RADIUS, 18.0),
             ("FIELD_EDGE_OPACITY", FIELD_EDGE_OPACITY, 0.16),
+            ("FOLDER_ROW", FOLDER_ROW, 32.0),
         ];
+        assert_eq!(FOLDER_ROWS, 6);
         assert_eq!(LIST_PAD, [4.0, 12.0]);
         for (constant, got, expected) in want {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");

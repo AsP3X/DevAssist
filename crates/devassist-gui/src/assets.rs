@@ -124,6 +124,7 @@ icons! {
     Group => 0xe464, "group",
     ArrowDownToLine => 0xe455, "arrow-down-to-line",
     FolderOpen => 0xe247, "folder-open",
+    Folder => 0xe0d7, "folder",
     ExternalLink => 0xe0b9, "external-link",
     Copy => 0xe09e, "copy",
     Trash2 => 0xe18e, "trash-2",
@@ -232,8 +233,8 @@ mod tests {
         assert_eq!(names.len(), Icon::ALL.len(), "two icons share a name");
         assert!(!codes.contains(&char::REPLACEMENT_CHARACTER), "an icon has no valid code point");
         // The README lists 16 icons beyond the 14 the sidebar and bar already had, the group dialog's, and the
-        // row menu's five.
-        assert_eq!(Icon::ALL.len(), 36);
+        // row menu's five, and the folder field's.
+        assert_eq!(Icon::ALL.len(), 37);
         assert_eq!(Icon::X.name(), "x");
         assert_eq!(Icon::FolderGit2.name(), "folder-git-2");
     }

@@ -590,6 +590,17 @@ enum Over {
     Dialog,
     /// The row's menu, without a scrim.
     Menu,
+    /// The test dialog with a folder field (`widgets::tests::show_folder_dialog`), on its scrim: with its rows
+    /// (`true`: `D:\code\work\` and its three folders, the first lit by Down, the second under the pointer, the third
+    /// resting), or empty, showing its hint.
+    Folder(bool),
+}
+
+impl Over {
+    /// A dialog is over the screen: one the core's mode asks for, or the test dialog with a folder field.
+    fn is_dialog(self) -> bool {
+        matches!(self, Over::Dialog | Over::Folder(_))
+    }
 }
 
 /// A demo set up as a person would see it, to draw: its name, what is over the screen, and what sets it up.
@@ -604,8 +615,9 @@ struct Shot {
 /// bar; the progress dialog of the drawing's run, and with its Cancel pressed ("Cancelling…", which cannot be
 /// pressed); the remove dialog for a clean and a dirty repository ("clean", "uncommitted changes"); the group dialog
 /// moving api and web with its name, and renaming home with none (its hint, and the danger note the core gives when the rename is pressed then); the menu
-/// on the ticked api, its first line highlighted and its last (Remove, in the danger colour).
-const SHOTS: [Shot; 8] = [
+/// on the ticked api, its first line highlighted and its last (Remove, in the danger colour); the folder field in a
+/// test dialog, with its rows (resting, under the pointer, lit) and empty with its hint.
+const SHOTS: [Shot; 10] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -657,6 +669,8 @@ const SHOTS: [Shot; 8] = [
             repos.highlight_menu(MenuItem::Remove);
         },
     },
+    Shot { name: "folder field", over: Over::Folder(true), set_up: |_| {} },
+    Shot { name: "folder field empty", over: Over::Folder(false), set_up: |_| {} },
 ];
 
 /// The window sizes a shot is drawn at: the design's, and for an overlay also the smallest the window allows, where
@@ -900,15 +914,37 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let (mut screen, mut dialogs) = (ReposScreen::default(), Dialogs::default());
     let mut glass: Option<(Rect, Rc<Bitmap>)> = None;
     let mut last = None;
-    for _ in 0..=SETTLE {
+    // The test dialog's folder field: its text and the folders it suggests, and where the pointer rests on it.
+    let (mut folder_text, folder_suggestions) = match shot.over {
+        Over::Folder(true) => {
+            let text = widgets::tests::path(&["D:", "code", "work", ""]);
+            let suggestions = widgets::tests::matching(&widgets::tests::folders(), &text);
+            (text, suggestions)
+        }
+        _ => (String::new(), Vec::new()),
+    };
+    let mut pointer = None;
+    for frame in 0..=SETTLE {
         let mut drew = None;
-        let input = RawInput { screen_rect: Some(window), ..Default::default() };
+        let events = match (shot.over, pointer) {
+            (Over::Folder(true), Some(at)) => widgets::tests::folder_shot_events(frame, at),
+            _ => Vec::new(),
+        };
+        let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
             let mut overlay_glass = Vec::new();
-            if let Some(plan) = &planned {
-                let want = plan.want();
+            let wanted = if let Over::Folder(_) = shot.over {
+                if frame == 0 {
+                    overlay::open(&ctx, Some(widgets::tests::folder_id()));
+                }
+                pointer = Some(widgets::tests::folder_shot_pointer(ui.painter(), window, folder_suggestions.len()));
+                Some(overlay::want_dialog(widgets::tests::folder_dialog_places(ui.painter(), window, folder_suggestions.len()).0))
+            } else {
+                planned.as_ref().map(dialogs::Plan::want)
+            };
+            if let Some(want) = wanted {
                 if glass.as_ref().is_none_or(|(rect, _)| *rect != want.rect) {
                     glass = Some((want.rect, stage.pane(&want)));
                 }
@@ -929,7 +965,13 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             }
             let keys = !overlay::is_open(&ctx);
             repos_screen::show(ui, &layout, plan.as_ref(), &mut session, Some(&sheet), mode, &mut screen, keys);
-            dialogs::after(&ctx, planned, session.repos_mut(), &overlay_glass, mode, &mut dialogs);
+            if let Over::Folder(_) = shot.over {
+                let shown =
+                    widgets::tests::show_folder_dialog(&ctx, window, &mut folder_text, &folder_suggestions, theme::palette(mode), &overlay_glass);
+                assert!(!shown.closed && shown.did == widgets::FolderDid::default(), "{}: the folder field did something", shot.name);
+            } else {
+                dialogs::after(&ctx, planned, session.repos_mut(), &overlay_glass, mode, &mut dialogs);
+            }
             let count = ctx.graphics(|layers| layers.get(overlay::layer()).map_or(0, |list| list.next_idx().0));
             drew = Some((count, wants.as_slice().to_vec(), layout));
         });
@@ -986,7 +1028,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                 if let Some((words, rect, ink, font)) = text_of(text, clipped.clip_rect) {
                     let wanted = match shot.over {
                         Over::Nothing => words == dots || controls.iter().any(|(_, control)| control.contains(rect.center())),
-                        Over::Dialog => on_overlay,
+                        Over::Dialog | Over::Folder(_) => on_overlay,
                         Over::Menu => on_overlay || words == dots,
                     };
                     if wanted {
@@ -998,8 +1040,8 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                         // output) and the 12-point danger status are held to 4.5, WCAG's level AA, not to the 6.0 this
                         // project holds small text to elsewhere: there even white cannot reach 6.0 on every backdrop
                         // (the controller's ruling of 2026-11-26).
-                        let on_inset = shot.over == Over::Dialog
-                            && fills.iter().any(|(fill, name, overlaid)| *overlaid && name == "field" && fill.contains(centre));
+                        let on_inset =
+                            shot.over.is_dialog() && fills.iter().any(|(fill, name, overlaid)| *overlaid && name == "field" && fill.contains(centre));
                         let danger_status = shot.over == Over::Nothing && region(centre) == "status" && ink_name == "danger";
                         let least = match least_for(&font, &ink_name) {
                             least if least == LEAST_QUIET && (on_inset || danger_status) => LEAST_TEXT,
