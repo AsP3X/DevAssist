@@ -13,7 +13,7 @@ use egui::{
     pos2, vec2,
 };
 
-use super::{Dialogs, Parts, Plan, Planned, Which, add, after, before, group, progress, remove, which};
+use super::{Dialogs, Parts, Plan, Planned, Which, add, after, before, folder, group, progress, remove, which};
 use crate::baker::Sheet;
 use crate::overlay;
 use crate::repos_screen::{self, Screen};
@@ -194,6 +194,7 @@ impl Window {
             Parts::Group(places) => (places.buttons, group::said(self.repos())),
             // The main button's words are made each frame; a test's copy of them lives as long as the test.
             Parts::Add(places) => (places.buttons, add::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
+            Parts::Folder(places) => (places.buttons, folder::said(self.repos())),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()
@@ -246,7 +247,7 @@ pub(crate) fn wheel(points: f32) -> Event {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) {
+pub(crate) fn git(dir: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)

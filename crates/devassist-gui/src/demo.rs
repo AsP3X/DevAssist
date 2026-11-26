@@ -159,8 +159,15 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 6] =
-    [("progress", show_progress), ("remove", show_remove), ("group", show_group), ("menu", show_menu), ("add", show_add), (ADD_FOLDER, show_add)];
+pub const SHOWS: [(&str, Opener); 7] = [
+    ("progress", show_progress),
+    ("remove", show_remove),
+    ("group", show_group),
+    ("menu", show_menu),
+    ("add", show_add),
+    (ADD_FOLDER, show_add),
+    ("import", show_import),
+];
 
 /// The name `--show` opens the Add dialog by with the keyboard in its folder field, so a picture shows the folders
 /// it suggests (the window gives the field the focus once the dialog is open).
@@ -306,6 +313,13 @@ fn show_add(repos: &mut Repos) {
     repos.ensure_selection();
 }
 
+/// The Import dialog, opened through the core (`Action::Import`) as `i` and the top row's "Import" open it, its
+/// folder field at the made-up [`CODE_DIR`] (the core starts it at the clone folder, which a demo keeps made-up too).
+fn show_import(repos: &mut Repos) {
+    repos.clone_dir = PathBuf::from(CODE_DIR);
+    repos.run(Action::Import);
+}
+
 #[cfg(test)]
 mod tests {
     use devassist_core::repos::state::Mode;
@@ -337,7 +351,7 @@ mod tests {
             repos.drain();
         }
         assert!(repos.mode == Mode::Progress && !repos.waiting());
-        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, add, add-folder, not nothing");
+        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, add, add-folder, import, not nothing");
     }
 
     #[test]
@@ -550,7 +564,7 @@ mod tests {
             })
             .drop_without_applying_deltas();
         let words: Vec<&str> = controls.iter().map(|(words, _)| words.as_str()).collect();
-        for asked in ["Update", "Move to group", "Open folder", "Remove", "x", "Update all"] {
+        for asked in ["Update", "Move to group", "Open folder", "Remove", "x", "Import", "Update all", "Add repository"] {
             assert!(words.contains(&asked), "no control {asked} among {words:?}");
         }
         for (words, rect) in &controls {
@@ -617,7 +631,7 @@ mod tests {
     /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
     fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 4]) {
         // Forget takes api and web off the list (in memory only); Delete from disk is refused.
-        let dialogs: [Dialog; 9] = [
+        let dialogs: [Dialog; 11] = [
             ("add", show_add, &[("Cancel", Expect::Free), ("Clone 2 repositories", Expect::Held)]),
             (
                 "add on one",
@@ -637,6 +651,17 @@ mod tests {
                 &[("Cancel", Expect::Free)],
             ),
             ("remove", show_remove, &[("Cancel", Expect::Free), ("Forget", Expect::Forgot(&["api", "web"])), ("Delete from disk", Expect::Held)]),
+            // The made-up folder is refused, or, should it be there, the held core refuses the import: either way nothing
+            // changes.
+            ("import", show_import, &[("Cancel", Expect::Free), ("Import", Expect::Free)]),
+            (
+                "import a folder that is there",
+                |repos| {
+                    show_import(repos);
+                    repos.set_path_input(&std::env::temp_dir().display().to_string());
+                },
+                &[("Import", Expect::Held)],
+            ),
             ("group", show_group, &[("Cancel", Expect::Free), ("Move", Expect::Free)]),
             (
                 "group into Tools",
@@ -681,7 +706,7 @@ mod tests {
             }
         }
         // A click on each dialog's scrim.
-        for open in [show_remove, show_group, show_progress, show_add] {
+        for open in [show_remove, show_group, show_progress, show_add, show_import] {
             fresh(window, open);
             window.click(pos(30.0, 450.0));
             still_held(window, "a click on the scrim", Expect::Free, before);

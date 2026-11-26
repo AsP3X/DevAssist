@@ -586,6 +586,9 @@ fn every_text_in_the_window_holds_its_contrast_on_all_six_backdrops() {
 enum Over {
     /// Nothing: the screen's own controls are measured.
     Nothing,
+    /// Nothing, in windows narrower than the app allows, where the top row gives way ([`TOP_ROW_SIZES`]): only the
+    /// top row's controls are measured.
+    TopRow,
     /// A dialog, on its scrim.
     Dialog,
     /// A dialog, on its scrim, with Enter pressed once it is open: the Add dialog then says, under its folder field,
@@ -616,7 +619,21 @@ impl Over {
     fn is_dialog(self) -> bool {
         matches!(self, Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_))
     }
+
+    /// Nothing is over the screen.
+    fn is_screen(self) -> bool {
+        matches!(self, Over::Nothing | Over::TopRow)
+    }
 }
+
+/// Windows narrower than the app allows (the sidebar shown), where the top row gives way: its capsule shows its icons
+/// only ([`TOP_COMPACT`]), and the main button its icon too ([`TOP_BARE`]). In every window the app allows, the top row
+/// has all its words.
+const TOP_COMPACT: [f32; 2] = [900.0, 600.0];
+/// The narrower of the two.
+const TOP_BARE: [f32; 2] = [780.0, 600.0];
+/// Both.
+const TOP_ROW_SIZES: [[f32; 2]; 2] = [TOP_COMPACT, TOP_BARE];
 
 /// A demo set up as a person would see it, to draw: its name, what is over the screen, and what sets it up.
 struct Shot {
@@ -635,8 +652,9 @@ struct Shot {
 /// opens it with an installed row highlighted (its ticks, the installed rows at half strength, "archived" and
 /// "private", the status line, the note), searched so that a tick is hidden ("Also ticked") with the folder refused
 /// (the danger note), and with GitHub failed and a plain word typed (the status line in the danger colour, "Retry",
-/// the row that lists the account).
-const SHOTS: [Shot; 16] = [
+/// the row that lists the account); the screen without repositories (its panel's two lines, the top row), the top row
+/// where it gives way, and the Import dialog as the demo opens it and with a folder the core refused.
+const SHOTS: [Shot; 20] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -731,6 +749,25 @@ const SHOTS: [Shot; 16] = [
             repos.set_add_filter("zzzz");
         },
     },
+    Shot {
+        name: "empty",
+        over: Over::Nothing,
+        set_up: |repos| {
+            repos.installed.clear();
+            repos.marked.clear();
+        },
+    },
+    Shot { name: "top row", over: Over::TopRow, set_up: |_| {} },
+    Shot { name: "import", over: Over::Dialog, set_up: |repos| demo::show(repos, "import").unwrap() },
+    Shot {
+        name: "import refused",
+        over: Over::Entered,
+        set_up: |repos| {
+            demo::show(repos, "import").unwrap();
+            // A relative folder: the core refuses it when Enter imports.
+            repos.set_path_input("code");
+        },
+    },
 ];
 
 /// The demo's Add dialog searched for "p", for the shots that point at its rows: acme/api (installed),
@@ -746,7 +783,11 @@ fn set_up_pointing(repos: &mut Repos) {
 /// The window sizes a shot is drawn at: the design's, and for an overlay also the smallest the window allows, where
 /// a dialog lies over the sidebar as well as the table.
 fn sizes(over: Over) -> &'static [[f32; 2]] {
-    if over == Over::Nothing { &[WINDOW] } else { &[WINDOW, MIN_WINDOW] }
+    match over {
+        Over::Nothing => &[WINDOW],
+        Over::TopRow => &TOP_ROW_SIZES,
+        _ => &[WINDOW, MIN_WINDOW],
+    }
 }
 
 /// How many frames a shot is drawn for before the one measured: the overlay opens, its glass is placed and baked,
@@ -975,6 +1016,10 @@ struct Frame {
     found_box: Option<Rect>,
     /// The rows of the Add dialog's found repositories, each with whether it is installed.
     rows: Vec<(Rect, bool)>,
+    /// The top row's capsule and main button, when the screen placed them.
+    top: Option<(Rect, Rect)>,
+    /// The words the panel shows instead of the table, when it shows none.
+    state: Vec<String>,
 }
 
 /// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
@@ -1036,7 +1081,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             if let Some(plan) = &plan {
                 plan.add_wants(&mut wants);
             }
-            if shot.over == Over::Nothing {
+            if shot.over.is_screen() {
                 let status = repos_screen::status(&session);
                 let shown = ShellShown { mode, waiting: 0, status: status.as_ref() };
                 shell::draw(ui, &layout, &mut true, &mut Page::Repositories, shown);
@@ -1055,13 +1100,13 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
                 (Some(found), Some(repos)) => dialogs::add_rows(found, repos, &dialogs),
                 _ => Vec::new(),
             };
-            drew = Some((count, wants.as_slice().to_vec(), layout));
+            drew = Some((count, wants.as_slice().to_vec(), layout, plan.as_ref().and_then(repos_screen::top_row)));
         });
         picture::take_textures(std::mem::take(&mut output.textures_delta), textures);
         if let Some((_, picture)) = &glass {
             textures.insert(GLASS_TEXTURE, picture.image());
         }
-        let (overlay, wants, layout) = drew.unwrap();
+        let (overlay, wants, layout, top) = drew.unwrap();
         last = Some(Frame {
             ctx: ctx.clone(),
             shapes: std::mem::take(&mut output.shapes),
@@ -1070,9 +1115,11 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             layout,
             found_box: found,
             rows: rows.clone(),
+            top,
+            state: state_words(&session),
         });
     }
-    if shot.over != Over::Nothing {
+    if !shot.over.is_screen() {
         assert!(overlay::is_open(&ctx) && glass.is_some(), "{}: its overlay is not drawn", shot.name);
     }
     let last = last.unwrap();
@@ -1080,6 +1127,11 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         hover_lands(shot.name, &last, index, size, mode);
     }
     last
+}
+
+/// The words the panel of `session` shows instead of the table: its title and the lines under it; none with a table.
+fn state_words(session: &Session) -> Vec<String> {
+    repos_screen::state_text(session).map_or_default(|(title, lines)| std::iter::once(title).chain(lines).collect())
 }
 
 /// What a person does in the frame `frame` of a shot over `over`: the folder field's keys and pointer at `pointer`,
@@ -1125,9 +1177,11 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
     let mut bitmap = stage.window.clone();
     lay_panes(&mut bitmap, stage, &frame.wants);
     let dots = assets::icon(Icon::Ellipsis).to_string();
-    // The screen's controls whose text is measured: the selection bar, "Update all" and the status bar.
-    let controls: Vec<(&str, Rect)> =
-        frame.wants.iter().filter(|want| ["selection", "actions", "status"].contains(&want.id)).map(|want| (want.id, want.rect)).collect();
+    // The screen's controls whose text is measured: the selection bar, the top row's capsule and main button, and the
+    // status bar; in the windows where the top row gives way, the top row's alone.
+    let ids: &[&str] = if shot.over == Over::TopRow { &["actions"] } else { &["selection", "actions", "status"] };
+    let mut controls: Vec<(&str, Rect)> = frame.wants.iter().filter(|want| ids.contains(&want.id)).map(|want| (want.id, want.rect)).collect();
+    controls.extend(frame.top.map(|(_, main)| ("main", main)));
     // What part of the screen lies under a place.
     let region = |at: Pos2| {
         if let Some((id, _)) = frame.wants.iter().map(|want| (want.id, want.rect)).find(|(_, rect)| rect.contains(at)) {
@@ -1153,7 +1207,10 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
             Shape::Text(text) => {
                 if let Some((words, rect, ink, font)) = text_of(text, clipped.clip_rect) {
                     let wanted = match shot.over {
-                        Over::Nothing => words == dots || controls.iter().any(|(_, control)| control.contains(rect.center())),
+                        Over::Nothing => {
+                            words == dots || frame.state.contains(&words) || controls.iter().any(|(_, control)| control.contains(rect.center()))
+                        }
+                        Over::TopRow => controls.iter().any(|(_, control)| control.contains(rect.center())),
                         Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_) => on_overlay,
                         Over::Menu => on_overlay || words == dots,
                     };
@@ -1308,7 +1365,9 @@ fn measure_all_shots(renderings: &[Rendering]) -> Vec<ShotRow> {
         .iter()
         .flat_map(|&rendering| {
             BACKDROPS.into_iter().flat_map(move |backdrop| {
-                [WINDOW, MIN_WINDOW].into_iter().flat_map(move |size| [Mode::Light, Mode::Dark].map(|mode| Take { backdrop, rendering, size, mode }))
+                [WINDOW, MIN_WINDOW, TOP_COMPACT, TOP_BARE]
+                    .into_iter()
+                    .flat_map(move |size| [Mode::Light, Mode::Dark].map(|mode| Take { backdrop, rendering, size, mode }))
             })
         })
         .collect();
@@ -1359,4 +1418,28 @@ fn every_text_of_the_dialogs_the_menu_and_the_selection_bar_holds_its_contrast_o
         .collect();
     let failures = failures.join("\n");
     assert!(failures.is_empty(), "text below its contrast:\n{failures}");
+}
+
+/// Not a check: pictures of the demo's screen at the smallest window the app allows (the top row with all its words)
+/// and where the top row gives way, in windows narrower than that ([`TOP_ROW_SIZES`]), light and dark, drawn as the shots are (the glass frosted on the CPU, on the first backdrop),
+/// into the folder the environment variable `DEVASSIST_PICTURES` names. Run by hand with `--ignored`; without the
+/// variable it draws nothing.
+#[test]
+#[ignore = "draws pictures for a person to look at"]
+fn pictures_of_the_top_row_where_it_gives_way() {
+    let Ok(folder) = std::env::var("DEVASSIST_PICTURES") else { return };
+    let shot = Shot { name: "top row", over: Over::TopRow, set_up: |_| {} };
+    for size in [MIN_WINDOW].into_iter().chain(TOP_ROW_SIZES) {
+        for mode in [Mode::Light, Mode::Dark] {
+            let scene = Scene { size, pixels_per_point: 1.0, mode, backdrop: BACKDROPS[0].to_owned(), blur: true };
+            let stage = Stage::new(scene, Rendering::Frosted);
+            let mut textures = HashMap::new();
+            let frame = draw_shot(&shot, &stage, &mut textures);
+            let mut bitmap = stage.window.clone();
+            lay_panes(&mut bitmap, &stage, &frame.wants);
+            picture::paint(&mut bitmap, &frame.ctx.tessellate(frame.shapes, 1.0), &textures);
+            let name = format!("t5-top-row-{}x{}-{}.png", size[0], size[1], if mode == Mode::Dark { "dark" } else { "light" });
+            crate::screenshot::write_png(&std::path::Path::new(&folder).join(name), &bitmap.image()).unwrap();
+        }
+    }
 }

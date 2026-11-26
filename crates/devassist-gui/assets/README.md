@@ -81,6 +81,11 @@ The folder field's icon, `folder` (`e0d7`, the design's `field(…, { iconName: 
 same way from the bundled `lucide.ttf`, with a short script of the standard library; nothing was downloaded. The same
 reading gives `folder-open` as `e247`, `folder-git-2` as `e40a` and `search` as `e151`, as `src/assets.rs` has them.
 
+The top row's icons, `folder-input` (`e334`, "Import") and `plus` (`e13d`, "Add repository"), were read on 2026-11-26
+the same way from the bundled `lucide.ttf`, with a short script of the standard library; nothing was downloaded. The
+same reading gives `folder` as `e0d7`, `group` as `e464` and `arrow-down-to-line` as `e455`, as `src/assets.rs` has
+them.
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

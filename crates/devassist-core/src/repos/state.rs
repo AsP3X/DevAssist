@@ -669,6 +669,10 @@ pub struct Repos {
     /// Nothing runs and nothing is written: set by `hold_work`, and by
     /// `reading` once its first read has started.
     work_held: bool,
+    /// GitHub is not asked for the catalog or the pull request counts,
+    /// while local work runs as always: set by `testing::hold_github`, for
+    /// the tests that run real work on checkouts whose origin names GitHub.
+    github_held: bool,
     /// What the status line said before an automatic pull took it over.
     /// A pull that brings nothing puts it back.
     watch_status: Option<(String, bool)>,
@@ -825,6 +829,7 @@ impl Repos {
             // The first pull runs as soon as the startup check is done.
             watch_due: Instant::now(),
             work_held: false,
+            github_held: false,
             watch_status: None,
             pulls: HashMap::new(),
             pulls_generation: 0,
@@ -4159,7 +4164,7 @@ impl Repos {
     /// repository has, by state. Needs a sign-in; without one the column
     /// stays empty.
     fn reload_pull_counts(&mut self) {
-        if self.work_held {
+        if self.work_held || self.github_held {
             return;
         }
         let mut repos: Vec<(String, String)> = Vec::new();
@@ -4197,7 +4202,7 @@ impl Repos {
     }
 
     fn reload_github_only(&mut self) {
-        if self.work_held {
+        if self.work_held || self.github_held {
             return;
         }
         self.remote_generation += 1;
@@ -4691,6 +4696,14 @@ pub mod testing {
         }
     }
 
+    /// Keeps `repos` from asking GitHub (or `gh` for a token) for its
+    /// catalog and its pull request counts from now on, as a reload after
+    /// an import would; local work (reading, importing, saving) runs as
+    /// always. For tests whose checkouts' origins name GitHub.
+    pub fn hold_github(repos: &mut Repos) {
+        repos.github_held = true;
+    }
+
     /// Four repositories at paths of their own, so groups can be saved.
     pub fn grouped_app() -> Repos {
         let mut app = Repos::empty(test_settings());
@@ -4709,6 +4722,24 @@ pub mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+
+    #[test]
+    fn a_reload_held_from_github_asks_github_nothing() {
+        let mut app = grouped_app();
+        app.remotes_state = RemoteState::Ready;
+        hold_github(&mut app);
+        let (remotes, pulls) = (app.remote_generation, app.pulls_generation);
+        // What a reload after an import asks of GitHub: its catalog, and the pull request counts of the rows.
+        app.reload_github_only();
+        app.reload_pull_counts();
+        assert_eq!(
+            (app.remote_generation, app.pulls_generation),
+            (remotes, pulls),
+            "GitHub was asked"
+        );
+        assert!(app.remotes_state == RemoteState::Ready);
+        assert!(!app.work_held(), "local work is not held");
+    }
 
     #[test]
     fn the_line_after_a_push_to_a_service_counts_the_pull_requests() {

@@ -17,13 +17,12 @@
 //! (`Repos::add_status`, with a spinner while it looks something up, and "Retry" when GitHub failed), what it
 //! says when nothing is found (`Repos::add_empty_message`), and the reason it refused the folder, under the field.
 
-use devassist_core::prompt;
 use devassist_core::repos::github::RemoteRepo;
 use devassist_core::repos::state::{Action, AddStatus, Repos};
 use egui::text::LayoutJob;
-use egui::{Align2, Event, FontFamily, Id, Key, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align2, FontFamily, Id, Key, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 
-use super::{Dialogs, Header, Parts, Plan, inset, main_id, rows};
+use super::{Dialogs, Header, Parts, Plan, folder_suggestions, inset, main_id, rows, take_press};
 use crate::assets::{self, Icon};
 use crate::overlay::{self, Kind};
 use crate::theme::{
@@ -84,7 +83,7 @@ fn retry_id() -> Id {
 pub(super) struct State {
     /// The folder field's text: the core's `clone_dir` when the dialog opens.
     folder: String,
-    /// The folders that match it (`prompt::suggest`), asked for again only when it changes.
+    /// The folders that match it ([`folder_suggestions`]), asked for again only when it changes.
     suggestions: Vec<String>,
     /// Why the core refused to clone into it, said under the field until the text changes.
     refused: Option<String>,
@@ -105,30 +104,6 @@ impl State {
         let suggestions = folder_suggestions(repos, &folder);
         State { folder, suggestions, refused: None, shown: None, search: repos.add_filter.clone() }
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// How often this thread's Add dialogs asked the disk for folders.
-    static DISK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// How often this thread's Add dialogs asked the disk for folders so far.
-#[cfg(test)]
-fn disk_reads() -> usize {
-    DISK_READS.with(std::cell::Cell::get)
-}
-
-/// The folders that match `text`, for the folder field: on disk (`prompt::suggest`) for a live session; the
-/// demo's made-up ones ([`crate::demo::folders_matching`]) while the core holds all work, so a demo or a picture
-/// never asks the disk.
-fn folder_suggestions(repos: &Repos, text: &str) -> Vec<String> {
-    if repos.work_held() {
-        return crate::demo::folders_matching(text);
-    }
-    #[cfg(test)]
-    DISK_READS.with(|reads| reads.set(reads.get() + 1));
-    prompt::suggest(text)
 }
 
 /// The core's status line, as the dialog shows it: without the terminal app's hint at Tab, which in the window
@@ -322,23 +297,6 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, state: &State
     let also = !hidden_ticks(repos, &list).is_empty();
     let places = add_places(window, header.height(), list.len(), folder_rows, retry, also);
     Plan::dialog(header, Parts::Add(places))
-}
-
-/// Takes every press of `key` without modifiers from this frame's input, also its repeats while it is held; says
-/// whether one was a fresh press (a held key acts once). With `text`, the text it types goes too.
-fn take_press(ui: &Ui, key: Key, text: Option<&str>) -> bool {
-    ui.input_mut(|input| {
-        let mut fresh = false;
-        input.events.retain(|event| match event {
-            Event::Key { key: pressed_key, pressed: true, repeat, modifiers, .. } if *pressed_key == key && modifiers.is_none() => {
-                fresh |= !*repeat;
-                false
-            }
-            Event::Text(typed) => text != Some(typed.as_str()),
-            _ => true,
-        });
-        fresh
-    })
 }
 
 /// What a person did in the Add dialog in one frame.
@@ -711,7 +669,7 @@ fn act(ui: &Ui, repos: &mut Repos, state: &mut State, done: &Done) {
 mod tests {
     use devassist_core::repos::state::testing::{remote, test_settings};
     use devassist_core::repos::state::{HELD, Mode as CoreMode, RemoteState};
-    use egui::{Memory, Modifiers, Pos2};
+    use egui::{Event, Memory, Modifiers, Pos2};
 
     use super::super::Which;
     use super::super::testing::{Temp, Window, until, wheel};
@@ -1152,7 +1110,7 @@ mod tests {
 
     #[test]
     fn the_demo_suggests_its_own_folders_and_never_asks_the_disk() {
-        let before = disk_reads();
+        let before = super::super::disk_reads();
         let mut window = adding();
         let sep = std::path::MAIN_SEPARATOR;
         let code = crate::demo::CODE_DIR;
@@ -1164,13 +1122,13 @@ mod tests {
         assert_eq!(state(&window).suggestions.len(), 4, "{:?}", state(&window).suggestions);
         window.frame(vec![Event::Text("P".to_owned())]);
         assert_eq!(state(&window).suggestions, [format!("{code}{sep}play")], "matched as Tab matches, ignoring case");
-        assert_eq!(disk_reads(), before, "the held demo read the disk for folders");
+        assert_eq!(super::super::disk_reads(), before, "the held demo read the disk for folders");
         // A live session asks the disk.
         let mut repos = Repos::offline(test_settings());
         repos.run(Action::Add);
         let mut window = Window::new(Session::Live(Box::new(repos)));
         window.frame(Vec::new());
-        assert_eq!(disk_reads(), before + 1);
+        assert_eq!(super::super::disk_reads(), before + 1);
     }
 
     #[test]

@@ -1,6 +1,7 @@
-//! The Repositories screen in the shell: "Update all" in the top row, the toolbar above the panel (the filter, the
-//! sort, and the selection bar with what can be done to the ticked rows), the table on the panel or the sentence
-//! that says why there is none, the status bar's words, and the keys of the terminal app. Every change goes
+//! The Repositories screen in the shell: "Import", "Update all" and the main button "Add repository" in the top row
+//! (also with no repositories), the toolbar above the panel (the filter, the sort, and the selection bar with what
+//! can be done to the ticked rows), the table on the panel or the sentence that says why there is none, the status
+//! bar's words, and the keys of the terminal app (`a` opens Add, `i` Import). Every change goes
 //! through a method of the core's `Repos`; what it says comes back through the status bar.
 //!
 //! Where the terminal app and the window differ: a double click on a row does not update it, Esc does not cancel a
@@ -8,7 +9,7 @@
 //! deletion from disk), and `d` on a group's header with nothing ticked does not dissolve the group (the core
 //! would, without asking): the status line asks for repositories instead.
 
-use devassist_core::repos::state::{GROUP_KEY, Mode as CoreMode, Repos, SortMode};
+use devassist_core::repos::state::{Action, GROUP_KEY, Mode as CoreMode, Repos, SortMode};
 use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, PointerButton, Pos2, Rect, Sense, Ui, pos2};
 
 use crate::assets::{self, Icon};
@@ -18,7 +19,9 @@ use crate::repos_view::{self, Line, Status};
 use crate::session::Session;
 use crate::shell::{self, Layout, Page, Wants};
 use crate::table::{self, Did};
-use crate::theme::{self, FIELD_MIN_WIDTH, FIELD_WIDTH, Mode, PAGE_ROWS, PANEL_TEXT_INSET, RADIUS_PANEL, STATE_GAP, TEXT, TEXT_TITLE, TOOLBAR_GAP};
+use crate::theme::{
+    self, BAR_GAP, FIELD_MIN_WIDTH, FIELD_WIDTH, Mode, PAGE_ROWS, PANEL_TEXT_INSET, RADIUS_PANEL, STATE_GAP, TEXT, TEXT_TITLE, TOOLBAR_GAP,
+};
 use crate::widgets::{self, Item, font};
 
 /// The filter field's glass pane.
@@ -29,8 +32,16 @@ const VIEW: &str = "view";
 const SELECTION: &str = "selection";
 /// The glass pane of the top row's actions.
 const ACTIONS: &str = "actions";
+/// The top row's action: add the clones in a folder.
+const IMPORT: &str = "Import";
 /// The top row's action: update every repository.
 const UPDATE_ALL: &str = "Update all";
+/// The top row's main button: find repositories on GitHub and clone them.
+const ADD_REPOSITORY: &str = "Add repository";
+/// The places of the top row's actions among its capsule's items ([`top_items`]): Import.
+const TOP_IMPORT: usize = 0;
+/// Update all.
+const TOP_UPDATE_ALL: usize = 1;
 /// The selection bar's actions on what is ticked, as the drawing words them.
 const UPDATE: &str = "Update";
 /// Move what is ticked into a group.
@@ -57,8 +68,8 @@ const BY_NAME: &str = "By name";
 const ATTENTION_FIRST: &str = "Needs attention first";
 /// The title of a panel without repositories.
 const NO_REPOSITORIES: &str = "No repositories yet";
-/// What to do without repositories.
-const ADD_IN_TERMINAL: &str = "Add them in the terminal app for now: adding from the window comes next.";
+/// What to do without repositories: the top row's two buttons.
+const ADD_OR_IMPORT: &str = "Add repository finds them on GitHub. Import takes clones you already have.";
 /// The title of a panel whose settings file could not be read.
 const BROKEN: &str = "The settings file has a mistake";
 /// What to do about a settings file with a mistake.
@@ -115,14 +126,17 @@ pub fn open_menu(repos: &mut Repos, key: &str) {
     repos.enter_row();
 }
 
-/// How a capsule of actions shows them: with their words, or with their icons only when the room is too narrow.
+/// How a capsule of actions shows them, or the top row its actions and its main button: with their words, or with
+/// their icons only when the room is too narrow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fit {
     /// Icons and words.
     Full,
-    /// Icons only; each word is its button's name and hover text.
+    /// Icons only; each word is its button's name and hover text. In the top row, the capsule's actions; the main
+    /// button keeps its words.
     Compact,
-    /// Icons only, and the count without its word ("9999" for "9999 selected", which is its name and hover text).
+    /// Icons only, and the selection bar's count without its word ("9999" for "9999 selected", which is its name and
+    /// hover text); in the top row, the main button with its icon alone too.
     Bare,
 }
 
@@ -130,6 +144,15 @@ enum Fit {
 /// baked where they are drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
+    /// The toolbar, when there are repositories to filter, sort and tick.
+    toolbar: Option<Toolbar>,
+    /// The top row's actions and its main button, when there is room for them.
+    top: Option<Top>,
+}
+
+/// The toolbar's controls.
+#[derive(Clone, Debug, PartialEq)]
+struct Toolbar {
     /// The filter field.
     field: Rect,
     /// The view capsule.
@@ -138,20 +161,32 @@ pub struct Plan {
     sort: &'static str,
     /// The selection capsule, how many are ticked and how it fits, when something is ticked.
     selection: Option<(Rect, usize, Fit)>,
-    /// The top row's capsule with "Update all" and how it fits, when there is room for it.
-    update_all: Option<(Rect, Fit)>,
+}
+
+/// The top row's controls: the capsule with "Import" and "Update all", the main button "Add repository" at its right,
+/// and how they fit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Top {
+    /// The capsule.
+    actions: Rect,
+    /// The main button.
+    main: Rect,
+    /// How they fit.
+    fit: Fit,
 }
 
 impl Plan {
-    /// Adds the glass of the screen's controls to the panes baked this frame.
+    /// Adds the glass of the screen's controls to the panes baked this frame. The main button is a fill, not glass.
     pub fn add_wants(&self, wants: &mut Wants) {
-        widgets::add_glass(wants, FILTER, self.field);
-        widgets::add_glass(wants, VIEW, self.view);
-        if let Some((rect, ..)) = &self.selection {
-            widgets::add_glass(wants, SELECTION, *rect);
+        if let Some(toolbar) = &self.toolbar {
+            widgets::add_glass(wants, FILTER, toolbar.field);
+            widgets::add_glass(wants, VIEW, toolbar.view);
+            if let Some((rect, ..)) = &toolbar.selection {
+                widgets::add_glass(wants, SELECTION, *rect);
+            }
         }
-        if let Some((rect, _)) = &self.update_all {
-            widgets::add_glass(wants, ACTIONS, *rect);
+        if let Some(top) = &self.top {
+            widgets::add_glass(wants, ACTIONS, top.actions);
         }
     }
 }
@@ -162,22 +197,26 @@ pub fn has_toolbar(session: &Session) -> bool {
     session.repos().is_some_and(|repos| !repos.installed.is_empty())
 }
 
-/// The screen's controls in `layout`, measured with `painter`'s faces; `None` when the screen has no toolbar (no
-/// repositories: nothing to filter, tick or update).
+/// The screen's controls in `layout`, measured with `painter`'s faces: the top row's, and the toolbar when there are
+/// repositories; `None` when nothing is loaded (the settings file has a mistake).
 #[must_use]
 pub fn plan(painter: &Painter, layout: &Layout, session: &Session) -> Option<Plan> {
-    let repos = session.repos().filter(|_| has_toolbar(session))?;
-    let sort = if repos.sort == SortMode::NeedsUpdate { ATTENTION_FIRST } else { BY_NAME };
-    let view_width = widgets::capsule_width(painter, &view_items(sort));
-    let count = repos.marked.len();
-    let (number, words) = (count.to_string(), selected(count));
-    let fits = [Fit::Full, Fit::Compact, Fit::Bare];
-    let selection_widths = (count > 0).then(|| fits.map(|fit| widgets::capsule_width(painter, &selection_items(&number, &words, fit))));
-    let (field, view, selection) = places(layout.toolbar, view_width, selection_widths);
+    let repos = session.repos()?;
+    let toolbar = has_toolbar(session).then(|| {
+        let sort = if repos.sort == SortMode::NeedsUpdate { ATTENTION_FIRST } else { BY_NAME };
+        let view_width = widgets::capsule_width(painter, &view_items(sort));
+        let count = repos.marked.len();
+        let (number, words) = (count.to_string(), selected(count));
+        let fits = [Fit::Full, Fit::Compact, Fit::Bare];
+        let selection_widths = (count > 0).then(|| fits.map(|fit| widgets::capsule_width(painter, &selection_items(&number, &words, fit))));
+        let (field, view, selection) = places(layout.toolbar, view_width, selection_widths);
+        Toolbar { field, view, sort, selection: selection.map(|(rect, fit)| (rect, count, fit)) }
+    });
     let title_width = widgets::width(painter, Page::Repositories.name(), &shell::title_font());
-    let top_widths = [Fit::Full, Fit::Compact].map(|fit| widgets::capsule_width(painter, &top_items(fit)));
-    let update_all = top_place(shell::action_room(layout, title_width), top_widths);
-    Some(Plan { field, view, sort, selection: selection.map(|(rect, fit)| (rect, count, fit)), update_all })
+    let actions = [Fit::Full, Fit::Compact].map(|fit| widgets::capsule_width(painter, &top_items(fit)));
+    let main = [false, true].map(|compact| widgets::main_action_width(painter, ADD_REPOSITORY, compact, layout.actions.height()));
+    let top = top_place(shell::action_room(layout, title_width), actions, main);
+    Some(Plan { toolbar, top })
 }
 
 /// The view capsule's items: the sort, whose words say which it is (no fill, as the design draws it).
@@ -185,9 +224,14 @@ fn view_items(sort: &str) -> [Item<'_>; 1] {
     [Item::action(Icon::ArrowUpDown, sort)]
 }
 
-/// The top row's capsule: "Update all".
-fn top_items(fit: Fit) -> [Item<'static>; 1] {
-    [Item::Action { icon: Icon::ArrowDownToLine, words: UPDATE_ALL, on: false, danger: false, compact: fit != Fit::Full }]
+/// The top row's capsule: "Import" and "Update all", with their icons only unless it is [`Fit::Full`]. Their places
+/// are `TOP_IMPORT` and `TOP_UPDATE_ALL`.
+fn top_items(fit: Fit) -> [Item<'static>; 2] {
+    let compact = fit != Fit::Full;
+    [
+        Item::Action { icon: Icon::FolderInput, words: IMPORT, on: false, danger: false, compact },
+        Item::Action { icon: Icon::ArrowDownToLine, words: UPDATE_ALL, on: false, danger: false, compact },
+    ]
 }
 
 /// The selection capsule's items, in the drawing's order: how many are ticked (`words`, or `number` alone when it
@@ -240,17 +284,17 @@ fn places(toolbar: Rect, view_width: f32, widths: Option<[f32; 3]>) -> (Rect, Re
     (field, view, selection)
 }
 
-/// The place of the top row's capsule, `widths` wide with its words and without them, at the right end of `room`
-/// ([`shell::action_room`]): with its words when they fit, else its icon only; `None` when not even that fits.
-fn top_place(room: Rect, [full, compact]: [f32; 2]) -> Option<(Rect, Fit)> {
-    let (width, fit) = if full <= room.width() {
-        (full, Fit::Full)
-    } else if compact <= room.width() {
-        (compact, Fit::Compact)
-    } else {
-        return None;
-    };
-    Some((Rect::from_min_max(pos2(room.right() - width, room.top()), room.max), fit))
+/// The places of the top row's capsule, `actions` wide with its words and without them, and of its main button,
+/// `main` wide with its words and without them, at the right end of `room` ([`shell::action_room`]), the main button
+/// rightmost and [`BAR_GAP`] between them. They take the first fit that fits: all words ([`Fit::Full`]), then the
+/// capsule's icons only ([`Fit::Compact`]: the main button keeps its words longest), then the main button's icon
+/// too ([`Fit::Bare`]); `None` when not even that fits, so nothing lies over the title or leaves the row.
+fn top_place(room: Rect, [full, compact]: [f32; 2], [main_full, main_compact]: [f32; 2]) -> Option<Top> {
+    let fits = [(Fit::Full, full, main_full), (Fit::Compact, compact, main_full), (Fit::Bare, compact, main_compact)];
+    let (fit, actions, main) = fits.into_iter().find(|(_, actions, main)| actions + BAR_GAP + main <= room.width())?;
+    let main = Rect::from_min_max(pos2(room.right() - main, room.top()), room.max);
+    let actions = Rect::from_min_max(pos2(main.left() - BAR_GAP - actions, room.top()), pos2(main.left() - BAR_GAP, room.bottom()));
+    Some(Top { actions, main, fit })
 }
 
 /// What the status bar says for the screen; `None` when nothing is loaded.
@@ -269,7 +313,7 @@ pub fn state_text(session: &Session) -> Option<(String, Vec<String>)> {
     };
     if repos.installed.is_empty() {
         // While the folders are still being read, the status bar says so and the panel waits.
-        return (!repos.waiting()).then(|| (NO_REPOSITORIES.to_owned(), vec![ADD_IN_TERMINAL.to_owned()]));
+        return (!repos.waiting()).then(|| (NO_REPOSITORIES.to_owned(), vec![ADD_OR_IMPORT.to_owned()]));
     }
     if filter_hides_everything(repos) {
         return Some((nothing_matches(&repos.list_filter), vec![ESC_CLEARS.to_owned()]));
@@ -316,6 +360,10 @@ pub(crate) enum Command {
     Group,
     /// Ask before removing the ticked rows, or the highlighted one (`d`, Delete).
     Remove,
+    /// Open Add, to find repositories on GitHub (`a`).
+    Add,
+    /// Open Import, to add the clones in a folder (`i`).
+    Import,
 }
 
 impl Command {
@@ -323,7 +371,14 @@ impl Command {
     /// wildcard: a new command is placed here on purpose.
     fn acts(self) -> bool {
         match self {
-            Command::UpdateChosen | Command::UpdateAll | Command::Watch | Command::Open | Command::Group | Command::Remove => true,
+            Command::UpdateChosen
+            | Command::UpdateAll
+            | Command::Watch
+            | Command::Open
+            | Command::Group
+            | Command::Remove
+            | Command::Add
+            | Command::Import => true,
             Command::Move(_)
             | Command::End(_)
             | Command::Tick
@@ -343,7 +398,7 @@ impl Command {
 #[cfg(test)]
 impl Command {
     /// How many kinds of command there are: [`Command::kind`] gives each one its number below this.
-    pub(crate) const KINDS: usize = 18;
+    pub(crate) const KINDS: usize = 20;
 
     /// The number of this command's kind, whatever it carries, for the tests that press every key the screen knows
     /// and must reach every kind. No wildcard: a new command must be numbered here, and [`Command::KINDS`] grown.
@@ -367,6 +422,8 @@ impl Command {
             Command::Open => 15,
             Command::Group => 16,
             Command::Remove => 17,
+            Command::Add => 18,
+            Command::Import => 19,
         }
     }
 }
@@ -432,6 +489,8 @@ pub(crate) fn commands(events: &[Event]) -> Vec<Command> {
                         'o' | 'O' => Command::Open,
                         'm' | 'M' => Command::Group,
                         'd' => Command::Remove,
+                        'a' => Command::Add,
+                        'i' | 'I' => Command::Import,
                         _ => continue,
                     };
                     // A held key moves the highlight again and again, but acts once.
@@ -448,26 +507,37 @@ pub(crate) fn commands(events: &[Event]) -> Vec<Command> {
 }
 
 /// Every control of the screen's toolbar and top row that `plan` (from [`plan`]) places, with its words (an icon
-/// alone by its name), measured with `painter`'s faces: the filter field, the sort, each item of the selection bar
-/// and "Update all". For the tests that press every control; it reads the same items the screen draws.
+/// alone by its name), measured with `painter`'s faces: the filter field, the sort, each item of the selection bar,
+/// "Import", "Update all" and "Add repository". For the tests that press every control; it reads the same items the
+/// screen draws.
 #[cfg(test)]
 pub(crate) fn control_places(painter: &Painter, plan: &Plan) -> Vec<(String, Rect)> {
-    let mut controls = vec![(FILTER_HINT.to_owned(), plan.field), (plan.sort.to_owned(), plan.view)];
+    let mut controls = Vec::new();
     let words = |item: &Item<'_>| match *item {
         Item::Divider => "divider".to_owned(),
         Item::Action { icon, words: "", .. } => icon.name().to_owned(),
         Item::Label(words) | Item::Count { name: words, .. } | Item::Action { words, .. } => words.to_owned(),
     };
-    if let Some((rect, count, fit)) = plan.selection {
-        let (number, said) = (count.to_string(), selected(count));
-        let items = selection_items(&number, &said, fit);
-        controls.extend(items.iter().map(words).zip(widgets::item_rects(painter, rect, &items)));
+    if let Some(toolbar) = &plan.toolbar {
+        controls.extend([(FILTER_HINT.to_owned(), toolbar.field), (toolbar.sort.to_owned(), toolbar.view)]);
+        if let Some((rect, count, fit)) = toolbar.selection {
+            let (number, said) = (count.to_string(), selected(count));
+            let items = selection_items(&number, &said, fit);
+            controls.extend(items.iter().map(words).zip(widgets::item_rects(painter, rect, &items)));
+        }
     }
-    if let Some((rect, fit)) = plan.update_all {
-        let items = top_items(fit);
-        controls.extend(items.iter().map(words).zip(widgets::item_rects(painter, rect, &items)));
+    if let Some(top) = plan.top {
+        let items = top_items(top.fit);
+        controls.extend(items.iter().map(words).zip(widgets::item_rects(painter, top.actions, &items)));
+        controls.push((ADD_REPOSITORY.to_owned(), top.main));
     }
     controls
+}
+
+/// The top row's capsule and main button that `plan` places, for the contrast test's places.
+#[cfg(test)]
+pub(crate) fn top_row(plan: &Plan) -> Option<(Rect, Rect)> {
+    plan.top.map(|top| (top.actions, top.main))
 }
 
 /// The scroll that shows the whole line at `index` of lines of `heights` in `room` points, moving `scroll` as
@@ -488,6 +558,11 @@ fn follow(heights: &[f32], index: usize, scroll: f32, room: f32) -> f32 {
 /// The id of the filter field.
 fn filter_id() -> Id {
     Id::unique("repositories-filter")
+}
+
+/// The id of the top row's main button.
+fn main_id() -> Id {
+    Id::unique("repositories-add")
 }
 
 /// Draws the screen in `layout`: the toolbar of `plan` (from [`plan`] this frame), then the table or the sentence
@@ -628,20 +703,32 @@ pub fn show(
     keep_menu(repos, layout.panel, screen);
 }
 
-/// Draws the controls of `plan` (the filter, the sort, the selection bar and "Update all") and, with `keys`, does
-/// what a press on them asks of `repos`. A double click is one press: its second click does nothing (as a held key
-/// acts once), so "Open folder" opens each folder once and "Update all" queues one run.
+/// Draws the controls of `plan` (the top row's "Import", "Update all" and "Add repository", and, with repositories,
+/// the filter, the sort and the selection bar) and, with `keys`, does what a press on them asks of `repos`. A double
+/// click is one press: its second click does nothing (as a held key acts once), so "Open folder" opens each folder
+/// once and "Update all" queues one run.
 fn controls(ui: &mut Ui, plan: &Plan, repos: &mut Repos, palette: theme::Palette, keys: bool) {
     let second =
         ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary) || input.pointer.button_triple_clicked(PointerButton::Primary));
     let keys = keys && !second;
+    if let Some(top) = plan.top {
+        match widgets::capsule(ui, top.actions, &top_items(top.fit), palette) {
+            Some(TOP_IMPORT) if keys => repos.run(Action::Import),
+            Some(TOP_UPDATE_ALL) if keys => repos.update_all(),
+            _ => {}
+        }
+        if widgets::main_action(ui, top.main, Icon::Plus, ADD_REPOSITORY, top.fit == Fit::Bare, palette, main_id()) && keys {
+            repos.run(Action::Add);
+        }
+    }
+    let Some(toolbar) = &plan.toolbar else { return };
     let mut text = repos.list_filter.clone();
-    widgets::field(ui, plan.field, &mut text, FILTER_HINT, Icon::Search, palette, filter_id());
+    widgets::field(ui, toolbar.field, &mut text, FILTER_HINT, Icon::Search, palette, filter_id());
     repos.set_list_filter(&text);
-    if widgets::capsule(ui, plan.view, &view_items(plan.sort), palette).is_some() && keys {
+    if widgets::capsule(ui, toolbar.view, &view_items(toolbar.sort), palette).is_some() && keys {
         repos.toggle_sort();
     }
-    let ticked = plan.selection.map(|(rect, count, fit)| (rect, count.to_string(), selected(count), fit));
+    let ticked = toolbar.selection.map(|(rect, count, fit)| (rect, count.to_string(), selected(count), fit));
     if let Some((rect, number, words, fit)) = &ticked
         && let Some(pressed) = widgets::capsule(ui, *rect, &selection_items(number, words, *fit), palette)
         && keys
@@ -654,12 +741,6 @@ fn controls(ui: &mut Ui, plan: &Plan, repos: &mut Repos, palette: theme::Palette
             BAR_CLEAR => repos.clear_marks(),
             _ => {}
         }
-    }
-    if let Some((rect, fit)) = plan.update_all
-        && widgets::capsule(ui, rect, &top_items(fit), palette).is_some()
-        && keys
-    {
-        repos.update_all();
     }
 }
 
@@ -724,6 +805,8 @@ fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
         Command::Open => repos.open_selected(),
         Command::Group => repos.open_group_prompt(),
         Command::Remove => remove(repos),
+        Command::Add => repos.run(Action::Add),
+        Command::Import => repos.run(Action::Import),
         Command::Refresh => {}
     }
     true
@@ -1001,9 +1084,12 @@ mod tests {
         assert_eq!(read(typed(Key::S, "S")), [Command::Sort]);
         assert_eq!(read(typed(Key::L, "l")), [Command::ShowRun]);
         assert_eq!(read(typed(Key::L, "L")), [Command::ShowRun]);
-        // Ctrl with A ticks all; A alone types an "a", which is no key here.
+        // Ctrl with A ticks all; a alone opens Add, as in the terminal app (a capital A is no key), i and I Import.
         assert_eq!(read(vec![key(Key::A, Modifiers::COMMAND)]), [Command::TickAll]);
-        assert_eq!(read(typed(Key::A, "a")), []);
+        assert_eq!(read(typed(Key::A, "a")), [Command::Add]);
+        assert_eq!(read(typed(Key::A, "A")), []);
+        assert_eq!(read(typed(Key::I, "i")), [Command::Import]);
+        assert_eq!(read(typed(Key::I, "I")), [Command::Import]);
         // The actions, with the terminal app's letters: u and U are two commands, d and Delete one.
         assert_eq!(read(typed(Key::U, "u")), [Command::UpdateChosen]);
         assert_eq!(read(typed(Key::U, "U")), [Command::UpdateAll]);
@@ -1023,9 +1109,12 @@ mod tests {
         assert_eq!(read(typed(Key::D, "D")), []);
         // With Ctrl, Alt or Cmd held, a letter is no key here, even where the system sends its text.
         for held in [Modifiers::CTRL, Modifiers::ALT, Modifiers::COMMAND, Modifiers::MAC_CMD] {
-            for (code, letter) in [(Key::U, "u"), (Key::D, "d"), (Key::W, "w"), (Key::O, "o"), (Key::M, "m"), (Key::U, "U")] {
+            for (code, letter) in [(Key::U, "u"), (Key::D, "d"), (Key::W, "w"), (Key::O, "o"), (Key::M, "m"), (Key::U, "U"), (Key::I, "i")] {
                 assert_eq!(read(vec![key(code, held), Event::Text(letter.to_owned())]), [], "{held:?} {letter}");
             }
+            // With A, Ctrl (Cmd) ticks all; the text it may send opens nothing.
+            let tick_all: &[Command] = if held.command_only() { &[Command::TickAll] } else { &[] };
+            assert_eq!(read(vec![key(Key::A, held), Event::Text("a".to_owned())]), tick_all, "{held:?} a");
             assert_eq!(read(vec![key(Key::Delete, held)]), [], "{held:?} Delete");
         }
         // Shift is how a capital is typed: it does not stop the letter.
@@ -1112,6 +1201,60 @@ mod tests {
         assert_eq!(repos(&session).status, crate::demo::repos().status);
     }
 
+    #[test]
+    fn a_and_i_open_their_dialogs_once() {
+        use crate::dialogs::Which;
+        use crate::dialogs::testing::Window;
+        // a opens Add, i Import, through the core; a held key opens it once, and types nothing into it.
+        for (code, letter, which, field) in [(Key::A, "a", Which::Add, "search"), (Key::I, "i", Which::Folder, "folder")] {
+            let mut window = Window::new(Session::demo(crate::demo::repos()));
+            window.frame(Vec::new());
+            window.frame(held(code, Some(letter), 0));
+            for _ in 0..4 {
+                window.frame(vec![
+                    Event::Key { key: code, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE },
+                    Event::Text(letter.to_owned()),
+                ]);
+            }
+            window.frame(vec![Event::Key { key: code, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+            window.frame(Vec::new());
+            assert!(window.shows(which), "{letter} did not open its dialog");
+            let typed = match which {
+                Which::Add => window.repos().add_filter.clone(),
+                _ => window.repos().prompt.as_ref().unwrap().input.clone(),
+            };
+            assert!(!typed.contains(letter), "{letter} was typed into the {field} field: {typed:?}");
+            // Its Esc closes it; the next press opens it again.
+            window.key(Key::Escape);
+            assert!(!window.open());
+            window.frame(vec![Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+            window.typed(code, letter);
+            assert!(window.shows(which), "{letter} did not open its dialog again");
+        }
+        // Not with a modifier, not while the filter has the keys, not on a page other than this screen's.
+        for held in [Modifiers::CTRL, Modifiers::ALT, Modifiers::COMMAND] {
+            for (code, letter) in [(Key::A, "a"), (Key::I, "i")] {
+                let session = demo_after(vec![key(code, held), Event::Text(letter.to_owned())]);
+                assert!(repos(&session).mode == CoreMode::List, "{held:?} {letter}");
+            }
+        }
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
+        frame(&ctx, &mut session, &mut screen, typed(Key::A, "a"));
+        frame(&ctx, &mut session, &mut screen, typed(Key::I, "i"));
+        assert_eq!(repos(&session).list_filter, "ai");
+        assert!(repos(&session).mode == CoreMode::List);
+        // Without the keyboard (an overlay is open over the screen) they do nothing.
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame_with(&ctx, &mut session, &mut screen, typed(Key::A, "a"), false);
+        frame_with(&ctx, &mut session, &mut screen, typed(Key::I, "i"), false);
+        assert!(repos(&session).mode == CoreMode::List);
+    }
+
     /// `code` held: pressed, then repeated `repeats` times, each with the text it types.
     fn held(code: Key, text: Option<&str>, repeats: usize) -> Vec<Event> {
         (0..=repeats)
@@ -1132,6 +1275,8 @@ mod tests {
             (Key::O, "o", Command::Open),
             (Key::M, "m", Command::Group),
             (Key::D, "d", Command::Remove),
+            (Key::A, "a", Command::Add),
+            (Key::I, "i", Command::Import),
         ];
         for (code, letter, command) in actions {
             assert_eq!(read(held(code, Some(letter), 3)), [command], "{letter}");
@@ -1384,6 +1529,7 @@ mod tests {
                         #[expect(clippy::cast_precision_loss, reason = "window widths of a few thousand points")]
                         let size = vec2(width as f32, 900.0);
                         let (layout, planned) = planned(&ctx, &session, size, sidebar);
+                        let planned = planned.toolbar.unwrap();
                         let (bar, _, fit) = planned.selection.unwrap();
                         let at = format!("{width} sidebar {sidebar} {:?} {fit:?}", repos(&session).marked.len());
                         assert!(layout.toolbar.contains_rect(bar) && layout.toolbar.contains_rect(planned.field), "{at}");
@@ -1407,7 +1553,7 @@ mod tests {
         assert!(compact_seen, "the narrow windows drop the words");
         // The design's window shows every word, the drawing's order.
         let (_, planned) = planned(&ctx, &two, vec2(WINDOW[0], WINDOW[1]), true);
-        assert_eq!(planned.selection.map(|(_, count, fit)| (count, fit)), Some((2, Fit::Full)));
+        assert_eq!(planned.toolbar.unwrap().selection.map(|(_, count, fit)| (count, fit)), Some((2, Fit::Full)));
         let names: Vec<&str> = selection_items("2", "2 selected", Fit::Full)
             .iter()
             .filter_map(|item| match item {
@@ -1475,41 +1621,138 @@ mod tests {
         assert_eq!((field.width(), bar), (FIELD_WIDTH, None));
     }
 
+    /// The width of the page's title in the top row, on `ctx`.
+    fn title_width(ctx: &Context) -> f32 {
+        let mut width = 0.0;
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        ctx.run_ui(input, |ui| width = widgets::width(ui.painter(), shell::Page::Repositories.name(), &shell::title_font()))
+            .drop_without_applying_deltas();
+        width
+    }
+
     #[test]
-    fn the_top_row_holds_update_all_and_drops_its_words_before_the_title() {
+    fn the_top_row_gives_way_before_it_meets_the_title() {
         let ctx = context();
+        let title = title_width(&ctx);
         let demo = Session::demo(crate::demo::repos());
-        let title = {
-            let mut width = 0.0;
-            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
-            ctx.run_ui(input, |ui| width = widgets::width(ui.painter(), shell::Page::Repositories.name(), &shell::title_font()))
-                .drop_without_applying_deltas();
-            width
-        };
-        for width in (960..=2000).step_by(8) {
-            for sidebar in [true, false] {
-                #[expect(clippy::cast_precision_loss, reason = "window widths of a few thousand points")]
-                let size = vec2(width as f32, 900.0);
-                let (layout, planned) = planned(&ctx, &demo, size, sidebar);
-                let (rect, fit) = planned.update_all.unwrap();
-                assert!(rect.left() >= layout.title.left() + title + theme::BAR_GAP, "{width} {sidebar}: over the title");
-                assert!(rect.right() <= layout.captions.left() - theme::BAR_GAP + 1e-3, "{width} {sidebar}");
-                assert_eq!((rect.top(), rect.bottom()), (layout.toggle.top(), layout.toggle.bottom()));
-                assert_eq!(fit, Fit::Full, "{width} {sidebar}: there is room for the words");
+        let none = Session::Live(Box::new(Repos::offline(test_settings())));
+        // Every width from far narrower than the window allows (where the row gives way) up to 2000, with and without
+        // the sidebar, with repositories and without.
+        let mut seen = Vec::new();
+        for session in [&demo, &none] {
+            for width in (400..=2000).step_by(4) {
+                for sidebar in [true, false] {
+                    #[expect(clippy::cast_precision_loss, reason = "window widths of a few thousand points")]
+                    let size = vec2(width as f32, 900.0);
+                    let (layout, planned) = planned(&ctx, session, size, sidebar);
+                    let at = format!("{width} sidebar {sidebar}");
+                    let Some(top) = planned.top else {
+                        assert!(width < 960, "{at}: no top row in a window the app allows");
+                        continue;
+                    };
+                    assert!(top.actions.left() >= layout.title.left() + title + theme::BAR_GAP - 1e-3, "{at}: over the title");
+                    assert!(top.main.right() <= layout.captions.left() - theme::BAR_GAP + 1e-3, "{at}: over the window's buttons");
+                    assert!((top.actions.right() + theme::BAR_GAP - top.main.left()).abs() < 1e-3, "{at}: the capsule and the button");
+                    for rect in [top.actions, top.main] {
+                        assert_eq!((rect.top(), rect.bottom()), (layout.toggle.top(), layout.toggle.bottom()), "{at}: out of the row");
+                    }
+                    // Never cut: each holds what it draws.
+                    let [actions, main] = top_widths(&ctx, top.fit);
+                    assert!((top.actions.width() - actions).abs() < 1e-3 && (top.main.width() - main).abs() < 1e-3, "{at}: {top:?}");
+                    // In every window the app allows, all the words.
+                    if width >= 960 {
+                        assert_eq!(top.fit, Fit::Full, "{at}");
+                    }
+                    if !seen.contains(&top.fit) {
+                        seen.push(top.fit);
+                    }
+                }
             }
         }
-        // A room too narrow for the words keeps the icon; one too narrow for that holds nothing.
-        let room = Rect::from_min_size(pos2(400.0, 12.0), vec2(80.0, 36.0));
-        assert_eq!(top_place(room, [108.0, 36.0]), Some((Rect::from_min_size(pos2(444.0, 12.0), vec2(36.0, 36.0)), Fit::Compact)));
-        assert_eq!(top_place(room, [80.0, 36.0]), Some((room, Fit::Full)));
-        assert_eq!(top_place(Rect::from_min_size(pos2(400.0, 12.0), vec2(20.0, 36.0)), [108.0, 36.0]), None);
-        // No repositories, no update.
-        let none = Session::Live(Box::new(Repos::offline(test_settings())));
-        let mut planned_none = Some(());
+        seen.sort_by_key(|fit| *fit as usize);
+        assert_eq!(seen, [Fit::Full, Fit::Compact, Fit::Bare], "a narrow window shows every way the row gives way");
+        // The order of giving way, on a room of a known width: the capsule's words go first, the main button's last.
+        let (full, compact, main_full, main_compact) = (200.0, 66.0, 150.0, 36.0);
+        let fit = |width: f32| top_place(Rect::from_min_size(pos2(400.0, 12.0), vec2(width, 36.0)), [full, compact], [main_full, main_compact]);
+        assert_eq!(fit(362.0).map(|top| top.fit), Some(Fit::Full));
+        assert_eq!(fit(361.0).map(|top| top.fit), Some(Fit::Compact));
+        assert_eq!(fit(228.0).map(|top| top.fit), Some(Fit::Compact));
+        assert_eq!(fit(227.0).map(|top| top.fit), Some(Fit::Bare));
+        let bare = fit(114.0).unwrap();
+        assert_eq!(
+            (bare.actions, bare.main),
+            (Rect::from_min_size(pos2(400.0, 12.0), vec2(66.0, 36.0)), Rect::from_min_size(pos2(478.0, 12.0), vec2(36.0, 36.0)))
+        );
+        assert_eq!(fit(113.0), None, "not even the icons fit: nothing");
+    }
+
+    /// The widths of the top row's capsule and main button in `fit`, on `ctx`.
+    fn top_widths(ctx: &Context, fit: Fit) -> [f32; 2] {
+        let mut out = [0.0; 2];
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
-        let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, false);
-        ctx.run_ui(input, |ui| planned_none = plan(ui.painter(), &layout, &none).map(|_| ())).drop_without_applying_deltas();
-        assert_eq!(planned_none, None);
+        ctx.run_ui(input, |ui| {
+            out = [
+                widgets::capsule_width(ui.painter(), &top_items(fit)),
+                widgets::main_action_width(ui.painter(), ADD_REPOSITORY, fit == Fit::Bare, theme::BAR_HEIGHT),
+            ];
+        })
+        .drop_without_applying_deltas();
+        out
+    }
+
+    #[test]
+    fn an_empty_list_still_offers_add_and_import() {
+        let ctx = context();
+        let mut session = Session::Live(Box::new(Repos::offline(test_settings())));
+        let (layout, planned) = planned(&ctx, &session, vec2(WINDOW[0], WINDOW[1]), true);
+        assert_eq!(planned.toolbar, None, "no toolbar: nothing to filter, sort or tick");
+        assert_eq!(planned.top.map(|top| top.fit), Some(Fit::Full));
+        let mut wants = Wants::default();
+        planned.add_wants(&mut wants);
+        assert_eq!(wants.as_slice().iter().map(|want| want.id).collect::<Vec<_>>(), ["actions"]);
+        assert_eq!(layout.toolbar.width(), 0.0);
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        // Every control of the row is there.
+        let controls: Vec<String> = {
+            let mut out = Vec::new();
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+            ctx.run_ui(input, |ui| out = control_places(ui.painter(), &planned).into_iter().map(|(words, _)| words).collect())
+                .drop_without_applying_deltas();
+            out
+        };
+        assert_eq!(controls, ["Import", "Update all", "Add repository"]);
+        // Update all with nothing to update does what the core says, and nothing else.
+        let at = planned.top.unwrap();
+        let place = {
+            let mut place = Rect::NOTHING;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+            ctx.run_ui(input, |ui| place = widgets::item_rects(ui.painter(), at.actions, &top_items(at.fit))[TOP_UPDATE_ALL])
+                .drop_without_applying_deltas();
+            place
+        };
+        click(&ctx, &mut session, &mut screen, place.center());
+        assert_eq!(repos(&session).status, "There are no repositories to update.");
+        assert!(repos(&session).mode == CoreMode::List && repos(&session).queue.is_empty() && !repos(&session).busy);
+        // U too.
+        assert_eq!(repos(&empty_after(typed(Key::U, "U"))).status, "There are no repositories to update.");
+        // Import and Add repository open their dialogs.
+        click(&ctx, &mut session, &mut screen, {
+            let mut place = Rect::NOTHING;
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+            ctx.run_ui(input, |ui| place = widgets::item_rects(ui.painter(), at.actions, &top_items(at.fit))[TOP_IMPORT])
+                .drop_without_applying_deltas();
+            place.center()
+        });
+        assert!(repos(&session).mode == CoreMode::Path, "Import did not open");
+        session.repos_mut().unwrap().close_path();
+        click(&ctx, &mut session, &mut screen, at.main.center());
+        assert!(repos(&session).mode == CoreMode::Add, "Add did not open");
+        // The keys too.
+        assert!(repos(&empty_after(typed(Key::A, "a"))).mode == CoreMode::Add);
+        assert!(repos(&empty_after(typed(Key::I, "i"))).mode == CoreMode::Path);
+        // The panel says what the two buttons do.
+        assert_eq!(state_text(&empty_after(Vec::new())).map(|(_, lines)| lines), Some(vec![ADD_OR_IMPORT.to_owned()]));
     }
 
     /// A click at `at` on the screen of `session`, over four frames.
@@ -1524,7 +1767,7 @@ mod tests {
     fn bar_item(session: &Session, index: usize) -> Rect {
         let ctx = context();
         let (_, planned) = planned(&ctx, session, vec2(WINDOW[0], WINDOW[1]), true);
-        let (rect, count, fit) = planned.selection.unwrap();
+        let (rect, count, fit) = planned.toolbar.unwrap().selection.unwrap();
         let (number, count) = (count.to_string(), selected(count));
         let mut place = Rect::NOTHING;
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
@@ -1561,10 +1804,35 @@ mod tests {
         let mut session = Session::demo(crate::demo::repos());
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
-        let (rect, _) = planned(&context(), &session, vec2(WINDOW[0], WINDOW[1]), true).1.update_all.unwrap();
+        let at = top_item(&session, TOP_UPDATE_ALL).center();
         session.repos_mut().unwrap().clear_marks();
-        click(&ctx, &mut session, &mut screen, rect.center());
+        click(&ctx, &mut session, &mut screen, at);
         assert_eq!(repos(&session).status, HELD);
+        // Import and Add repository open their dialogs through the core.
+        let opened = |at: fn(&Session) -> Rect| {
+            let ctx = context();
+            let mut session = Session::demo(crate::demo::repos());
+            let mut screen = Screen::default();
+            frame(&ctx, &mut session, &mut screen, Vec::new());
+            let at = at(&session).center();
+            click(&ctx, &mut session, &mut screen, at);
+            session
+        };
+        let import = opened(|session| top_item(session, TOP_IMPORT));
+        assert!(repos(&import).mode == CoreMode::Path && repos(&import).prompt.is_some(), "Import did not open");
+        let add = opened(|session| planned(&context(), session, vec2(WINDOW[0], WINDOW[1]), true).1.top.unwrap().main);
+        assert!(repos(&add).mode == CoreMode::Add, "Add did not open");
+    }
+
+    /// Where the top row's capsule item `index` is, at the design's size, for `session`.
+    fn top_item(session: &Session, index: usize) -> Rect {
+        let ctx = context();
+        let (_, planned) = planned(&ctx, session, vec2(WINDOW[0], WINDOW[1]), true);
+        let top = planned.top.unwrap();
+        let mut place = Rect::NOTHING;
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        ctx.run_ui(input, |ui| place = widgets::item_rects(ui.painter(), top.actions, &top_items(top.fit))[index]).drop_without_applying_deltas();
+        place
     }
 
     #[test]
@@ -1578,7 +1846,8 @@ mod tests {
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
         let (_, planned) = planned(&context(), &session, vec2(WINDOW[0], WINDOW[1]), true);
-        for (at, time) in [(planned.update_all.unwrap().0.center(), 1.0), (bar_item(&session, BAR_UPDATE).center(), 5.0)] {
+        let _ = planned;
+        for (at, time) in [(top_item(&session, TOP_UPDATE_ALL).center(), 1.0), (bar_item(&session, BAR_UPDATE).center(), 5.0)] {
             let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
             let frames = [
                 (time, vec![Event::PointerMoved(at)]),
@@ -1614,7 +1883,15 @@ mod tests {
         frame(&ctx, &mut session, &mut screen, Vec::new());
         let before = repos(&session).status.clone();
         let (_, planned) = planned(&context(), &session, vec2(WINDOW[0], WINDOW[1]), true);
-        for at in [bar_item(&session, BAR_REMOVE).center(), bar_item(&session, BAR_CLEAR).center(), planned.update_all.unwrap().0.center()] {
+        let top = planned.top.unwrap();
+        let presses = [
+            bar_item(&session, BAR_REMOVE).center(),
+            bar_item(&session, BAR_CLEAR).center(),
+            top_item(&session, TOP_IMPORT).center(),
+            top_item(&session, TOP_UPDATE_ALL).center(),
+            top.main.center(),
+        ];
+        for at in presses {
             let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
             for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], Vec::new()] {
                 frame_with(&ctx, &mut session, &mut screen, events, false);
@@ -1662,7 +1939,7 @@ mod tests {
         let none = Session::Live(Box::new(Repos::offline(test_settings())));
         assert_eq!(
             state_text(&none),
-            Some(("No repositories yet".to_owned(), vec!["Add them in the terminal app for now: adding from the window comes next.".to_owned()]))
+            Some(("No repositories yet".to_owned(), vec!["Add repository finds them on GitHub. Import takes clones you already have.".to_owned()]))
         );
         let mut demo = Session::demo(crate::demo::repos());
         assert_eq!(state_text(&demo), None);
@@ -1702,12 +1979,14 @@ mod tests {
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
         ctx.run_ui(input, |ui| planned = plan(ui.painter(), &layout, &session)).drop_without_applying_deltas();
         let planned = planned.unwrap();
-        assert_eq!(planned.sort, "By name");
-        let (rect, count, _) = planned.selection.unwrap();
+        let toolbar = planned.toolbar.clone().unwrap();
+        assert_eq!(toolbar.sort, "By name");
+        let (rect, count, _) = toolbar.selection.unwrap();
         assert_eq!(count, 2);
         assert_eq!(rect.right(), layout.toolbar.right());
-        let (actions, _) = planned.update_all.unwrap();
-        assert_eq!(actions.right(), layout.actions.right());
+        let top = planned.top.unwrap();
+        assert_eq!(top.main.right(), layout.actions.right());
+        assert_eq!(top.actions.right() + theme::BAR_GAP, top.main.left());
         let mut wants = Wants::default();
         planned.add_wants(&mut wants);
         let ids: Vec<&str> = wants.as_slice().iter().map(|want| want.id).collect();

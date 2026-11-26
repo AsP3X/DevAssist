@@ -21,8 +21,8 @@
 //!
 //! The dialogs: [`progress`], the run the core keeps; [`remove`], which deletes or forgets the chosen
 //! repositories; [`group`], which moves them into a group or renames one; [`add`], which finds repositories on
-//! GitHub and clones the ticked ones into a folder (the group and Add dialogs open with the focus in their first
-//! field). A dialog with a main button opens with
+//! GitHub and clones the ticked ones into a folder; [`folder`], which asks for a folder whose clones are imported
+//! (the group, Add and folder dialogs open with the focus in their first field). A dialog with a main button opens with
 //! the focus on it, the group dialog with the focus in its name field, the remove dialog (which has no main
 //! button) with no focus at all.
 //!
@@ -36,6 +36,7 @@
 //! that question (`Repos::close_path`) before drawing, which brings Add back: no empty overlay is drawn.
 
 mod add;
+mod folder;
 mod group;
 mod progress;
 mod remove;
@@ -44,7 +45,7 @@ use std::sync::Arc;
 
 use devassist_core::repos::state::{Mode as CoreMode, Purpose, Repos};
 use egui::text::LayoutJob;
-use egui::{Color32, Context, FontFamily, Galley, Id, LayerId, Painter, Rect, Ui, pos2};
+use egui::{Color32, Context, Event, FontFamily, Galley, Id, Key, LayerId, Painter, Rect, Ui, pos2};
 
 pub use self::remove::remove_title;
 use crate::assets;
@@ -68,6 +69,8 @@ pub enum Which {
     Menu,
     /// The repositories found on GitHub, to tick and clone into a folder (`Mode::Add`).
     Add,
+    /// The folder whose clones are imported (`Mode::Path` for `Purpose::Import`).
+    Folder,
 }
 
 /// The dialog or the menu `repos`'s mode asks for, if any.
@@ -79,6 +82,7 @@ pub fn which(repos: &Repos) -> Option<Which> {
         CoreMode::Group if repos.group_prompt.is_some() => Some(Which::Group),
         CoreMode::Menu if repos.menu.is_some() => Some(Which::Menu),
         CoreMode::Add => Some(Which::Add),
+        CoreMode::Path if repos.prompt.as_ref().is_some_and(|prompt| folder::shown(&prompt.purpose)) => Some(Which::Folder),
         // The core's own folder question of a clone, which the window never asks for: Add stands for it until
         // `after` closes it, and Add is back.
         CoreMode::Path if repos.prompt.as_ref().is_some_and(|prompt| matches!(prompt.purpose, Purpose::Clone(_))) => Some(Which::Add),
@@ -104,6 +108,9 @@ pub struct Dialogs {
     /// What the Add dialog keeps of its own: the folder field's text, its suggestions, the reason a folder was
     /// refused, the row its list showed highlighted last. Made when Add opens.
     add: Option<add::State>,
+    /// What the folder dialog keeps of its own: the field's text as it last stood, and the folders that match it.
+    /// Made when it opens.
+    folder: Option<folder::State>,
 }
 
 /// The id of a dialog's main button, the one Enter presses: every dialog's, so that the focus [`sync`] gives it
@@ -132,8 +139,54 @@ pub fn sync(ctx: &Context, repos: Option<&Repos>, dialogs: &mut Dialogs) {
             dialogs.add = repos.map(add::State::new);
             overlay::open(ctx, Some(add::search_id()));
         }
+        Some(Which::Folder) => {
+            dialogs.folder = repos.map(folder::State::new);
+            overlay::open(ctx, Some(folder::field_id()));
+        }
         None => {}
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How often this thread's dialogs asked the disk for folders.
+    static DISK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How often this thread's dialogs asked the disk for folders so far.
+#[cfg(test)]
+fn disk_reads() -> usize {
+    DISK_READS.with(std::cell::Cell::get)
+}
+
+/// The folders that match `text`, for a dialog's folder field (Add's and the folder dialog's): on disk
+/// (`prompt::suggest`, what the core's `Repos::path_suggestions` gives for the same text) for a live session; the
+/// demo's made-up ones ([`crate::demo::folders_matching`]) while the core holds all work, so a demo or a picture
+/// never asks the disk. It reads the disk on the caller's thread: ask again only when the text changed.
+fn folder_suggestions(repos: &Repos, text: &str) -> Vec<String> {
+    if repos.work_held() {
+        return crate::demo::folders_matching(text);
+    }
+    #[cfg(test)]
+    DISK_READS.with(|reads| reads.set(reads.get() + 1));
+    devassist_core::prompt::suggest(text)
+}
+
+/// Takes every press of `key` without modifiers from this frame's input, also its repeats while it is held; says
+/// whether one was a fresh press (a held key acts once). With `text`, the text it types goes too.
+fn take_press(ui: &Ui, key: Key, text: Option<&str>) -> bool {
+    ui.input_mut(|input| {
+        let mut fresh = false;
+        input.events.retain(|event| match event {
+            Event::Key { key: pressed_key, pressed: true, repeat, modifiers, .. } if *pressed_key == key && modifiers.is_none() => {
+                fresh |= !*repeat;
+                false
+            }
+            Event::Text(typed) => text != Some(typed.as_str()),
+            _ => true,
+        });
+        fresh
+    })
 }
 
 /// A dialog's title and the quiet line under it, laid out for the dialog's width.
@@ -229,6 +282,8 @@ enum Parts {
     Group(group::Places),
     /// The Add dialog's.
     Add(add::Places),
+    /// The folder dialog's.
+    Folder(folder::Places),
 }
 
 impl Parts {
@@ -239,6 +294,7 @@ impl Parts {
             Parts::Remove(_) => Which::Remove,
             Parts::Group(_) => Which::Group,
             Parts::Add(_) => Which::Add,
+            Parts::Folder(_) => Which::Folder,
         }
     }
 
@@ -249,6 +305,7 @@ impl Parts {
             Parts::Remove(places) => places.pane,
             Parts::Group(places) => places.pane,
             Parts::Add(places) => places.pane,
+            Parts::Folder(places) => places.pane,
         }
     }
 }
@@ -287,7 +344,7 @@ impl Plan {
 
 /// Where the dialog or the menu the core's mode asks for stands in `window`, a dialog's header laid out with
 /// `painter`'s faces, the menu under the row's button at `anchor` (from `repos_screen::menu_anchor`), with what
-/// `dialogs` keep (the Add dialog's folder field and its rows); `None` when the mode asks for none, or for the menu
+/// `dialogs` keep (the Add and folder dialogs' folder fields and their rows); `None` when the mode asks for none, or for the menu
 /// while the screen has not placed its button yet.
 #[must_use]
 pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Option<Rect>, dialogs: &Dialogs) -> Option<Plan> {
@@ -297,6 +354,7 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Opti
         Which::Remove => Some(remove::plan(painter, window, repos)),
         Which::Group => group::plan(painter, window, repos),
         Which::Add => dialogs.add.as_ref().map(|state| add::plan(painter, window, repos, state)),
+        Which::Folder => dialogs.folder.as_ref().and_then(|state| folder::plan(painter, window, repos, state)),
         Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(window, anchor)))),
     }
 }
@@ -357,6 +415,7 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
             Planned::Dialog(header, Parts::Remove(places)) => remove::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Group(places)) => group::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Add(places)) => add::show(ui, header, *places, repos, palette, dialogs, outside),
+            Planned::Dialog(header, Parts::Folder(places)) => folder::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Menu(places) => menu::show(ui, *places, repos, palette, outside),
         }
     });

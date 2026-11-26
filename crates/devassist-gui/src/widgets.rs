@@ -21,7 +21,7 @@ use crate::theme::{
     ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, BUTTON_OFF_OPACITY, BUTTON_PAD, BUTTON_RADIUS, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX,
     CHECKBOX_STROKE_OPACITY, DIALOG_FIELD_HEIGHT, DIALOG_FIELD_RADIUS, DIVIDER_HEIGHT, DIVIDER_OPACITY, DIVIDER_WIDTH, FIELD_EDGE_OPACITY, FIELD_PAD,
     FOCUS_GAP, FOCUS_RING, FOLDER_GAP, FOLDER_INSET_PAD, FOLDER_PICK, FOLDER_ROW, FOLDER_ROWS, HAIRLINE, HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD,
-    Palette, RADIUS_SMALL, Surface, TEXT,
+    MAIN_ACTION_PAD, Palette, RADIUS_SMALL, Surface, TEXT,
 };
 
 /// The mark that ends a text cut short.
@@ -244,6 +244,43 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
         }
     }
     pressed
+}
+
+/// How wide the top row's main button with `icon` and `words` is ([`main_action`]): with its words, or as wide as
+/// it is `high` with its icon alone (`compact`).
+#[must_use]
+pub fn main_action_width(painter: &Painter, words: &str, compact: bool, high: f32) -> f32 {
+    if compact {
+        high
+    } else {
+        MAIN_ACTION_PAD[0] + ICON + ACTION_GAP + width(painter, words, &font(TEXT, assets::medium_family())) + MAIN_ACTION_PAD[1]
+    }
+}
+
+/// Draws the top row's main button at `rect` as the design's `primary` draws it: a fill, never glass, in the accent
+/// colour, round at its ends, with `icon` and `words` in white; with its icon alone when `compact`, its words then
+/// its name and hover text. `id` names it. Says whether it was clicked.
+pub fn main_action(ui: &mut Ui, rect: Rect, icon: Icon, words: &str, compact: bool, palette: Palette, id: Id) -> bool {
+    let mut response = ui.interact(rect, id, Sense::CLICK);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, words));
+    if compact {
+        response = response.on_hover_text(words);
+    }
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let radius = rect.height() / 2.0;
+    painter.rect_filled(rect, radius, palette.accent);
+    if response.hovered() {
+        painter.rect_filled(rect, radius, palette.on_glass.gamma_multiply(HOVER_OPACITY));
+    }
+    let ink = palette.on_dark_glass;
+    if compact {
+        draw_icon(&painter, rect.center(), icon, ICON, ink);
+    } else {
+        draw_icon(&painter, pos2(rect.left() + MAIN_ACTION_PAD[0] + ICON / 2.0, rect.center().y), icon, ICON, ink);
+        let x = rect.left() + MAIN_ACTION_PAD[0] + ICON + ACTION_GAP;
+        painter.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, words, font(TEXT, assets::medium_family()), ink);
+    }
+    response.clicked()
 }
 
 /// Draws a one-line text field at `rect`, whose glass is baked ([`add_glass`]): `icon` at its left, then `text`,

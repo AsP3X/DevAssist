@@ -154,6 +154,10 @@ pub const ACTION_HEIGHT: f32 = 28.0;
 pub const ACTION_PAD: [f32; 2] = [8.0, 10.0];
 /// The gap between the items of an action button, and between action buttons.
 pub const ACTION_GAP: f32 = 6.0;
+/// The room inside the top row's main button ("Add repository") before its icon and after its words, left then
+/// right (`primary`'s `padding: [0, 16, 0, 12]`); its icon and words are [`ACTION_GAP`] apart (`gap: 6`), it is
+/// [`BAR_HEIGHT`] high and round at its ends (`cornerRadius: 18`), and with its icon alone it is as wide as high.
+pub const MAIN_ACTION_PAD: [f32; 2] = [12.0, 16.0];
 /// The width of a search field.
 pub const FIELD_WIDTH: f32 = 280.0;
 /// The least width the filter field narrows to, in a window too narrow for it, the view and the selection bar
@@ -403,6 +407,9 @@ pub const ADD_FOLDER_GAP: f32 = 8.0;
 /// The room between the found repositories' box and the highlighted row's fill at either side, and that fill's
 /// corner radius (the group dialog's, `GROUP_PICK`: the design draws no highlight).
 pub const ADD_PICK: [f32; 2] = GROUP_PICK;
+/// The width of the folder dialog (Import, and Move to come): the Add dialog's, whose parts it is built from (the
+/// design draws no Import dialog).
+pub const FOLDER_DIALOG_WIDTH: f32 = ADD_WIDTH;
 /// The size of the spinner on the Add dialog's status line while the core looks something up (the plan's own: a
 /// small icon's, `ICON_SMALL`'s width less the arc's stroke).
 pub const SPINNER: f32 = 12.0;
