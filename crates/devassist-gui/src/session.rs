@@ -83,13 +83,18 @@ impl Session {
         Session::Demo(Held::new(repos))
     }
 
-    /// Takes in what the core's workers sent. Returns how long the window may sleep before the next call: a short
+    /// Takes in what the core's workers sent, and keeps the highlight on a row that is there. Returns how long the window may sleep before the next call: a short
     /// while when the core waits for something, a longer one otherwise (the core's own timers still run then).
     pub fn tick(&mut self) -> Duration {
         match self.repos_mut() {
             None => theme::TICK_IDLE,
             Some(repos) => {
                 repos.drain();
+                // As the terminal app does at every draw: a highlight on a row that went (a removal ended, the list
+                // was read again) moves to one that is there. A window that opened without one keeps none.
+                if repos.selected.is_some() {
+                    repos.ensure_selection();
+                }
                 if repos.waiting() { theme::TICK_BUSY } else { theme::TICK_IDLE }
             }
         }
@@ -240,6 +245,22 @@ pub(crate) mod tests {
         session.close();
         drop(session);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_highlight_never_names_a_row_that_is_gone() {
+        let mut session = Session::start(Err("ignored in a demo".into()), &demo());
+        // A fresh window opens without a highlight, and keeps none.
+        session.tick();
+        assert_eq!(session.repos().unwrap().selected, None);
+        // A removal ends: the highlighted row is no longer on the list, and the highlight moves to one that is.
+        session.repos_mut().unwrap().pick("api");
+        session.repos_mut().unwrap().installed.retain(|repo| repo.folder != "api");
+        session.tick();
+        let repos = session.repos().unwrap();
+        let selected = repos.selected.clone().unwrap();
+        assert_ne!(selected, "api");
+        assert!(repos.rows().iter().any(|row| row.key() == selected), "{selected} is not a row");
     }
 
     #[test]

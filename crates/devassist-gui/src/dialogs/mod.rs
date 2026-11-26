@@ -45,7 +45,7 @@ use crate::baker::{Drawn, Want};
 use crate::menu;
 use crate::overlay;
 use crate::shell::Page;
-use crate::theme::{self, DIALOG_TITLE, HEADER_GAP, HEADER_LINE_HEIGHT, INSET_RADIUS, LIST_PAD, LIST_ROW, Mode, Palette, TEXT};
+use crate::theme::{self, DIALOG_TITLE, HEADER_GAP, HEADER_LINE_HEIGHT, HEADER_LINES, INSET_RADIUS, LIST_PAD, LIST_ROW, Mode, Palette, TEXT};
 use crate::widgets::font;
 
 /// A dialog the core's mode asks for.
@@ -127,11 +127,12 @@ pub struct Header {
 
 impl Header {
     /// `title` and `line` laid out with `painter`'s faces in `width` points; the line wraps, at the design's line
-    /// height.
+    /// height, to [`HEADER_LINES`] lines at most, the last ending with an ellipsis when there is more.
     #[must_use]
     pub fn new(painter: &Painter, title: &str, line: &str, width: f32) -> Header {
         let title = painter.layout(title.to_owned(), font(DIALOG_TITLE, assets::medium_family()), Color32::PLACEHOLDER, width);
         let mut job = LayoutJob::simple(line.to_owned(), font(TEXT, FontFamily::Proportional), Color32::PLACEHOLDER, width);
+        job.wrap.max_rows = HEADER_LINES;
         for section in &mut job.sections {
             section.format.line_height = Some(TEXT * HEADER_LINE_HEIGHT);
         }
@@ -347,7 +348,7 @@ mod tests {
     use devassist_core::repos::state::testing::test_settings;
     use egui::RawInput;
 
-    use super::testing::{run, window};
+    use super::testing::{Window, run, window};
     use super::*;
     use crate::session::Session;
     use crate::widgets::tests::context;
@@ -363,6 +364,117 @@ mod tests {
         session.repos_mut().unwrap().hide_job();
         assert_eq!(page_for(session.repos(), Page::Docker), Page::Docker);
         assert_eq!(page_for(None, Page::Docker), Page::Docker);
+    }
+
+    /// On three live checkouts, each one behind: a run of api is started and hidden, one of notes is queued behind
+    /// it, and `open` opens an overlay for web. Frames run until the first run has ended and the queued one has
+    /// started and ended, `check` asked after every one of them; the core's mode keeps the overlay all along.
+    /// Gives the window back, the overlay still open.
+    fn runs_end_and_start_under(name: &str, open: fn(&mut Window), check: fn(&Window)) -> (Window, super::testing::Temp) {
+        use super::testing::{behind, live, until};
+        let (root, settings) = behind(name, &["api", "notes", "web"]);
+        let mut window = live(settings, 3);
+        let repos = window.session.repos_mut().unwrap();
+        repos.pick("api");
+        repos.update_chosen();
+        until(&mut window, "open", |window| window.shows(Which::Progress));
+        window.key(egui::Key::Escape);
+        assert!(!window.open() && window.job().running(), "the run of api is hidden while it goes");
+        let repos = window.session.repos_mut().unwrap();
+        repos.pick("notes");
+        repos.update_chosen();
+        assert_eq!(window.repos().queue.len(), 1, "notes waits behind api");
+        open(&mut window);
+        check(&window);
+        let started = std::cell::Cell::new(false);
+        until(&mut window, "both run", |window| {
+            check(window);
+            started.set(started.get() || window.job().items.iter().any(|item| item.name == "notes"));
+            started.get() && !window.repos().busy && window.repos().queue.is_empty() && !window.job().running()
+        });
+        for _ in 0..3 {
+            window.session.tick();
+            window.frame(Vec::new());
+            check(&window);
+        }
+        // The status line says how the last run went, in the core's words.
+        assert!(matches!(&window.job().result, Some(Ok(message)) if *message == window.repos().status), "{:?}", window.job().result);
+        (window, root)
+    }
+
+    /// No folder of the remove dialog is called clean while its state is not known.
+    fn truthful(window: &Window) {
+        for line in window.repos().remove_lines() {
+            let read = window.repos().installed.iter().find(|repo| repo.folder == line.name).is_some_and(|repo| repo.ready && repo.error.is_none());
+            assert!(read || line.state != devassist_core::repos::state::RemoveState::Clean, "{} is called clean unread", line.name);
+        }
+    }
+
+    #[test]
+    fn a_run_that_ends_and_one_that_starts_leave_the_remove_dialog_as_it_was() {
+        let _live = crate::session::tests::live_git();
+        let open: fn(&mut Window) = |window| {
+            let repos = window.session.repos_mut().unwrap();
+            repos.marked = vec!["web".to_owned()];
+            repos.begin_remove();
+            window.frame(Vec::new());
+        };
+        let check: fn(&Window) = |window| {
+            assert!(window.shows(Which::Remove), "the remove dialog went: {}", window.repos().status);
+            assert_eq!(window.repos().remove_lines().iter().map(|line| line.name.as_str()).collect::<Vec<_>>(), ["web"], "what will be removed");
+            truthful(window);
+        };
+        let (mut window, root) = runs_end_and_start_under("under-remove", open, check);
+        assert!(root.0.join("web").exists(), "nothing was removed");
+        window.press("Cancel");
+        assert!(!window.open() && window.repos().mode == CoreMode::List);
+        // `l` shows how the queued run ended.
+        window.typed(egui::Key::L, "l");
+        assert!(window.shows(Which::Progress));
+        assert_eq!(window.job().items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["notes"]);
+        window.session.close();
+    }
+
+    #[test]
+    fn a_run_that_ends_and_one_that_starts_leave_the_group_dialog_as_it_was() {
+        let _live = crate::session::tests::live_git();
+        let open: fn(&mut Window) = |window| {
+            let repos = window.session.repos_mut().unwrap();
+            repos.marked = vec!["web".to_owned()];
+            repos.open_group_prompt();
+            window.frame(Vec::new());
+        };
+        let check: fn(&Window) = |window| {
+            assert!(window.shows(Which::Group), "the group dialog went: {}", window.repos().status);
+            let prompt = window.repos().group_prompt.as_ref().unwrap();
+            assert_eq!(prompt.repos, ["web"], "what will be moved");
+        };
+        let (mut window, _root) = runs_end_and_start_under("under-group", open, check);
+        window.press("Cancel");
+        assert!(!window.open() && window.repos().mode == CoreMode::List);
+        window.session.close();
+    }
+
+    #[test]
+    fn a_run_that_ends_and_one_that_starts_leave_the_menu_as_it_was() {
+        let _live = crate::session::tests::live_git();
+        let open: fn(&mut Window) = |window| {
+            let repos = window.session.repos_mut().unwrap();
+            repos.clear_marks();
+            repos.pick("web");
+            window.frame(Vec::new());
+            window.key(egui::Key::Enter);
+            window.frame(Vec::new());
+        };
+        let check: fn(&Window) = |window| {
+            assert!(window.shows(Which::Menu), "the menu went: {}", window.repos().status);
+            assert_eq!(window.screen_menu(), Some("web"));
+            assert_eq!(window.repos().chosen(), ["web"], "what the menu acts on");
+        };
+        let (mut window, _root) = runs_end_and_start_under("under-menu", open, check);
+        window.key(egui::Key::Escape);
+        assert!(window.repos().mode == CoreMode::List);
+        window.session.close();
     }
 
     #[test]

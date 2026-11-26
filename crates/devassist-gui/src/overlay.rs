@@ -4,9 +4,9 @@
 //! **[`open`] is the one way to open an overlay**, in the frame the key or press that asks for it comes, as soon
 //! as that is known (before the screen is drawn when the window can tell, else right after). It gives the focus
 //! to the control Enter should press, if any, and makes sure the key or the press that opened the overlay does
-//! nothing in it: its Enter or Space presses no button (not in that frame, not while the key is held), and the
-//! rest of its click (a double click's second click) does not land on the scrim. From the moment it is called,
-//! nothing under the overlay is hovered or turned by the wheel.
+//! nothing in it: its Enter or Space presses no button (not in that frame, not while the key is held), a held
+//! letter types nothing into its field, and the rest of its click (a double click's second click) does not land
+//! on the scrim. From the moment it is called, nothing under the overlay is hovered or turned by the wheel.
 //!
 //! Then, every frame while it is open, the overlay is drawn after the screen, in [`show`]: a layer of its own
 //! above the screen's, which egui treats as modal. On it come, in this order, the [`shield`] (one area over the
@@ -122,6 +122,9 @@ struct Opening {
     /// Enter and Space, when they were down as it opened: until they come up, their presses (the key's repeats)
     /// are not the overlay's.
     held: Vec<Key>,
+    /// Every key that was down as it opened (the letter that asked for it, say): until all of them come up, no text
+    /// is typed in it, so a held `m` does not repeat into the group dialog's field.
+    typing: Vec<Key>,
     /// How many frames had a pointer button pressed on the overlay after the pass it opened in: a click whose
     /// presses (one, two for a double click, three for a triple) all came since is a person's click on the overlay,
     /// not the rest of the gesture that opened it ([`fresh_click`]).
@@ -146,15 +149,16 @@ fn opening(ctx: &Context) -> Option<Opening> {
 
 /// Opens an overlay, the one way to: gives egui's keyboard focus to `focus` (the control Enter should press; none
 /// takes the focus from whatever held it), and keeps what opened it from acting in it. This frame's presses of
-/// Enter and Space are taken, and while either stays down its repeats are no press; a click on the scrim counts
-/// only once a button was pressed after this frame, and never as the second click of a double click. From now on
-/// nothing under the overlay's layer is hovered or turned by the wheel, also for the rest of this frame.
+/// Enter and Space are taken, and while either stays down its repeats are no press; while any key that was down
+/// stays down, no text is typed in it; a click on the scrim counts only once a button was pressed after this
+/// frame, and never as the second click of a double click. From now on nothing under the overlay's layer is
+/// hovered or turned by the wheel, also for the rest of this frame.
 pub fn open(ctx: &Context, focus: Option<Id>) {
-    let held = ctx.input_mut(|input| {
+    let (held, typing) = ctx.input_mut(|input| {
         input.events.retain(|event| !matches!(event, Event::Key { key: Key::Enter | Key::Space, pressed: true, .. }));
-        PRESS_KEYS.into_iter().filter(|key| input.key_down(*key)).collect()
+        (PRESS_KEYS.into_iter().filter(|key| input.key_down(*key)).collect(), input.keys_down.iter().copied().collect())
     });
-    let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, presses: 0 };
+    let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, typing, presses: 0 };
     ctx.data_mut(|data| data.insert_temp(opening_id(), opened));
     seed(ctx, layer(), ctx.content_rect());
     ctx.memory_mut(|memory| match (focus, memory.focused()) {
@@ -197,6 +201,11 @@ pub fn show<R>(ctx: &Context, contents: impl FnOnce(&mut Ui) -> R) -> R {
         });
         held.retain(|key| input.key_down(*key));
         opened.held = held;
+        // The text of a key held since the overlay opened (its repeats) is not the overlay's.
+        opened.typing.retain(|key| input.key_down(*key));
+        if !opened.typing.is_empty() {
+            input.events.retain(|event| !matches!(event, Event::Text(_)));
+        }
         if now > opened.pass && input.pointer.any_pressed() {
             opened.presses = opened.presses.saturating_add(1);
         }

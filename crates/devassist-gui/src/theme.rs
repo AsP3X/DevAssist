@@ -298,6 +298,10 @@ pub const DOTS_RADIUS: f32 = 16.0;
 pub const HEADER_GAP: f32 = 4.0;
 /// The height of a line of a dialog's quiet line, of its size (`dialogTitle`'s `lineHeight: 1.45`).
 pub const HEADER_LINE_HEIGHT: f32 = 1.45;
+/// How many lines a dialog's quiet line takes at most; a longer one (a run's summary that names a hundred failed
+/// repositories) ends with an ellipsis there, so the dialog's lists keep their room (the plan's own: the drawing's
+/// lines take two).
+pub const HEADER_LINES: usize = 3;
 /// How strong a dialog's button is drawn while it cannot be pressed, of its full strength (not the design's: it
 /// draws no such button; the plan's own).
 pub const BUTTON_OFF_OPACITY: f32 = 0.5;

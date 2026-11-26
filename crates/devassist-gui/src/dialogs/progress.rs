@@ -657,6 +657,42 @@ mod tests {
     }
 
     #[test]
+    fn the_tables_keys_do_nothing_while_the_progress_dialog_is_open() {
+        let mut window = Window::new(session_with(run(&["api", "web"], 3)));
+        window.frame(Vec::new());
+        let before = (window.repos().marked.clone(), window.repos().selected.clone(), window.repos().list_filter.clone());
+        // (Space is not among them: it presses Hide, which has the focus.)
+        window.typed(Key::D, "d");
+        window.typed(Key::M, "m");
+        window.typed(Key::U, "u");
+        window.typed(Key::Slash, "/");
+        window.key(Key::ArrowDown);
+        window.key(Key::Delete);
+        assert!(window.shows(Which::Progress), "{}", window.repos().status);
+        assert_eq!((window.repos().marked.clone(), window.repos().selected.clone(), window.repos().list_filter.clone()), before);
+        assert!(window.repos().queue.is_empty() && window.job().running());
+    }
+
+    #[test]
+    fn a_long_summary_leaves_the_tasks_and_the_output_their_room_in_the_smallest_window() {
+        // An update of a hundred that all failed: the core's summary names every one of them.
+        let names: Vec<String> = (0..100).map(|index| format!("repository-{index:03}")).collect();
+        let mut job = Job::new("Updating 100 repositories", names.clone(), 0);
+        for index in 0..names.len() {
+            job.on(devassist_core::task::job::JobEvent::Start(index));
+            job.on(devassist_core::task::job::JobEvent::Failed(index, "could not reach the origin".to_owned()));
+        }
+        job.finish(Err(format!("Updated 0, 100 failed: {}", names.join(", "))), false);
+        let mut window = Window::new(session_with(job));
+        window.size = MIN_WINDOW;
+        window.frame(Vec::new());
+        let places = parts(&window);
+        assert!(places.tasks.height() >= TASK_HEIGHT, "the tasks are squeezed to {}", places.tasks.height());
+        assert!(output_rows(places.output.height()) >= 3, "the output is squeezed to {}", places.output.height());
+        assert!(places.header.height() < places.pane.height() / 3.0, "the summary takes {places:?}");
+    }
+
+    #[test]
     fn a_dialog_that_goes_gives_the_screen_its_keys_in_the_next_frame_at_once() {
         let mut window = Window::new(session_with(run(&["api", "web"], 3)));
         let mut asked = Vec::new();

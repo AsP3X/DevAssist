@@ -666,8 +666,8 @@ mod tests {
         // The Enter that opened it comes up, and a second one runs the highlighted line.
         window.frame(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
         window.key(Key::Enter);
-        assert!(window.repos().mode == CoreMode::List, "Enter ran Remove");
-        assert_eq!(window.repos().status, HELD, "Enter ran Update");
+        assert!(window.repos().mode == CoreMode::List, "Enter ran Remove, not Update");
+        assert_eq!(window.repos().status, HELD, "Enter did not run Update");
     }
 
     #[test]
@@ -711,9 +711,10 @@ mod tests {
         // The Enter that opened it ran nothing.
         assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Update));
         assert_ne!(window.repos().status, HELD);
-        // On a header with nothing ticked, Enter folds.
+        // On a header with nothing ticked, Enter folds. (The first Enter is let go first: a second press of a key
+        // egui holds down is a repeat, which folds nothing.)
         window.key(Key::Escape);
-        window.frame(Vec::new());
+        window.frame(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
         window.session.repos_mut().unwrap().pick("group::home");
         window.key(Key::Enter);
         assert!(!window.open());
@@ -782,5 +783,46 @@ mod tests {
         assert!(root.0.join("api").join("two").exists(), "api was updated");
         assert!(!root.0.join("web").join("two").exists(), "web was not");
         window.session.close();
+    }
+
+    #[test]
+    fn enter_on_a_row_with_another_ticked_then_u_updates_only_that_row_for_real() {
+        let _live = crate::session::tests::live_git();
+        let (root, settings) = behind("enter-update", &["api", "web"]);
+        let mut window = live(settings, 2);
+        // web is ticked, the highlight is on api, which is not: Enter acts as api's "…".
+        window.session.repos_mut().unwrap().toggle_mark_of("web");
+        window.session.repos_mut().unwrap().pick("api");
+        window.frame(Vec::new());
+        window.key(Key::Enter);
+        window.frame(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+        assert!(window.shows(Which::Menu));
+        assert_eq!(window.repos().marked, Vec::<String>::new(), "web's tick went, as a click on api's \"…\" clears it");
+        window.typed(Key::U, "u");
+        until(&mut window, "open", |window| window.shows(Which::Progress));
+        assert_eq!(window.job().items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["api"], "the core was asked for api only");
+        until(&mut window, "ended", |window| !window.job().running());
+        assert!(root.0.join("api").join("two").exists(), "api was updated");
+        assert!(!root.0.join("web").join("two").exists(), "web, ticked before, was not");
+        window.session.close();
+    }
+
+    #[test]
+    fn the_menu_on_a_ticked_pair_stays_for_the_one_left_when_the_other_goes() {
+        let mut window = demo();
+        open_on(&mut window, "web");
+        assert_eq!(window.repos().chosen(), ["api", "web"]);
+        // The list is read again without api, the other of the pair.
+        let repos = window.session.repos_mut().unwrap();
+        repos.installed.retain(|repo| repo.folder != "api");
+        repos.marked.retain(|marked| marked != "api");
+        window.frame(Vec::new());
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Menu), "the menu went though its row is there");
+        assert_eq!(window.screen_menu(), Some("web"));
+        assert_eq!(window.repos().chosen(), ["web"], "it acts on what is still there");
+        window.typed(Key::U, "u");
+        assert_eq!(window.repos().status, HELD);
+        assert!(window.repos().mode == CoreMode::List);
     }
 }

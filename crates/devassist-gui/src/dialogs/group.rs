@@ -438,6 +438,30 @@ mod tests {
     }
 
     #[test]
+    fn a_held_m_is_not_typed_into_the_name() {
+        let mut window = Window::new(Session::demo(crate::demo::repos()));
+        window.frame(Vec::new());
+        let m = |pressed, repeat| Event::Key { key: Key::M, physical_key: None, pressed, repeat, modifiers: Modifiers::NONE };
+        // m opens the dialog; the key stays down and repeats, typing an m each time.
+        window.frame(vec![m(true, false), Event::Text("m".to_owned())]);
+        for _ in 0..4 {
+            window.frame(vec![m(true, true), Event::Text("m".to_owned())]);
+        }
+        assert!(window.shows(Which::Group));
+        assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()));
+        let name = || window.repos().group_prompt.as_ref().map(|prompt| prompt.input.clone());
+        assert_eq!(name(), Some("Work".to_owned()), "the held m was typed into the name");
+        // Once it is let go, what is typed is the field's.
+        window.frame(vec![m(false, false)]);
+        window.frame(vec![
+            Event::Key { key: Key::S, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
+            Event::Text("s".to_owned()),
+        ]);
+        let name = window.repos().group_prompt.as_ref().map(|prompt| prompt.input.clone());
+        assert_eq!(name, Some("Works".to_owned()));
+    }
+
+    #[test]
     fn renaming_shows_no_note() {
         let mut window = grouping(Some("Tools"));
         let prompt_now = prompt(&window);

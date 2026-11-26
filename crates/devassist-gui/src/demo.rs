@@ -270,7 +270,7 @@ mod tests {
         let mut repos = repos();
         show(&mut repos, "remove").unwrap();
         assert!(repos.mode == Mode::ConfirmRemove { folders: vec!["api".to_owned(), "web".to_owned()] });
-        assert!(repos.remove_lines().iter().all(|line| !line.dirty));
+        assert!(repos.remove_lines().iter().all(|line| !line.dirty()));
         let mut repos = super::repos();
         show(&mut repos, "group").unwrap();
         assert!(repos.mode == Mode::Group);
@@ -333,10 +333,10 @@ mod tests {
         Forgot(&'static [&'static str]),
     }
 
-    /// How often the process has reached out so far: programs, the clipboard, the network.
-    fn reached_now() -> [usize; 3] {
+    /// How often the process has reached out so far: programs, the clipboard, the network, folders deleted.
+    fn reached_now() -> [usize; 4] {
         use devassist_core::sys::{Reach, reached};
-        [Reach::Program, Reach::Clipboard, Reach::Network].map(reached)
+        [Reach::Program, Reach::Clipboard, Reach::Network, Reach::Disk].map(reached)
     }
 
     /// The walk's window, on a fresh demo with `start` done to it first.
@@ -347,7 +347,7 @@ mod tests {
     }
 
     /// Checks, after the press `what`, that the demo ran and wrote nothing and reached nothing since `before`.
-    fn still_held(window: &Window, what: &str, expect: Expect, before: [usize; 3]) {
+    fn still_held(window: &Window, what: &str, expect: Expect, before: [usize; 4]) {
         let repos = window.repos();
         assert!(repos.work_held(), "{what}: the demo's work is no longer held");
         assert!(!repos.busy && !repos.fetching && !repos.waiting(), "{what}: the core is busy");
@@ -361,7 +361,7 @@ mod tests {
         }
         // The held core saves nothing (`save_config` returns before the write): the demo's settings file is never made.
         assert!(!repos.config_path.exists(), "{what}: the demo wrote its settings");
-        assert_eq!(reached_now(), before, "{what}: a program ran, the clipboard was written or the network asked");
+        assert_eq!(reached_now(), before, "{what}: a program ran, the clipboard was written, the network asked or a folder deleted");
     }
 
     /// A key pressed with `modifiers`.
@@ -382,23 +382,29 @@ mod tests {
         let before = reached_now();
         let mut window = Window::new(crate::session::Session::demo(repos()));
         press_every_key(&mut window, before);
+        press_every_key_in_each_overlay(&mut window, before);
         press_every_control(&mut window, before);
         run_every_line_of_the_menu(&mut window, before);
         press_every_button_of_the_dialogs(&mut window, before);
     }
 
-    /// Every key there is, and every letter, figure and sign typed, each on a fresh demo.
-    fn press_every_key(window: &mut Window, before: [usize; 3]) {
-        let on_api: fn(&mut Repos) = |repos| repos.pick("api");
-        // Every key there is, alone and with Shift, Ctrl or Alt, and every letter, figure and sign typed, on a demo whose
-        // highlight is on a group's header and on a ticked row: whatever the screen's keys are now or later, each
-        // is pressed. Each starts from a fresh demo, and is let go after.
+    /// Every key there is, alone and with Shift, Ctrl or Alt, and every letter, figure and sign typed, each with
+    /// what lets it go; and the filter with a letter typed into it in the same frame.
+    fn every_input() -> Vec<(Vec<Event>, Vec<Event>)> {
         let modifiers = [Modifiers::NONE, Modifiers::SHIFT, Modifiers::COMMAND, Modifiers::ALT];
         let mut inputs: Vec<(Vec<Event>, Vec<Event>)> =
             Key::ALL.iter().flat_map(|&key| modifiers.map(|held| (vec![key_event(key, held, true)], vec![key_event(key, held, false)]))).collect();
         inputs.extend((' '..='~').map(|typed| (vec![Event::Text(typed.to_string())], Vec::new())));
-        // The filter, and a letter typed into it in the same frame.
         inputs.push((vec![Event::Text("/".to_owned()), Event::Text("u".to_owned())], Vec::new()));
+        inputs
+    }
+
+    /// Every key there is, and every letter, figure and sign typed, each on a fresh demo.
+    fn press_every_key(window: &mut Window, before: [usize; 4]) {
+        let on_api: fn(&mut Repos) = |repos| repos.pick("api");
+        // Every input, on a demo whose highlight is on a group's header and on a ticked row: whatever the screen's
+        // keys are now or later, each is pressed. Each starts from a fresh demo, and is let go after.
+        let inputs = every_input();
         let mut kinds = [false; Command::KINDS];
         for start in [unchanged, on_api] {
             for (press, release) in &inputs {
@@ -421,8 +427,25 @@ mod tests {
         assert!(missed.is_empty(), "the walk pressed no key for the commands {missed:?}");
     }
 
+    /// Every input of [`every_input`] in each overlay `--show` opens (the progress, remove and group dialogs and the
+    /// menu), each on a fresh demo with that overlay open: whatever a key does there (a line of the menu, a button
+    /// with the focus, the field), nothing runs, is written or reaches out.
+    fn press_every_key_in_each_overlay(window: &mut Window, before: [usize; 4]) {
+        let inputs = every_input();
+        for (name, open) in SHOWS {
+            for (press, release) in &inputs {
+                fresh(window, open);
+                assert!(window.open(), "the {name} overlay did not open");
+                window.frame(press.clone());
+                window.frame(release.clone());
+                window.frame(Vec::new());
+                still_held(window, &format!("{press:?} in the {name} overlay"), Expect::Free, before);
+            }
+        }
+    }
+
     /// Every control of the toolbar, the selection bar and the top row, and the table's, each on a fresh demo.
-    fn press_every_control(window: &mut Window, before: [usize; 3]) {
+    fn press_every_control(window: &mut Window, before: [usize; 4]) {
         // Every control of the toolbar, the selection bar and the top row, clicked on a fresh demo.
         fresh(window, unchanged);
         let layout = window.layout();
@@ -465,7 +488,7 @@ mod tests {
     }
 
     /// Every line of the row's menu, by its letter and by a click, each on a fresh demo.
-    fn run_every_line_of_the_menu(window: &mut Window, before: [usize; 3]) {
+    fn run_every_line_of_the_menu(window: &mut Window, before: [usize; 4]) {
         // The row's menu, opened by its "…" on the ticked api (so it is for api and web): every line it shows, by
         // its letter and by a click. A line that asks for work is refused; Move to a group and Remove open their
         // dialogs, whose buttons come next.
@@ -503,7 +526,7 @@ mod tests {
     }
 
     /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
-    fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 3]) {
+    fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 4]) {
         // Forget takes api and web off the list (in memory only); Delete from disk is refused.
         let dialogs: [Dialog; 6] = [
             ("remove", show_remove, &[("Cancel", Expect::Free), ("Forget", Expect::Forgot(&["api", "web"])), ("Delete from disk", Expect::Held)]),
@@ -524,7 +547,7 @@ mod tests {
                 },
                 &[("Move", Expect::Free)],
             ),
-            ("progress", show_progress, &[("Cancel", Expect::Free), ("Hide", Expect::Free)]),
+            ("progress", show_progress, &[("Cancel", Expect::Held), ("Hide", Expect::Free)]),
             (
                 "progress cancelling",
                 |repos| {

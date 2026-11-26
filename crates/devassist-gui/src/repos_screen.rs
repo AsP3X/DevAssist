@@ -4,11 +4,12 @@
 //! through a method of the core's `Repos`; what it says comes back through the status bar.
 //!
 //! Where the terminal app and the window differ: a double click on a row does not update it, Esc does not cancel a
-//! run (the progress dialog's button does), and `d` on a group's header with nothing ticked does not dissolve the
-//! group (the core would, without asking): the status line asks for repositories instead.
+//! run that has a progress dialog, shown or hidden (its button does; Esc cancels only work without one, such as a
+//! deletion from disk), and `d` on a group's header with nothing ticked does not dissolve the group (the core
+//! would, without asking): the status line asks for repositories instead.
 
 use devassist_core::repos::state::{GROUP_KEY, Mode as CoreMode, Repos, SortMode};
-use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, Pos2, Rect, Sense, Ui, pos2};
+use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, PointerButton, Pos2, Rect, Sense, Ui, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
@@ -82,6 +83,8 @@ pub struct Screen {
     scroll: f32,
     /// The filter field had the focus at the end of the last frame.
     filter_focused: bool,
+    /// The filter field had the focus when an overlay took the keyboard, and gets it back when the overlay goes.
+    refocus: bool,
     /// While the row's menu is open: the key of the row it was opened on, and where that row's button is.
     menu: Option<(String, Rect)>,
 }
@@ -285,7 +288,7 @@ pub(crate) enum Command {
     Tick,
     /// Tick every row shown.
     TickAll,
-    /// Clear the filter when it lets nothing through, else the ticks.
+    /// Clear the filter when it lets nothing through, else stop work that has no dialog, else clear the ticks.
     Escape,
     /// Change the sort.
     Sort,
@@ -299,7 +302,7 @@ pub(crate) enum Command {
     Fold(bool),
     /// Show the run's progress dialog again.
     ShowRun,
-    /// Open the menu of the highlighted row, or fold the highlighted group.
+    /// Open the menu of the highlighted row as its "…" does, or fold the highlighted group.
     Enter,
     /// Update the ticked rows, or the highlighted one (`u`).
     UpdateChosen,
@@ -316,9 +319,24 @@ pub(crate) enum Command {
 }
 
 impl Command {
-    /// Whether it acts on the repositories (and so happens once for a held key), rather than moving or showing.
+    /// Whether it acts on the repositories (and so happens once for a held key), rather than moving or showing. No
+    /// wildcard: a new command is placed here on purpose.
     fn acts(self) -> bool {
-        matches!(self, Command::UpdateChosen | Command::UpdateAll | Command::Watch | Command::Open | Command::Group | Command::Remove)
+        match self {
+            Command::UpdateChosen | Command::UpdateAll | Command::Watch | Command::Open | Command::Group | Command::Remove => true,
+            Command::Move(_)
+            | Command::End(_)
+            | Command::Tick
+            | Command::TickAll
+            | Command::Escape
+            | Command::Sort
+            | Command::Filter
+            | Command::Type(_)
+            | Command::Refresh
+            | Command::Fold(_)
+            | Command::ShowRun
+            | Command::Enter => false,
+        }
     }
 }
 
@@ -383,7 +401,8 @@ pub(crate) fn commands(events: &[Event]) -> Vec<Command> {
                     Key::F5 => Command::Refresh,
                     Key::ArrowLeft => Command::Fold(true),
                     Key::ArrowRight => Command::Fold(false),
-                    Key::Enter if !modifiers.any() => Command::Enter,
+                    // Held, it folds a header once, not on and off at the key's repeat rate.
+                    Key::Enter if !modifiers.any() && !repeat => Command::Enter,
                     Key::Delete if !modifiers.any() && !repeat => Command::Remove,
                     _ => continue,
                 };
@@ -495,7 +514,14 @@ pub fn show(
             memory.surrender_focus(filter_id());
             memory.move_focus(FocusDirection::None);
         });
+        // The filter had the focus when the overlay came: it gets it back when the overlay goes.
+        screen.refocus |= screen.filter_focused;
         screen.filter_focused = false;
+    } else if std::mem::take(&mut screen.refocus) {
+        // Back before the field is drawn: what is typed in this frame (the rest of a word) is the filter's, not
+        // the screen's keys.
+        ui.memory_mut(|memory| memory.request_focus(filter_id()));
+        screen.filter_focused = true;
     }
     // The frame's keys are the filter's when it held the focus at the end of the last frame; egui takes the focus
     // away on Esc before the frame sees the key, so the focus now would not say it.
@@ -561,7 +587,15 @@ pub fn show(
         screen.menu = None;
         return;
     }
-    let (Some(repos), Some(sheet)) = (session.repos_mut(), sheet) else { return };
+    let Some(repos) = session.repos_mut() else { return };
+    let Some(sheet) = sheet else {
+        // No table is drawn without its sheet, so a menu (Enter's) would have no row to stand under.
+        if repos.mode == CoreMode::Menu {
+            repos.close_menu();
+        }
+        screen.menu = None;
+        return;
+    };
     let lines = repos_view::lines(repos);
     if moved {
         let heights: Vec<f32> = lines.iter().map(table::height).collect();
@@ -593,8 +627,12 @@ pub fn show(
 }
 
 /// Draws the controls of `plan` (the filter, the sort, the selection bar and "Update all") and, with `keys`, does
-/// what a press on them asks of `repos`.
+/// what a press on them asks of `repos`. A double click is one press: its second click does nothing (as a held key
+/// acts once), so "Open folder" opens each folder once and "Update all" queues one run.
 fn controls(ui: &mut Ui, plan: &Plan, repos: &mut Repos, palette: theme::Palette, keys: bool) {
+    let second =
+        ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary) || input.pointer.button_triple_clicked(PointerButton::Primary));
+    let keys = keys && !second;
     let mut text = repos.list_filter.clone();
     widgets::field(ui, plan.field, &mut text, FILTER_HINT, Icon::Search, palette, filter_id());
     repos.set_list_filter(&text);
@@ -653,6 +691,8 @@ fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
         Command::TickAll => repos.mark_all_visible(),
         // The panel then says that Esc clears the filter, and the ticks are out of sight.
         Command::Escape if filter_hides_everything(repos) => repos.set_list_filter(""),
+        // Work without a dialog (a deletion from disk) has no Cancel button: Esc is how it stops.
+        Command::Escape if esc_cancels(repos) => repos.cancel_work(),
         Command::Escape => repos.clear_marks(),
         Command::Sort => repos.toggle_sort(),
         Command::Filter => {
@@ -670,7 +710,12 @@ fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
             repos.show_job();
             return false;
         }
-        Command::Enter => repos.enter_row(),
+        // On a repository's row, what its "…" does; on a group's header, what the core does (fold, or the menu for
+        // what is ticked).
+        Command::Enter => match repos.selected.clone().filter(|key| !key.starts_with(GROUP_KEY)) {
+            Some(key) => open_menu(repos, &key),
+            None => repos.enter_row(),
+        },
         Command::UpdateChosen => repos.update_chosen(),
         Command::UpdateAll => repos.update_all(),
         Command::Watch => repos.toggle_watch(),
@@ -690,6 +735,13 @@ fn remove(repos: &mut Repos) {
     } else {
         repos.begin_remove();
     }
+}
+
+/// Whether Esc on the list stops what the core is busy with: only work that has no dialog at all (a deletion from
+/// disk, the watch's pull). A run with a progress dialog, shown or hidden, is stopped by its Cancel button; `l`
+/// brings a hidden one back.
+fn esc_cancels(repos: &Repos) -> bool {
+    repos.busy && repos.job.as_ref().is_none_or(|job| !job.running())
 }
 
 /// Whether a filter is set and lets no row through.
@@ -1096,6 +1148,142 @@ mod tests {
     }
 
     #[test]
+    fn a_held_enter_folds_a_header_once() {
+        assert_eq!(commands(&held(Key::Enter, None, 3)), [Command::Enter]);
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session.repos_mut().unwrap().clear_marks();
+        session.repos_mut().unwrap().pick("group::home");
+        frame(&ctx, &mut session, &mut screen, held(Key::Enter, None, 4));
+        assert_eq!(repos(&session).collapsed, ["home"], "folded once, not folded and unfolded at the key's repeat rate");
+    }
+
+    #[test]
+    fn enter_on_a_row_does_what_its_dots_do() {
+        // The highlight on notes, which is not ticked: the ticks of api and web go, the menu is for notes alone.
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session.repos_mut().unwrap().pick("notes");
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Enter)]);
+        assert!(repos(&session).mode == CoreMode::Menu);
+        assert_eq!(ticked(&session), Vec::<String>::new(), "the other rows' ticks are cleared");
+        assert_eq!(repos(&session).chosen(), ["notes"], "the menu acts on the row it hangs on");
+        // The highlight on web, which is ticked: the menu is for both ticked rows, and the ticks stay. (A fresh
+        // context: egui reads a second press of a key it holds down as a repeat.)
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session.repos_mut().unwrap().pick("web");
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Enter)]);
+        assert!(repos(&session).mode == CoreMode::Menu);
+        assert_eq!(
+            (ticked(&session), repos(&session).chosen()),
+            (vec!["api".to_owned(), "web".to_owned()], vec!["api".to_owned(), "web".to_owned()])
+        );
+    }
+
+    #[test]
+    fn esc_cancels_only_work_that_has_no_dialog() {
+        use devassist_core::repos::state::testing::grouped_app;
+        let mut repos = grouped_app();
+        assert!(!esc_cancels(&repos), "nothing runs");
+        repos.busy = true;
+        assert!(esc_cancels(&repos), "a deletion from disk: busy, and no run with a dialog");
+        repos.job = Some(crate::dialogs::testing::run(&["api"], 1));
+        for hidden in [false, true] {
+            if hidden {
+                repos.hide_job();
+            } else {
+                repos.show_job();
+            }
+            assert!(!esc_cancels(&repos), "a run with its dialog, hidden {hidden}: its Cancel button stops it");
+        }
+        repos.job.as_mut().unwrap().finish(Ok("Updated api.".to_owned()), false);
+        assert!(esc_cancels(&repos), "a run that ended is no run: the busy work after it has no dialog");
+        repos.busy = false;
+        repos.fetching = true;
+        assert!(!esc_cancels(&repos), "a fetch is not the work Esc stops");
+    }
+
+    #[test]
+    fn esc_while_a_deletion_runs_cancels_it_and_says_so() {
+        // The cancel flag is the whole process's: the tests that run git take turns with this one.
+        let _live = crate::session::tests::live_git();
+        let mut busy = devassist_core::repos::state::testing::grouped_app();
+        busy.busy = true;
+        busy.marked = vec!["api".to_owned()];
+        let ctx = context();
+        let mut session = Session::Live(Box::new(busy));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Escape)]);
+        let cancelled = devassist_core::sys::process::was_cancelled();
+        devassist_core::sys::process::clear_cancel();
+        assert!(cancelled, "the core was asked to cancel");
+        assert_eq!(repos(&session).status, "Cancelling…", "the core's words");
+        assert_eq!(repos(&session).marked, ["api"], "Esc cancelled, it did not also clear the ticks");
+        // A filter that lets nothing through is cleared first, as before.
+        session.repos_mut().unwrap().set_list_filter("zzz");
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Escape)]);
+        let cancelled = devassist_core::sys::process::was_cancelled();
+        devassist_core::sys::process::clear_cancel();
+        assert_eq!((repos(&session).list_filter.as_str(), cancelled), ("", false));
+    }
+
+    #[test]
+    fn the_filter_gets_its_focus_back_after_an_overlay_and_the_rest_of_the_word_is_typed() {
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
+        frame(&ctx, &mut session, &mut screen, typed(Key::P, "p"));
+        assert_eq!(focused(&ctx), Some(filter_id()));
+        // A dialog opens by itself and goes: the screen has no keyboard for a while.
+        for _ in 0..3 {
+            frame_with(&ctx, &mut session, &mut screen, Vec::new(), false);
+        }
+        assert_eq!(focused(&ctx), None);
+        // The rest of the word comes in the first frame the keyboard is back: it is typed, not run.
+        frame(&ctx, &mut session, &mut screen, [typed(Key::O, "o"), typed(Key::W, "w")].concat());
+        assert_eq!(repos(&session).list_filter, "pow");
+        assert_eq!(repos(&session).status, crate::demo::repos().status, "o and w were run as keys");
+        assert_eq!(focused(&ctx), Some(filter_id()));
+        // A filter that did not have the focus does not get it.
+        frame(&ctx, &mut session, &mut screen, vec![press(Key::Escape)]);
+        assert_eq!(focused(&ctx), None);
+        frame_with(&ctx, &mut session, &mut screen, Vec::new(), false);
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        assert_eq!(focused(&ctx), None);
+    }
+
+    #[test]
+    fn without_a_frosted_sheet_no_menu_is_left_open_unseen() {
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session.repos_mut().unwrap().pick("api");
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))),
+            events: vec![press(Key::Enter)],
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, has_toolbar(&session));
+            let plan = plan(ui.painter(), &layout, &session);
+            show(ui, &layout, plan.as_ref(), &mut session, None, Mode::Light, &mut screen, true);
+        })
+        .drop_without_applying_deltas();
+        assert!(repos(&session).mode == CoreMode::List, "a menu with no table to stand on stayed open");
+    }
+
+    #[test]
     fn no_key_acts_after_one_that_opened_a_dialog_in_the_same_frame() {
         let ticks = Some(vec!["api".to_owned(), "web".to_owned()]);
         assert_eq!(removing(&demo_after([typed(Key::D, "d"), vec![press(Key::Enter)]].concat())), ticks);
@@ -1371,6 +1559,45 @@ mod tests {
         session.repos_mut().unwrap().clear_marks();
         click(&ctx, &mut session, &mut screen, rect.center());
         assert_eq!(repos(&session).status, HELD);
+    }
+
+    #[test]
+    fn a_double_click_on_a_button_acts_once() {
+        // While a fetch runs, "Update all" and the bar's Update queue their run: a double click queues one.
+        let mut busy = devassist_core::repos::state::testing::grouped_app();
+        busy.busy = true;
+        busy.marked = vec!["api".to_owned()];
+        let ctx = context();
+        let mut session = Session::Live(Box::new(busy));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        let (_, planned) = planned(&context(), &session, vec2(WINDOW[0], WINDOW[1]), true);
+        for (at, time) in [(planned.update_all.unwrap().0.center(), 1.0), (bar_item(&session, BAR_UPDATE).center(), 5.0)] {
+            let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            let frames = [
+                (time, vec![Event::PointerMoved(at)]),
+                (time + 0.02, vec![button(true)]),
+                (time + 0.04, vec![button(false)]),
+                (time + 0.1, vec![button(true)]),
+                (time + 0.12, vec![button(false)]),
+                (time + 0.2, Vec::new()),
+            ];
+            for (time, events) in frames {
+                let input = RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| {
+                    let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, has_toolbar(&session));
+                    let plan = plan(ui.painter(), &layout, &session);
+                    show(ui, &layout, plan.as_ref(), &mut session, Some(&sheet()), Mode::Light, &mut screen, true);
+                })
+                .drop_without_applying_deltas();
+            }
+        }
+        assert_eq!(repos(&session).queue.len(), 2, "each button queued one run, not one a click");
     }
 
     #[test]

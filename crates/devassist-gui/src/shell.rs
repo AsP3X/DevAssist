@@ -249,7 +249,8 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
     if drag.drag_started() {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
-    if drag.double_clicked() {
+    // Under an overlay, a double click whose first click opened it (on "Update all", say) is not the top row's.
+    if drag.double_clicked() && (!overlay::is_open(ui.ctx()) || overlay::fresh_click(ui, &drag)) {
         ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized));
     }
 
@@ -580,6 +581,47 @@ mod tests {
                 "double click, dialog {dialog}: {commands:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_double_click_whose_first_click_opened_a_dialog_does_not_maximise_the_window() {
+        // A double click on "Update all" in the top row: its first click opens the progress dialog, and the second
+        // lands on the top row's empty part above the dialog.
+        let ctx = crate::widgets::tests::context();
+        let layout = layout(egui::vec2(1440.0, 900.0), true, false);
+        let at = pos2(700.0, 30.0);
+        let button = |pressed| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let frames = [(0.0, Vec::new()), (0.1, vec![Event::PointerMoved(at)]), (0.12, vec![button(true)]), (0.14, vec![button(false)])];
+        // Frames come between the two clicks, as they do at any frame rate: the dialog is drawn whole before the second.
+        let second = [(0.16, Vec::new()), (0.18, Vec::new()), (0.2, vec![button(true)]), (0.22, vec![button(false)]), (0.3, Vec::new())];
+        let (mut shown, mut page) = (true, Page::Repositories);
+        let mut commands = Vec::new();
+        let mut opened = false;
+        for (index, (time, events)) in frames.into_iter().chain(second).enumerate() {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1440.0, 900.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                draw(ui, &layout, &mut shown, &mut page, Shown { mode: Mode::Light, waiting: 0, status: None });
+                // The first click's release opens the dialog, after the shell is drawn, as the screen's button does.
+                if index == 3 {
+                    overlay::open(ui.ctx(), None);
+                    opened = true;
+                }
+                if opened {
+                    overlay::show(ui.ctx(), |ui| {
+                        let window = ui.ctx().content_rect();
+                        overlay::shield(ui, window, Id::unique("test-shield"));
+                    });
+                }
+            });
+            commands.extend(output.viewport_output.values().flat_map(|viewport| viewport.commands.iter().cloned()));
+            output.drop_without_applying_deltas();
+        }
+        assert!(commands.iter().all(|command| !matches!(command, ViewportCommand::Maximized(_))), "{commands:?}");
     }
 
     #[test]
