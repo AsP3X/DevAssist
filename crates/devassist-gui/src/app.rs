@@ -193,8 +193,8 @@ impl eframe::App for App {
         if let Some(plan) = &plan {
             plan.add_wants(&mut wants);
         }
-        if let Some(dialog) = &dialog {
-            wants.add(dialog.want());
+        for want in dialog.iter().flat_map(dialogs::Plan::wants) {
+            wants.add(want);
         }
         let scene = Scene { size: size.into(), pixels_per_point: ctx.pixels_per_point(), mode, backdrop, blur };
         // The wallpaper first, stretched over the window, then each glass pane; each shows only its own part of

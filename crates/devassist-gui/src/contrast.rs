@@ -24,7 +24,7 @@ use std::rc::Rc;
 use std::thread;
 
 use devassist_core::config::BACKDROPS;
-use devassist_core::repos::state::{MenuItem, Repos};
+use devassist_core::repos::state::{MenuItem, MigrateItem, Repos};
 use devassist_glass::raster::{self, Bitmap, Pixel};
 use egui::epaint::text::LayoutSection;
 use egui::epaint::{ClippedShape, Mesh, RectShape, Shape, TessellationOptions, Tessellator, TextShape};
@@ -650,7 +650,11 @@ struct Shot {
 /// bar; the progress dialog of the drawing's run, and with its Cancel pressed ("Cancelling…", which cannot be
 /// pressed); the remove dialog for a clean and a dirty repository ("clean", "uncommitted changes"); the group dialog
 /// moving api and web with its name, and renaming home with none (its hint, and the danger note the core gives when the rename is pressed then); the menu
-/// on the ticked api, its first line highlighted and its last (Remove, in the danger colour); the folder field in a
+/// on the ticked api, its first line highlighted and its last (Remove, in the danger colour; Migrate resting, its key
+/// and chevron), and with Migrate's side menu open (Migrate on the selection's fill, as it is highlighted, with its key
+/// and chevron; each of the side menu's two lines highlighted and resting, with their keys: Migrate highlighted with
+/// the side menu closed draws the same on the same place, and its key alone, 98 pixels, is under the 100 a place must
+/// measure); the folder field in a
 /// test dialog, with its rows (resting, under the pointer, lit) and empty with its hint; the Add dialog as the demo
 /// opens it with an installed row highlighted (its ticks, the installed rows at half strength, "archived" and
 /// "private", the status line, the note), searched so that a tick is hidden ("Also ticked") with the folder refused
@@ -663,7 +667,7 @@ struct Shot {
 /// Import dialog refusing a long path, its reason wrapped across the dialog's width; and the Push dialog as the demo
 /// opens it (its label, address, note, facts with their checks and crosses, buttons), with no address (the field's
 /// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was).
-const SHOTS: [Shot; 30] = [
+const SHOTS: [Shot; 32] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -713,6 +717,15 @@ const SHOTS: [Shot; 30] = [
         set_up: |repos| {
             demo::show(repos, "menu").unwrap();
             repos.highlight_menu(MenuItem::Remove);
+        },
+    },
+    Shot { name: "migrate", over: Over::Menu, set_up: |repos| demo::show(repos, "migrate").unwrap() },
+    Shot {
+        name: "migrate on push",
+        over: Over::Menu,
+        set_up: |repos| {
+            demo::show(repos, "migrate").unwrap();
+            repos.highlight_migrate(MigrateItem::Service);
         },
     },
     Shot { name: "folder field", over: Over::Folder(FolderShot::Lit), set_up: |_| {} },
@@ -871,8 +884,9 @@ const SETTLE: usize = 4;
 
 /// The texture of the panel's sheet in the shots.
 const SHEET_TEXTURE: TextureId = TextureId::User(1);
-/// The texture of the overlay's glass in the shots.
-const GLASS_TEXTURE: TextureId = TextureId::User(2);
+/// The textures of the overlay's glass panes in the shots, in the order the frame wants them: a dialog's or the
+/// menu's, then the menu's side menu's.
+const GLASS_TEXTURES: [TextureId; 2] = [TextureId::User(2), TextureId::User(3)];
 
 /// One thing measured in a shot: its name, the contrast it needs, what it was (to check that the dark mode
 /// measures the same things in the same order), its lowest contrast and every contrast measured.
@@ -1101,7 +1115,6 @@ struct Frame {
 
 /// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
 /// textures painted from go into `textures`.
-#[expect(clippy::cast_precision_loss, reason = "picture sizes of a few thousand pixels")]
 fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, ColorImage>) -> Frame {
     let (size, mode) = (vec2(stage.scene.size[0], stage.scene.size[1]), stage.scene.mode);
     let window = Rect::from_min_size(Pos2::ZERO, size);
@@ -1111,7 +1124,8 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     (shot.set_up)(session.repos_mut().unwrap());
     let ctx = shot_context(mode);
     let (mut screen, mut dialogs) = (ReposScreen::default(), Dialogs::default());
-    let mut glass: Option<(Rect, Rc<Bitmap>)> = None;
+    // The overlay's glass panes, each where it was baked and its picture, in the order of GLASS_TEXTURES.
+    let mut glass: Vec<(Rect, Rc<Bitmap>)> = Vec::new();
     let mut last = None;
     // The test dialog's folder field: its text and the folders it suggests, and where the pointer rests on it.
     let (mut folder_text, folder_suggestions) = test_folder(shot.over);
@@ -1129,25 +1143,17 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
             found = planned.as_ref().and_then(dialogs::add_found_box);
             reason = planned.as_ref().zip(session.repos()).and_then(|(plan, repos)| dialogs::reason_box(plan, repos, &dialogs));
-            let mut overlay_glass = Vec::new();
             let wanted = if let Over::Folder(_) = shot.over {
                 if frame == 0 {
                     overlay::open(&ctx, Some(widgets::tests::folder_id()));
                 }
                 let rows = widgets::folder_field_rows(&ctx, widgets::tests::folder_id(), folder_suggestions.len());
                 pointer = Some(widgets::tests::folder_shot_pointer(ui.painter(), window, rows));
-                Some(overlay::want_dialog(widgets::tests::folder_dialog_places(ui.painter(), window, rows).0))
+                vec![overlay::want_dialog(widgets::tests::folder_dialog_places(ui.painter(), window, rows).0)]
             } else {
-                planned.as_ref().map(dialogs::Plan::want)
+                planned.as_ref().map_or_else(Vec::new, dialogs::Plan::wants)
             };
-            if let Some(want) = wanted {
-                if glass.as_ref().is_none_or(|(rect, _)| *rect != want.rect) {
-                    glass = Some((want.rect, stage.pane(&want)));
-                }
-                let picture = &glass.as_ref().unwrap().1;
-                let uv = Rect::from_min_max(Pos2::ZERO, pos2(want.rect.width() / picture.w as f32, want.rect.height() / picture.h as f32));
-                overlay_glass.push(Drawn { id: want.id, texture: GLASS_TEXTURE, rect: want.rect, uv });
-            }
+            let overlay_glass = overlay_drawn(&wanted, &mut glass, stage, shot.name);
             let layout = shell::layout(size, true, repos_screen::has_toolbar(&session));
             let plan = repos_screen::plan(ui.painter(), &layout, &session);
             let mut wants = shell::wants(&layout);
@@ -1176,8 +1182,8 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             drew = Some((count, wants.as_slice().to_vec(), layout, plan.as_ref().and_then(repos_screen::top_row)));
         });
         picture::take_textures(std::mem::take(&mut output.textures_delta), textures);
-        if let Some((_, picture)) = &glass {
-            textures.insert(GLASS_TEXTURE, picture.image());
+        for ((_, picture), texture) in glass.iter().zip(GLASS_TEXTURES) {
+            textures.insert(texture, picture.image());
         }
         let (overlay, wants, layout, top) = drew.unwrap();
         main = top.map(|(_, main)| main);
@@ -1195,11 +1201,34 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         });
     }
     if !shot.over.is_screen() {
-        assert!(overlay::is_open(&ctx) && glass.is_some(), "{}: its overlay is not drawn", shot.name);
+        assert!(overlay::is_open(&ctx) && !glass.is_empty(), "{}: its overlay is not drawn", shot.name);
+        // A side menu open in the core is baked and drawn beside its menu: its texts are measured on its own glass.
+        if session.repos().is_some_and(|repos| repos.migrate_highlight().is_some()) {
+            assert_eq!(glass.len(), 2, "{}: the side menu's glass is not baked", shot.name);
+        }
     }
     let last = last.unwrap();
     hover_lands(shot, &last, size, mode);
     last
+}
+
+/// The overlay's panes `wanted` as a shot's frame draws them: each baked on `stage` into `glass` (kept while it
+/// stands where it was baked), with its texture of [`GLASS_TEXTURES`]. `name` is the shot's.
+#[expect(clippy::cast_precision_loss, reason = "picture sizes of a few thousand pixels")]
+fn overlay_drawn(wanted: &[Want], glass: &mut Vec<(Rect, Rc<Bitmap>)>, stage: &Stage, name: &str) -> Vec<Drawn> {
+    assert!(wanted.len() <= GLASS_TEXTURES.len(), "{name}: more overlay panes than textures for them");
+    glass.truncate(wanted.len());
+    let mut drawn = Vec::new();
+    for (index, (want, texture)) in wanted.iter().zip(GLASS_TEXTURES).enumerate() {
+        if glass.get(index).is_none_or(|(rect, _)| *rect != want.rect) {
+            glass.truncate(index);
+            glass.push((want.rect, stage.pane(want)));
+        }
+        let picture = &glass[index].1;
+        let uv = Rect::from_min_max(Pos2::ZERO, pos2(want.rect.width() / picture.w as f32, want.rect.height() / picture.h as f32));
+        drawn.push(Drawn { id: want.id, texture, rect: want.rect, uv });
+    }
+    drawn
 }
 
 /// The test dialog's folder field in a shot over `over`: `D:\code\work\` and the folders it suggests while its rows are
@@ -1368,7 +1397,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                     fills.push((rect.rect.intersect(clipped.clip_rect), name, on_overlay));
                 }
             }
-            Shape::Mesh(mesh) if mesh.texture_id == GLASS_TEXTURE => {
+            Shape::Mesh(mesh) if GLASS_TEXTURES.contains(&mesh.texture_id) => {
                 let glass = if shot.over == Over::Menu { "menu glass" } else { "dialog glass" };
                 fills.push((mesh.calc_bounds(), glass.to_owned(), on_overlay));
             }

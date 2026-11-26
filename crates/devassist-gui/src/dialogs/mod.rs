@@ -29,8 +29,9 @@
 //!
 //! The row's menu ([`crate::menu`]) is one more overlay on this bridge ([`Which::Menu`]): it opens with no focus,
 //! has a shield but no scrim, and stands under the row's button that `repos_screen` places ([`before`] takes it).
-//! When one of its lines opens a dialog, the core's mode changes and the bridge hands the overlay over to that
-//! dialog in the next frame, opened as every dialog is.
+//! While the core's Migrate menu is open, its side menu is placed beside it before the bake, a second pane of the
+//! same overlay. When one of its lines (or of the side menu's) opens a dialog, the core's mode changes and the bridge
+//! hands the overlay over to that dialog in the next frame, opened as every dialog is.
 //!
 //! The window never asks the core for its folder question of a clone (`Mode::Path` for `Purpose::Clone`): Add
 //! asks for the folder itself. Should the core stand there all the same, [`which`] says Add, and [`after`] closes
@@ -349,18 +350,27 @@ impl Plan {
         }
     }
 
-    /// The glass pane of the dialog or the menu, to add to the panes baked this frame.
-    #[must_use]
-    pub fn want(&self) -> Want {
+    /// Where its controls are: the dialog's pane, or the menu's with its side menu's.
+    fn whole(&self) -> Rect {
         match &self.0 {
-            Planned::Dialog(_, parts) => overlay::want_dialog(parts.pane()),
-            Planned::Menu(places) => overlay::want_menu(places.pane),
+            Planned::Dialog(_, parts) => parts.pane(),
+            Planned::Menu(places) => places.whole(),
+        }
+    }
+
+    /// The glass panes of the dialog, or of the menu and its side menu, to add to the panes baked this frame.
+    #[must_use]
+    pub fn wants(&self) -> Vec<Want> {
+        match &self.0 {
+            Planned::Dialog(_, parts) => vec![overlay::want_dialog(parts.pane())],
+            Planned::Menu(places) => std::iter::once(overlay::want_menu(places.pane)).chain(places.side.map(overlay::want_submenu)).collect(),
         }
     }
 }
 
 /// Where the dialog or the menu the core's mode asks for stands in `window`, a dialog's header laid out with
-/// `painter`'s faces, the menu under the row's button at `anchor` (from `repos_screen::menu_anchor`), with what
+/// `painter`'s faces, the menu under the row's button at `anchor` (from `repos_screen::menu_anchor`) and its side
+/// menu beside it while the core's Migrate menu is open, with what
 /// `dialogs` keep (the Add and folder dialogs' folder fields and their rows); `None` when the mode asks for none, or for the menu
 /// while the screen has not placed its button yet.
 #[must_use]
@@ -373,13 +383,13 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Opti
         Which::Add => dialogs.add.as_ref().map(|state| add::plan(painter, window, repos, state)),
         Which::Folder => dialogs.folder.as_ref().and_then(|state| folder::plan(painter, window, repos, state)),
         Which::Push => dialogs.push.as_ref().and_then(|state| push::plan(painter, window, repos, state)),
-        Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(window, anchor)))),
+        Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(window, anchor, repos.migrate_highlight().is_some())))),
     }
 }
 
 /// Before the bake: brings the overlay in line with the core's mode ([`sync`]) and gives the place of the dialog
 /// or the menu it asks for (the menu under `anchor`), whose glass is then baked with the other panes
-/// ([`Plan::want`]).
+/// ([`Plan::wants`]).
 pub fn before(ctx: &Context, repos: Option<&Repos>, anchor: Option<Rect>, dialogs: &mut Dialogs) -> Option<Plan> {
     sync(ctx, repos, dialogs);
     plan(&ctx.layer_painter(LayerId::background()), ctx.content_rect(), repos, anchor, dialogs)
@@ -415,7 +425,8 @@ pub fn after(ctx: &Context, planned: Option<Plan>, repos: Option<&mut Repos>, dr
 }
 
 /// Draws the dialog or the menu of `plan` on the overlay: the shield, for a dialog the scrim, its glass among
-/// `drawn`, its pane, then its own parts; what a person does in it goes to `repos` through its methods.
+/// `drawn`, its pane, then its own parts (the menu paints its side menu's glass itself, in a frame it is shown); what
+/// a person does in it goes to `repos` through its methods.
 pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode: Mode, dialogs: &mut Dialogs) {
     let palette = theme::palette(mode);
     let window = ctx.content_rect();
@@ -427,7 +438,7 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
         }
         overlay::glass(ui, drawn);
         overlay::pane(ui, plan.pane(), Id::unique("dialog-pane"));
-        ui.set_clip_rect(plan.pane());
+        ui.set_clip_rect(plan.whole());
         match &plan.0 {
             Planned::Dialog(header, Parts::Progress(places)) => progress::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Remove(places)) => remove::show(ui, header, *places, repos, palette, dialogs, outside),
@@ -435,7 +446,7 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
             Planned::Dialog(header, Parts::Add(places)) => add::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Folder(places)) => folder::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Push(places)) => push::show(ui, header, *places, repos, palette, dialogs, outside),
-            Planned::Menu(places) => menu::show(ui, *places, repos, palette, outside),
+            Planned::Menu(places) => menu::show(ui, *places, repos, palette, outside, drawn),
         }
     });
     if which(repos) != Some(plan.which()) {

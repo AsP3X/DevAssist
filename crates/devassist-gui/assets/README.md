@@ -96,6 +96,12 @@ The Push dialog's address field icon, `link` (`e102`, the design's `field(…, {
 script of the standard library; nothing was downloaded. The same reading gives `check` as `e06c` and `x` as `e1b2`
 (the font also maps the letter `x`, `0x78`, to it), as `src/assets.rs` has them; the Push dialog's facts use those two.
 
+The Migrate line of the row's menu and its side menu's icons, `truck` (`e194`, "Migrate"), `folder-output` (`e337`,
+"Move to another folder…") and `cloud-upload` (`e091`, "Push to another service…"), were read on 2026-11-26 the same
+way from the bundled `lucide.ttf` (its `post` glyph names and its format 4 `cmap`), with a short script of the standard
+library; nothing was downloaded. The same reading gives `chevron-right` as `e06f` (the Migrate line's chevron),
+`link` as `e102`, `group` as `e464` and `folder` as `e0d7`, as `src/assets.rs` has them.
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

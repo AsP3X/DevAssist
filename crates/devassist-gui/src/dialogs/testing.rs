@@ -66,6 +66,8 @@ pub(crate) struct Window {
     plan: Option<Plan>,
     /// The last frame baked a dialog's glass (`before` placed one).
     pub(crate) baked: bool,
+    /// Where the last frame baked the glass of the menu's side menu, when `before` placed it.
+    pub(crate) baked_side: Option<Rect>,
     /// The last frame painted something on the overlay's layer.
     pub(crate) painted: bool,
     /// The last frame asked for the next one at once.
@@ -87,6 +89,7 @@ impl Window {
             size: WINDOW,
             plan: None,
             baked: false,
+            baked_side: None,
             painted: false,
             repaint: false,
             fills: Vec::new(),
@@ -117,11 +120,12 @@ impl Window {
         let window = Rect::from_min_size(Pos2::ZERO, vec2(self.size[0], self.size[1]));
         let input = RawInput { screen_rect: Some(window), events, time, ..Default::default() };
         let (session, screen, dialogs) = (&mut self.session, &mut self.screen, &mut self.dialogs);
-        let (mut plan, mut baked, mut painted) = (None, false, false);
+        let (mut plan, mut baked, mut baked_side, mut painted) = (None, false, None, false);
         let output = self.ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
             let planned = before(&ctx, session.repos(), repos_screen::menu_anchor(screen), dialogs);
             baked = planned.is_some();
+            baked_side = planned.as_ref().and_then(|plan| plan.wants().into_iter().find(|want| want.id == overlay::SUBMENU)).map(|want| want.rect);
             let layout = shell::layout(window.size(), true, repos_screen::has_toolbar(session));
             let screen_plan = repos_screen::plan(ui.painter(), &layout, session);
             let keys = !overlay::is_open(&ctx);
@@ -148,7 +152,7 @@ impl Window {
             })
             .collect();
         output.drop_without_applying_deltas();
-        (self.plan, self.baked, self.painted) = (plan, baked, painted);
+        (self.plan, self.baked, self.baked_side, self.painted) = (plan, baked, baked_side, painted);
     }
 
     /// A click at `at`, over four frames.
@@ -217,6 +221,14 @@ impl Window {
     pub(crate) fn menu_pane(&self) -> Option<Rect> {
         match &self.plan.as_ref()?.0 {
             Planned::Menu(places) => Some(places.pane),
+            Planned::Dialog(..) => None,
+        }
+    }
+
+    /// The menu's side menu in the last frame, when the menu was placed with it.
+    pub(crate) fn submenu_pane(&self) -> Option<Rect> {
+        match &self.plan.as_ref()?.0 {
+            Planned::Menu(places) => places.side,
             Planned::Dialog(..) => None,
         }
     }

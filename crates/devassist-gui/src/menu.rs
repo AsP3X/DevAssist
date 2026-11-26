@@ -3,28 +3,41 @@
 //! mode is `Mode::Menu`, through the same bridge as the dialogs (`dialogs::Which::Menu`).
 //!
 //! It shows the core's lines in the core's words and with the core's keys (`MenuItem::label`, `MenuItem::key`), as
-//! far as the window can do them ([`shown`]): the forks' three lines and Migrate wait for their screens. A menu has
-//! a shield but no scrim; a click outside it or Esc closes it, and the click goes no further. It is not walked with
-//! Tab: as in the terminal app, Up and Down (and `k` and `j`) move the highlight and stop at the ends, Home and End
-//! go to them, Enter runs the highlighted line, a line's letter runs that line, and `q` closes. A letter of a line
-//! the window does not show does nothing. The pointer, when it moves over a line, highlights it, so the mouse and
-//! the keys never show two highlights; a pointer that only rests where the menu opens chooses nothing. A line that
-//! opens a dialog (Update, Move to a group, Remove) hands the overlay over to it in the next frame, and the key or
-//! click that chose the line does nothing in it (`overlay::open`, `overlay::fresh_click`).
+//! far as the window can do them ([`shown`]): the forks' three lines wait for their screens. A menu has a shield but
+//! no scrim; a click outside it or Esc closes it, and the click goes no further. It is not walked with Tab: as in
+//! the terminal app, Up and Down (and `k` and `j`) move the highlight and stop at the ends, Home and End go to them,
+//! Enter runs the highlighted line, a line's letter runs that line, and `q` closes. A letter of a line the window
+//! does not show does nothing. The pointer, when it moves over a line, highlights it, so the mouse and the keys
+//! never show two highlights; a pointer that only rests where the menu opens chooses nothing. A line that opens a
+//! dialog (Update, Move to a group, Remove) hands the overlay over to it in the next frame, and the key or click
+//! that chose the line does nothing in it (`overlay::open`, `overlay::fresh_click`).
+//!
+//! Migrate, set apart by a rule as Remove is, ends with a chevron: Enter, Right, its letter or a click opens the
+//! core's Migrate menu (`Repos::run_menu`), which the window draws as a side menu, a second glass pane of the same
+//! overlay beside the menu (`overlay::submenu_rect`, `overlay::want_submenu`), with the core's two lines in its
+//! words and keys (`MigrateItem`). The side menu follows the core's state (`Repos::migrate_highlight`): the window
+//! keeps none of its own. While it is open, Migrate keeps the selection's fill; Up and Down (`k`, `j`, Home, End)
+//! move in it and stop at its ends, Right does nothing, Left, Esc or `q` close it and the menu stays, a click on
+//! Migrate closes it too, and the menu's letters do nothing; Enter, a line's letter or a click runs the line
+//! (`Repos::run_migrate`), whose dialog the bridge opens in the next frame. The pointer moving over another line of
+//! the menu closes the side menu and highlights that line. It is drawn only in a frame whose bake placed its glass,
+//! and never in a frame that closes it; the key or click that opened it does nothing in it
+//! (`overlay::open_submenu`).
 
-use devassist_core::repos::state::{MenuItem, Repos};
-use egui::{Align2, Event, FontFamily, Id, Key, Rect, Sense, Ui, Vec2, pos2, vec2};
+use devassist_core::repos::state::{MenuItem, MigrateItem, Repos};
+use egui::{Align2, Color32, Event, FontFamily, FontId, Id, Key, Painter, Pos2, Rect, Response, Sense, Ui, Vec2, pos2, vec2};
 
 use crate::assets::Icon;
+use crate::baker::Drawn;
 use crate::overlay;
 use crate::theme::{
-    HAIRLINE, ICON, KEY_TEXT, MENU_KEY_WIDTH, MENU_LINE, MENU_LINE_OPACITY, MENU_PAD, MENU_ROW, MENU_ROW_GAP, MENU_ROW_PAD, MENU_ROW_RADIUS,
-    MENU_WIDTH, Palette, TEXT,
+    HAIRLINE, ICON, KEY_TEXT, MENU_CHEVRON, MENU_KEY_WIDTH, MENU_LINE, MENU_LINE_OPACITY, MENU_PAD, MENU_ROW, MENU_ROW_GAP, MENU_ROW_PAD,
+    MENU_ROW_RADIUS, MENU_WIDTH, Palette, SUBMENU_WIDTH, TEXT,
 };
 use crate::widgets::{self, draw_icon, font};
 
 /// The lines the window shows, in the core's order.
-const SHOWN: [MenuItem; 8] = [
+const SHOWN: [MenuItem; 9] = [
     MenuItem::Update,
     MenuItem::Open,
     MenuItem::Github,
@@ -32,29 +45,68 @@ const SHOWN: [MenuItem; 8] = [
     MenuItem::CopyPath,
     MenuItem::Watch,
     MenuItem::PullRequests,
+    MenuItem::Migrate,
     MenuItem::Remove,
 ];
 
 /// The drawing's icon of each line of [`SHOWN`], in its order.
-const ICONS: [Icon; SHOWN.len()] =
-    [Icon::ArrowDownToLine, Icon::FolderOpen, Icon::ExternalLink, Icon::Group, Icon::Copy, Icon::Eye, Icon::GitPullRequest, Icon::Trash2];
+const ICONS: [Icon; SHOWN.len()] = [
+    Icon::ArrowDownToLine,
+    Icon::FolderOpen,
+    Icon::ExternalLink,
+    Icon::Group,
+    Icon::Copy,
+    Icon::Eye,
+    Icon::GitPullRequest,
+    Icon::Truck,
+    Icon::Trash2,
+];
+
+/// The drawing's icon of each line of the side menu, in the order of the core's `MigrateItem::ALL`.
+const SIDE_ICONS: [Icon; MigrateItem::ALL.len()] = [Icon::FolderOutput, Icon::CloudUpload];
+
+/// The sign the core ends the words of a line that opens a submenu with; the window draws the drawing's chevron
+/// instead.
+const OPENS: char = '▸';
 
 /// The lines the window's menu shows, in order: what the window can do so far. The core's other lines (the forks'
-/// three and Migrate) wait for the screens they open.
+/// three) wait for the screens they open.
 #[must_use]
 pub fn shown() -> &'static [MenuItem] {
     &SHOWN
 }
 
-/// Whether a line stands between `item` and the one before it: Remove is set apart, as the drawing sets it.
-fn rule_before(item: MenuItem) -> bool {
-    item == MenuItem::Remove
+/// The words of `item`'s line, for one repository or for several: the core's, without the sign it ends Migrate's
+/// with ([`OPENS`]).
+fn words(item: MenuItem, many: bool) -> &'static str {
+    item.label(many).trim_end_matches(OPENS).trim_end()
 }
 
-/// How tall the menu is: its lines, the rule before Remove, and the room above and below them.
+/// Whether a line stands between `item` and the one before it: Migrate and Remove are set apart, as the drawing
+/// sets them.
+fn rule_before(item: MenuItem) -> bool {
+    matches!(item, MenuItem::Migrate | MenuItem::Remove)
+}
+
+/// Whether `item`'s line opens the side menu, and ends with a chevron.
+fn opens_side(item: MenuItem) -> bool {
+    item == MenuItem::Migrate
+}
+
+/// The place of the line that opens the side menu among [`SHOWN`].
+fn side_line() -> usize {
+    SHOWN.iter().position(|item| opens_side(*item)).unwrap_or(0)
+}
+
+/// How tall the menu is: its lines, the rules before Migrate and Remove, and the room above and below them.
 fn height() -> f32 {
     let (rows, rules) = SHOWN.iter().fold((0.0, 0.0), |(rows, rules), item| (rows + 1.0, rules + if rule_before(*item) { 1.0 } else { 0.0 }));
     2.0 * MENU_PAD + rows * MENU_ROW + rules * MENU_LINE
+}
+
+/// How tall the side menu is: its lines, and the room above and below them.
+fn side_height() -> f32 {
+    2.0 * MENU_PAD + MigrateItem::ALL.iter().map(|_| MENU_ROW).sum::<f32>()
 }
 
 /// Where the menu stands.
@@ -62,13 +114,25 @@ fn height() -> f32 {
 pub struct Places {
     /// Its pane.
     pub pane: Rect,
+    /// The side menu's pane, when the core's Migrate menu was open as the frame was placed: its glass is baked there.
+    pub side: Option<Rect>,
+}
+
+impl Places {
+    /// The room both panes take, where the overlay's controls are.
+    #[must_use]
+    pub fn whole(&self) -> Rect {
+        self.side.map_or(self.pane, |side| self.pane.union(side))
+    }
 }
 
 /// Where the menu stands in `window` for the button at `anchor`: under it, its right edge on the button's
-/// (`overlay::menu_rect`).
+/// (`overlay::menu_rect`); with `side`, the side menu beside it, level with Migrate (`overlay::submenu_rect`).
 #[must_use]
-pub fn plan(window: Rect, anchor: Rect) -> Places {
-    Places { pane: overlay::menu_rect(anchor, vec2(MENU_WIDTH, height()), window) }
+pub fn plan(window: Rect, anchor: Rect, side: bool) -> Places {
+    let pane = overlay::menu_rect(anchor, vec2(MENU_WIDTH, height()), window);
+    let side = side.then(|| overlay::submenu_rect(pane, layout(pane).0[side_line()], vec2(SUBMENU_WIDTH, side_height()), window));
+    Places { pane, side }
 }
 
 /// The lines of the menu in its pane at `pane`, each with its place, and the places of the rules between them.
@@ -95,15 +159,36 @@ fn layout(pane: Rect) -> (Vec<Rect>, Vec<Rect>) {
     (rows, rules)
 }
 
+/// The lines of the side menu in its pane at `pane`, in the order of the core's `MigrateItem::ALL`.
+fn side_layout(pane: Rect) -> Vec<Rect> {
+    let inside = pane.shrink(MENU_PAD);
+    let mut top = inside.top();
+    MigrateItem::ALL
+        .iter()
+        .map(|_| {
+            let row = Rect::from_min_size(pos2(inside.left(), top), vec2(inside.width(), MENU_ROW));
+            top = row.bottom();
+            row
+        })
+        .collect()
+}
+
 /// The places of the menu's lines in its pane at `pane`, in the order of [`shown`]: for the tests that press them.
 #[cfg(test)]
 pub(crate) fn line_rects(pane: Rect) -> Vec<Rect> {
     layout(pane).0
 }
 
-/// What a key asks of the open menu.
+/// The places of the side menu's lines in its pane at `pane`, in the order of the core's `MigrateItem::ALL`: for the
+/// tests that press them.
+#[cfg(test)]
+pub(crate) fn side_line_rects(pane: Rect) -> Vec<Rect> {
+    side_layout(pane)
+}
+
+/// What a key asks of the open menu or side menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Ask {
+enum Ask<T> {
     /// Close it.
     Close,
     /// Move the highlight one line up (`true`) or down.
@@ -112,13 +197,18 @@ enum Ask {
     End(bool),
     /// Run the highlighted line.
     Highlighted,
+    /// Go back out (Left).
+    Back,
+    /// Go into the highlighted line's side menu (Right).
+    Into,
     /// Run this line.
-    Run(MenuItem),
+    Run(T),
 }
 
-/// What the keys among `events` ask of the menu, in order, as the terminal app's menu reads them. Letters are read
-/// from the typed text, so they follow the keyboard's layout; a letter of a line the window does not show is none.
-fn asks(events: &[Event]) -> Vec<Ask> {
+/// What the keys among `events` ask of the menu, in order, as the terminal app's menu reads them, `letter` giving the
+/// line a typed letter runs. Letters are read from the typed text, so they follow the keyboard's layout; a letter of
+/// no line is none.
+fn asks<T>(events: &[Event], letter: impl Fn(char) -> Option<T>) -> Vec<Ask<T>> {
     let mut asks = Vec::new();
     for event in events {
         match event {
@@ -129,6 +219,8 @@ fn asks(events: &[Event]) -> Vec<Ask> {
                 Key::Home => Some(Ask::End(true)),
                 Key::End => Some(Ask::End(false)),
                 Key::Enter => Some(Ask::Highlighted),
+                Key::ArrowLeft => Some(Ask::Back),
+                Key::ArrowRight => Some(Ask::Into),
                 _ => None,
             }),
             Event::Text(text) => {
@@ -137,7 +229,7 @@ fn asks(events: &[Event]) -> Vec<Ask> {
                         'q' => Some(Ask::Close),
                         'k' => Some(Ask::Step(true)),
                         'j' => Some(Ask::Step(false)),
-                        _ => SHOWN.iter().find(|item| item.key() == typed).map(|item| Ask::Run(*item)),
+                        _ => letter(typed).map(Ask::Run),
                     });
                 }
             }
@@ -147,16 +239,26 @@ fn asks(events: &[Event]) -> Vec<Ask> {
     asks
 }
 
-/// The highlighted line after `ask`, from the line at `at`: one up or down, stopping at the ends; the first or the
-/// last. From no line, a step goes to the first.
-fn moved(at: Option<usize>, ask: Ask) -> Option<usize> {
-    let last = SHOWN.len() - 1;
+/// The line of [`SHOWN`] whose letter is `typed`.
+fn menu_letter(typed: char) -> Option<MenuItem> {
+    SHOWN.iter().copied().find(|item| item.key() == typed)
+}
+
+/// The line of the side menu whose letter is `typed`.
+fn side_letter(typed: char) -> Option<MigrateItem> {
+    MigrateItem::ALL.into_iter().find(|item| item.key() == typed)
+}
+
+/// The highlighted line of `lines` after `ask`, from the line at `at`: one up or down, stopping at the ends; the
+/// first or the last. From no line, a step goes to the first.
+fn moved<T>(at: Option<usize>, ask: Ask<T>, lines: usize) -> Option<usize> {
+    let last = lines.saturating_sub(1);
     Some(match (ask, at) {
         (Ask::Step(true), Some(at)) => at.saturating_sub(1),
         (Ask::Step(false), Some(at)) => (at + 1).min(last),
         (Ask::Step(_) | Ask::End(true), _) => 0,
         (Ask::End(false), _) => last,
-        (Ask::Close | Ask::Highlighted | Ask::Run(_), _) => return at,
+        (Ask::Close | Ask::Highlighted | Ask::Back | Ask::Into | Ask::Run(_), _) => return at,
     })
 }
 
@@ -171,72 +273,234 @@ fn row_id(index: usize) -> Id {
     Id::unique(("menu-row", index))
 }
 
+/// The id of the side menu's line `index`.
+fn side_row_id(index: usize) -> Id {
+    Id::unique(("submenu-row", index))
+}
+
+/// What a person did in the menu in a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Done {
+    /// Closed it.
+    Close,
+    /// Ran this line of it (Migrate opens the side menu).
+    Run(MenuItem),
+    /// Closed the side menu, back to the menu.
+    Back,
+    /// Ran this line of the side menu.
+    Side(MigrateItem),
+}
+
 /// The menu at `places`, for `repos`'s chosen repositories, on the overlay in `ui`: its lines, the highlighted one
-/// on the selection's fill, Remove in the danger colour, each line's key at its right. `outside` is whether the
-/// shield was clicked this frame (outside the pane). The highlight follows the pointer only in a frame the pointer
-/// moves, so a highlight moved by a key stays while the pointer rests, and a pointer resting where the menu opens
-/// does not choose its line. What a person does goes to `repos` through its methods.
-pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, outside: bool) {
+/// on the selection's fill, Remove in the danger colour, each line's key at its right, Migrate's before its chevron;
+/// and the side menu, while the core's Migrate menu is open and the frame baked its glass (among `drawn`). `outside`
+/// is whether the shield was clicked this frame (outside both panes). The highlight follows the pointer only in a
+/// frame the pointer moves, so a highlight moved by a key stays while the pointer rests, and a pointer resting where
+/// the menu opens does not choose its line. What a person does goes to `repos` through its methods.
+pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, outside: bool, drawn: &[Drawn]) {
     // No Tab here: the lines take no focus, so Enter and Space press none of them; the arrows move the highlight.
     overlay::walk(ui, &[]);
-    let (rows, rules) = layout(places.pane);
+    let migrate = side_line();
+    let open = repos.migrate_highlight().is_some();
+    // The side menu is touched and drawn only where this frame's bake placed its glass.
+    let side = places.side.filter(|_| open);
+    if let Some(side) = side {
+        overlay::pane(ui, side, Id::unique("submenu-pane"));
+    }
+    let events = if open { overlay::submenu_events(ui.ctx()) } else { ui.input(|input| input.events.clone()) };
+    // While the side menu is open, a click counts only once every press of it came after the side menu opened.
+    let fresh = |ui: &Ui, response: &Response| if open { overlay::fresh_submenu_click(ui, response) } else { overlay::fresh_click(ui, response) };
+    let rows = layout(places.pane).0;
+    let side_rows = side.map_or_else(Vec::new, side_layout);
     let mut at = highlighted(repos);
-    let mut chosen = None;
+    let mut side_at = repos.migrate_highlight().and_then(|item| MigrateItem::ALL.iter().position(|known| *known == item));
+    // The pointer moved over another line of the menu than Migrate: the side menu closes.
+    let mut leave = false;
+    let mut done = None;
     let moving = ui.input(|input| input.pointer.delta() != Vec2::ZERO);
     for (index, row) in rows.iter().enumerate() {
         let response = ui.interact(row.intersect(places.pane), row_id(index), Sense::CLICK);
         if moving && response.hovered() {
             at = Some(index);
+            leave = open && index != migrate;
         }
-        if overlay::fresh_click(ui, &response) {
-            chosen = Some(Ask::Run(SHOWN[index]));
+        if fresh(ui, &response) {
+            done = Some(if open && index == migrate { Done::Back } else { Done::Run(SHOWN[index]) });
         }
     }
-    let mut done = chosen.or(outside.then_some(Ask::Close));
-    for ask in asks(&ui.input(|input| input.events.clone())) {
-        if done.is_some() {
-            break;
+    if let Some(pane) = side {
+        for (index, row) in side_rows.iter().enumerate() {
+            let response = ui.interact(row.intersect(pane), side_row_id(index), Sense::CLICK);
+            if moving && response.hovered() {
+                (at, side_at, leave) = (Some(migrate), Some(index), false);
+            }
+            if fresh(ui, &response) {
+                done = Some(Done::Side(MigrateItem::ALL[index]));
+            }
         }
-        match ask {
-            Ask::Close | Ask::Run(_) => done = Some(ask),
-            Ask::Highlighted => done = at.map(|at| Ask::Run(SHOWN[at])),
-            Ask::Step(_) | Ask::End(_) => at = moved(at, ask),
-        }
+    }
+    let on_side = open && !leave;
+    let done = keyed(&events, on_side, &mut at, &mut side_at, done.or(outside.then_some(Done::Close)));
+    if leave {
+        repos.close_migrate();
     }
     if let Some(at) = at {
         repos.highlight_menu(SHOWN[at]);
     }
-
-    let many = repos.chosen().len() > 1;
-    let painter = ui.painter().with_clip_rect(places.pane.intersect(ui.clip_rect()));
-    for rule in rules {
-        painter.rect_filled(rule, 0.0, palette.on_glass.gamma_multiply(MENU_LINE_OPACITY));
-    }
-    let words = font(TEXT, FontFamily::Proportional);
-    let small = font(KEY_TEXT, FontFamily::Proportional);
-    for (index, (row, (item, icon))) in rows.iter().zip(SHOWN.into_iter().zip(ICONS)).enumerate() {
-        if Some(index) == at {
-            painter.rect_filled(*row, MENU_ROW_RADIUS, palette.selection);
-        }
-        let (ink, icon_ink) = if item == MenuItem::Remove { (palette.danger, palette.danger) } else { (palette.on_glass, palette.quiet) };
-        let y = row.center().y;
-        draw_icon(&painter, pos2(row.left() + MENU_ROW_PAD + ICON / 2.0, y), icon, ICON, icon_ink);
-        let left = row.left() + MENU_ROW_PAD + ICON + MENU_ROW_GAP;
-        let room = row.right() - MENU_ROW_PAD - MENU_KEY_WIDTH - MENU_ROW_GAP - left;
-        painter.text(pos2(left, y), Align2::LEFT_CENTER, widgets::ellipsis(item.label(many), &words, room, ui), words.clone(), ink);
-        painter.text(pos2(row.right() - MENU_ROW_PAD, y), Align2::RIGHT_CENTER, key_name(item), small.clone(), palette.quiet);
+    if let Some(side_at) = side_at.filter(|_| on_side) {
+        repos.highlight_migrate(MigrateItem::ALL[side_at]);
     }
 
+    draw_menu(ui, places.pane, at, repos.chosen().len() > 1, palette);
+    // Not in a frame that closes it: no pane stands for a side menu that is gone.
+    if let Some(side) = side.filter(|_| on_side && done.is_none()) {
+        overlay::submenu_glass(ui, drawn);
+        draw_side(ui, side, side_at, palette);
+    }
     match done {
-        Some(Ask::Run(item)) => repos.run_menu(item),
-        Some(Ask::Close) => repos.close_menu(),
-        _ => {}
+        Some(Done::Run(item)) if opens_side(item) => {
+            repos.highlight_menu(item);
+            repos.run_menu(item);
+            overlay::open_submenu(ui.ctx());
+        }
+        Some(Done::Run(item)) => repos.run_menu(item),
+        Some(Done::Close) => repos.close_menu(),
+        Some(Done::Back) => repos.close_migrate(),
+        Some(Done::Side(item)) => repos.run_migrate(item),
+        None => {}
+    }
+    if repos.migrate_highlight().is_some() && side.is_none() {
+        // Opened after this frame's bake: drawn, with its glass, in the next frame, asked for at once.
+        ui.ctx().request_repaint();
     }
 }
 
-/// The name of `item`'s key at the end of its line: the core's key, as a capital, as the drawing writes it.
-fn key_name(item: MenuItem) -> String {
-    item.key().to_ascii_uppercase().to_string()
+/// What the keys among `events` do, after the clicks of the frame did `done` (nothing more, then): in the side menu
+/// when `on_side` (its letters, Left, Esc and `q` back to the menu, Right nothing), else in the menu (Right into
+/// Migrate's side menu). Moves the highlight `at` of the menu or `side_at` of the side menu; while the side menu has
+/// the keys, the menu's highlight stays on Migrate.
+fn keyed(events: &[Event], on_side: bool, at: &mut Option<usize>, side_at: &mut Option<usize>, done: Option<Done>) -> Option<Done> {
+    let migrate = side_line();
+    let mut done = done;
+    if on_side {
+        // The menu's letters do nothing here.
+        for ask in asks(events, side_letter) {
+            if done.is_some() {
+                break;
+            }
+            match ask {
+                Ask::Close | Ask::Back => done = Some(Done::Back),
+                Ask::Run(item) => done = Some(Done::Side(item)),
+                Ask::Highlighted => done = side_at.map(|index| Done::Side(MigrateItem::ALL[index])),
+                Ask::Into => {}
+                Ask::Step(_) | Ask::End(_) => *side_at = moved(*side_at, ask, MigrateItem::ALL.len()),
+            }
+        }
+        *at = Some(migrate);
+        return done;
+    }
+    for ask in asks(events, menu_letter) {
+        if done.is_some() {
+            break;
+        }
+        match ask {
+            Ask::Close => done = Some(Done::Close),
+            Ask::Run(item) => done = Some(Done::Run(item)),
+            Ask::Highlighted => done = at.map(|index| Done::Run(SHOWN[index])),
+            Ask::Into => done = (*at == Some(migrate)).then_some(Done::Run(SHOWN[migrate])),
+            Ask::Back => {}
+            Ask::Step(_) | Ask::End(_) => *at = moved(*at, ask, SHOWN.len()),
+        }
+    }
+    done
+}
+
+/// Draws the menu's lines in its pane at `pane` on the overlay in `ui`, the line `at` on the selection's fill, in the
+/// words for several repositories when `many`.
+fn draw_menu(ui: &Ui, pane: Rect, at: Option<usize>, many: bool, palette: Palette) {
+    let (rows, rules) = layout(pane);
+    let painter = ui.painter().with_clip_rect(pane.intersect(ui.clip_rect()));
+    for rule in rules {
+        painter.rect_filled(rule, 0.0, palette.on_glass.gamma_multiply(MENU_LINE_OPACITY));
+    }
+    let words_font = font(TEXT, FontFamily::Proportional);
+    for (index, (row, (item, icon))) in rows.iter().zip(SHOWN.into_iter().zip(ICONS)).enumerate() {
+        let (ink, icon_ink) = if item == MenuItem::Remove { (palette.danger, palette.danger) } else { (palette.on_glass, palette.quiet) };
+        let line = Line { words: words(item, many), key: item.key(), icon, ink, icon_ink, lit: Some(index) == at, key_right: key_right(*row, item) };
+        line.draw(ui, &painter, *row, palette, &words_font);
+        if opens_side(item) {
+            draw_icon(&painter, chevron_centre(*row), Icon::ChevronRight, MENU_CHEVRON, palette.quiet);
+        }
+    }
+}
+
+/// Draws the side menu's lines in its pane at `side` on the overlay in `ui`, the line `at` on the selection's fill.
+fn draw_side(ui: &Ui, side: Rect, at: Option<usize>, palette: Palette) {
+    let painter = ui.painter().with_clip_rect(side.intersect(ui.clip_rect()));
+    let words_font = font(TEXT, FontFamily::Proportional);
+    for (index, (row, (item, icon))) in side_layout(side).into_iter().zip(MigrateItem::ALL.into_iter().zip(SIDE_ICONS)).enumerate() {
+        let line = Line {
+            words: item.label(),
+            key: item.key(),
+            icon,
+            ink: palette.on_glass,
+            icon_ink: palette.quiet,
+            lit: Some(index) == at,
+            key_right: row.right() - MENU_ROW_PAD,
+        };
+        line.draw(ui, &painter, row, palette, &words_font);
+    }
+}
+
+/// One line of the menu or the side menu, as it is drawn.
+struct Line {
+    /// Its words.
+    words: &'static str,
+    /// The core's key that runs it.
+    key: char,
+    /// Its icon.
+    icon: Icon,
+    /// The colour of its words.
+    ink: Color32,
+    /// The colour of its icon.
+    icon_ink: Color32,
+    /// It is highlighted: on the selection's fill.
+    lit: bool,
+    /// Where its key's name ends at the right.
+    key_right: f32,
+}
+
+impl Line {
+    /// Draws it at `row` with `painter`: the selection's fill when lit, its icon, its words cut to the room left of
+    /// its key, and its key in the quiet colour.
+    fn draw(&self, ui: &Ui, painter: &Painter, row: Rect, palette: Palette, words_font: &FontId) {
+        if self.lit {
+            painter.rect_filled(row, MENU_ROW_RADIUS, palette.selection);
+        }
+        let y = row.center().y;
+        draw_icon(painter, pos2(row.left() + MENU_ROW_PAD + ICON / 2.0, y), self.icon, ICON, self.icon_ink);
+        let left = row.left() + MENU_ROW_PAD + ICON + MENU_ROW_GAP;
+        let room = self.key_right - MENU_KEY_WIDTH - MENU_ROW_GAP - left;
+        painter.text(pos2(left, y), Align2::LEFT_CENTER, widgets::ellipsis(self.words, words_font, room, ui), words_font.clone(), self.ink);
+        painter.text(pos2(self.key_right, y), Align2::RIGHT_CENTER, key_name(self.key), font(KEY_TEXT, FontFamily::Proportional), palette.quiet);
+    }
+}
+
+/// Where the right edge of the key's name of `item`'s line at `row` stands: at the row's padding, or for a line that
+/// opens the side menu, before its chevron ([`MENU_CHEVRON`], [`MENU_ROW_GAP`] apart).
+fn key_right(row: Rect, item: MenuItem) -> f32 {
+    let end = row.right() - MENU_ROW_PAD;
+    if opens_side(item) { end - MENU_CHEVRON - MENU_ROW_GAP } else { end }
+}
+
+/// The centre of the chevron of the line at `row` that opens the side menu: at the row's right padding.
+fn chevron_centre(row: Rect) -> Pos2 {
+    pos2(row.right() - MENU_ROW_PAD - MENU_CHEVRON / 2.0, row.center().y)
+}
+
+/// The name of a line's key `key` at the end of its line: the core's key, as a capital, as the drawing writes it.
+fn key_name(key: char) -> String {
+    key.to_ascii_uppercase().to_string()
 }
 
 #[cfg(test)]
@@ -249,9 +513,10 @@ mod tests {
     use crate::dialogs::testing::{Window, behind, live, until};
     use crate::session::Session;
     use crate::table;
+    use crate::theme::SUBMENU_GAP;
 
     /// Every line of the core's menu, and whether the window shows it. No wildcard: a new line of the core's must
-    /// be placed here on purpose.
+    /// be placed here on purpose. The forks' three lines wait for their screens (a later plan).
     fn placed(item: MenuItem) -> bool {
         match item {
             MenuItem::Update
@@ -261,13 +526,21 @@ mod tests {
             | MenuItem::CopyPath
             | MenuItem::Watch
             | MenuItem::PullRequests
+            | MenuItem::Migrate
             | MenuItem::Remove => true,
-            MenuItem::ShowForks | MenuItem::Forks | MenuItem::AllForks | MenuItem::Migrate => false,
+            MenuItem::ShowForks | MenuItem::Forks | MenuItem::AllForks => false,
+        }
+    }
+
+    /// Every line of the core's Migrate menu, and whether the window's side menu shows it. No wildcard.
+    fn placed_in_side(item: MigrateItem) -> bool {
+        match item {
+            MigrateItem::Folder | MigrateItem::Service => true,
         }
     }
 
     #[test]
-    fn the_menu_lists_only_what_this_plan_can_do() {
+    fn the_menu_lists_what_this_plan_can_do() {
         let all: Vec<MenuItem> = MenuItem::ALL.into_iter().filter(|item| placed(*item)).collect();
         assert_eq!(shown().to_vec(), all, "the shown lines, in the core's order");
         assert_eq!(
@@ -280,13 +553,15 @@ mod tests {
                 MenuItem::CopyPath,
                 MenuItem::Watch,
                 MenuItem::PullRequests,
+                MenuItem::Migrate,
                 MenuItem::Remove
             ]
         );
-        // The core's words and keys, one of them in the plural.
-        let words: Vec<(&str, String)> = shown().iter().copied().map(|item| (item.label(false), key_name(item))).collect();
+        // The core's words and keys, one of them in the plural; Migrate's without the core's own arrow, which the
+        // window draws as the drawing's chevron.
+        let said: Vec<(&str, String)> = shown().iter().copied().map(|item| (words(item, false), key_name(item.key()))).collect();
         assert_eq!(
-            words,
+            said,
             [
                 ("Update", "U"),
                 ("Open the folder", "O"),
@@ -295,68 +570,107 @@ mod tests {
                 ("Copy the path", "C"),
                 ("Auto-pull on or off", "W"),
                 ("Fetch the pull requests", "P"),
+                ("Migrate", "T"),
                 ("Remove…", "D"),
             ]
             .map(|(label, key)| (label, key.to_owned()))
         );
-        assert_eq!((MenuItem::Open.label(true), MenuItem::CopyPath.label(true)), ("Open the folders", "Copy the paths"));
+        assert_eq!(MenuItem::Migrate.label(false), "Migrate ▸", "the core's words, of which the window draws the arrow as an icon");
+        assert_eq!((words(MenuItem::Open, true), words(MenuItem::CopyPath, true)), ("Open the folders", "Copy the paths"));
+        // The side menu: every line of the core's, in its order, words and keys.
+        let side: Vec<MigrateItem> = MigrateItem::ALL.into_iter().filter(|item| placed_in_side(*item)).collect();
+        assert_eq!(side, MigrateItem::ALL);
+        let side: Vec<(&str, String)> = MigrateItem::ALL.into_iter().map(|item| (item.label(), key_name(item.key()))).collect();
+        assert_eq!(side, [("Move to another folder…", "F"), ("Push to another service…", "S")].map(|(label, key)| (label, key.to_owned())));
     }
 
     fn press(key: Key) -> Event {
         Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
     }
 
+    /// A key's ask of the menu.
+    type MenuAsk = Ask<MenuItem>;
+
     #[test]
     fn the_keys_are_read_as_the_terminal_apps_menu_reads_them() {
-        let read = |events: Vec<Event>| asks(&events);
+        let read = |events: Vec<Event>| asks(&events, menu_letter);
         assert_eq!(
             read(vec![press(Key::ArrowUp), press(Key::ArrowDown), press(Key::Home), press(Key::End)]),
             [Ask::Step(true), Ask::Step(false), Ask::End(true), Ask::End(false)]
         );
         assert_eq!(read(vec![press(Key::Enter), press(Key::Escape)]), [Ask::Highlighted, Ask::Close]);
+        assert_eq!(read(vec![press(Key::ArrowLeft), press(Key::ArrowRight)]), [Ask::Back, Ask::Into]);
         assert_eq!(read(vec![Event::Text("kjq".to_owned())]), [Ask::Step(true), Ask::Step(false), Ask::Close]);
         assert_eq!(read(vec![Event::Text("u".to_owned())]), [Ask::Run(MenuItem::Update)]);
         assert_eq!(read(vec![Event::Text("D".to_owned())]), [Ask::Run(MenuItem::Remove)], "as the terminal app, a capital too");
-        // The forks' and Migrate's letters do nothing here.
-        assert_eq!(read(vec![Event::Text("fnat".to_owned())]), []);
+        assert_eq!(read(vec![Event::Text("t".to_owned())]), [Ask::Run(MenuItem::Migrate)]);
+        // The forks' letters do nothing here.
+        assert_eq!(read(vec![Event::Text("fna".to_owned())]), []);
         // A key with Ctrl is no key of the menu's.
         assert_eq!(read(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND }]), []);
+        // The side menu's letters are its own; the menu's do nothing there.
+        let side = |events: Vec<Event>| asks(&events, side_letter);
+        assert_eq!(side(vec![Event::Text("fS".to_owned())]), [Ask::Run(MigrateItem::Folder), Ask::Run(MigrateItem::Service)]);
+        assert_eq!(side(vec![Event::Text("utdm".to_owned())]), []);
     }
 
     #[test]
     fn the_highlight_stops_at_the_ends_as_in_the_terminal_app() {
-        assert_eq!(moved(Some(0), Ask::Step(true)), Some(0));
-        assert_eq!(moved(Some(0), Ask::Step(false)), Some(1));
-        assert_eq!(moved(Some(7), Ask::Step(false)), Some(7));
-        assert_eq!(moved(Some(3), Ask::End(true)), Some(0));
-        assert_eq!(moved(Some(3), Ask::End(false)), Some(7));
+        let lines = SHOWN.len();
+        assert_eq!(moved(Some(0), MenuAsk::Step(true), lines), Some(0));
+        assert_eq!(moved(Some(0), MenuAsk::Step(false), lines), Some(1));
+        assert_eq!(moved(Some(8), MenuAsk::Step(false), lines), Some(8));
+        assert_eq!(moved(Some(3), MenuAsk::End(true), lines), Some(0));
+        assert_eq!(moved(Some(3), MenuAsk::End(false), lines), Some(8));
         // From no line shown, a step goes to the first; Enter and the rest change nothing.
-        assert_eq!(moved(None, Ask::Step(true)), Some(0));
-        assert_eq!(moved(None, Ask::Step(false)), Some(0));
-        assert_eq!(moved(None, Ask::End(false)), Some(7));
-        assert_eq!(moved(None, Ask::Highlighted), None);
+        assert_eq!(moved(None, MenuAsk::Step(true), lines), Some(0));
+        assert_eq!(moved(None, MenuAsk::Step(false), lines), Some(0));
+        assert_eq!(moved(None, MenuAsk::End(false), lines), Some(8));
+        assert_eq!(moved(None, MenuAsk::Highlighted, lines), None);
+        // The side menu's two, the same way.
+        assert_eq!(moved(Some(1), MenuAsk::Step(false), 2), Some(1));
+        assert_eq!(moved(Some(0), MenuAsk::Step(true), 2), Some(0));
+        assert_eq!(moved(Some(0), MenuAsk::End(false), 2), Some(1));
     }
 
     #[test]
     fn the_menu_is_the_drawings() {
         let window = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
-        // Seven lines, the rule, Remove, and the pane's room: 8 + 7 × 32 + 9 + 32.
-        assert!((height() - 273.0).abs() < f32::EPSILON);
+        // Seven lines, a rule, Migrate, a rule, Remove, and the pane's room: 8 + 7 × 32 + 9 + 32 + 9 + 32.
+        assert!((height() - 314.0).abs() < f32::EPSILON);
         let anchor = Rect::from_min_max(pos2(1388.0, 228.0), pos2(1420.0, 272.0));
-        let places = plan(window, anchor);
-        assert_eq!(places.pane, Rect::from_min_size(pos2(1164.0, 276.0), vec2(256.0, 273.0)));
+        let places = plan(window, anchor, false);
+        assert_eq!(places.pane, Rect::from_min_size(pos2(1164.0, 276.0), vec2(256.0, 314.0)));
+        assert_eq!(places.side, None);
         let (rows, rules) = layout(places.pane);
-        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.len(), 9);
         assert_eq!(rows[0], Rect::from_min_size(pos2(1168.0, 280.0), vec2(248.0, 32.0)));
         for pair in rows[..7].windows(2) {
             assert_eq!(pair[0].bottom(), pair[1].top());
         }
-        // The rule in the middle of its nine points, between Fetch the pull requests and Remove.
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rows[7].top() - rows[6].bottom(), MENU_LINE);
-        assert!((rules[0].center().y - (rows[6].bottom() + MENU_LINE / 2.0)).abs() < f32::EPSILON);
-        assert_eq!((rules[0].left(), rules[0].right(), rules[0].height()), (1176.0, 1408.0, 1.0));
-        assert_eq!(rows[7].bottom() + MENU_PAD, places.pane.bottom());
+        // The rules in the middle of their nine points: before Migrate, and before Remove.
+        assert_eq!(rules.len(), 2);
+        for (rule, line) in rules.iter().zip([7, 8]) {
+            assert_eq!(rows[line].top() - rows[line - 1].bottom(), MENU_LINE);
+            assert!((rule.center().y - (rows[line - 1].bottom() + MENU_LINE / 2.0)).abs() < f32::EPSILON);
+            assert_eq!((rule.left(), rule.right(), rule.height()), (1176.0, 1408.0, 1.0));
+        }
+        assert_eq!(rows[8].bottom() + MENU_PAD, places.pane.bottom());
+        // With Migrate open: its side menu of two lines, 264 wide, at the menu's left, level with Migrate's bottom.
+        let places = plan(window, anchor, true);
+        let side = places.side.expect("the side menu is placed");
+        assert_eq!(side, Rect::from_min_max(pos2(1164.0 - SUBMENU_GAP - SUBMENU_WIDTH, rows[7].bottom() - 72.0), pos2(1156.0, rows[7].bottom())));
+        let lines = side_layout(side);
+        assert_eq!(lines, [0.0, 32.0].map(|top| Rect::from_min_size(pos2(side.left() + MENU_PAD, side.top() + MENU_PAD + top), vec2(256.0, 32.0))));
+    }
+
+    #[test]
+    fn the_migrate_line_has_its_key_before_its_chevron() {
+        let row = Rect::from_min_size(pos2(1168.0, 520.0), vec2(248.0, 32.0));
+        // The drawing's `fixed(key, 16)`, then the chevron, 8 apart, the chevron at the row's padding.
+        assert_eq!(chevron_centre(row), pos2(1416.0 - MENU_ROW_PAD - MENU_CHEVRON / 2.0, row.center().y));
+        assert_eq!(key_right(row, MenuItem::Migrate), 1416.0 - MENU_ROW_PAD - MENU_CHEVRON - MENU_ROW_GAP);
+        assert_eq!(key_right(row, MenuItem::Remove), 1416.0 - MENU_ROW_PAD);
     }
 
     /// The demo's window, a first frame drawn.
@@ -423,7 +737,7 @@ mod tests {
         // A letter of a line the window does not show does nothing; Esc closes.
         open_on(&mut window, "homelab");
         window.typed(Key::F, "f");
-        window.typed(Key::T, "t");
+        window.typed(Key::N, "n");
         assert!(window.shows(Which::Menu));
         window.key(Key::Escape);
         assert!(window.repos().mode == CoreMode::List);
@@ -531,7 +845,7 @@ mod tests {
                 let panel = crate::shell::layout(size, true, true).panel;
                 for key in keys {
                     let Some(anchor) = table::dots_rect(panel, &lines, 0.0, key) else { continue };
-                    let row = layout(plan(screen, anchor).pane).0[line];
+                    let row = layout(plan(screen, anchor, false).pane).0[line];
                     for (button, words) in buttons {
                         let both = row.intersect(button.translate(screen.center().to_vec2()));
                         if both.width() > 4.0 && both.height() > 4.0 {
@@ -562,7 +876,7 @@ mod tests {
         let (size, key, at, words) = overlap(
             probe.repos(),
             &["api", "web"],
-            7,
+            8,
             &buttons,
             &(520..=760).step_by(20).collect::<Vec<_>>(),
             &(800..=1600).step_by(25).collect::<Vec<_>>(),
@@ -571,7 +885,7 @@ mod tests {
         window.size = size;
         window.frame(Vec::new());
         open_at_time(&mut window, &key);
-        assert!(rows(&window)[7].contains(at), "the point is on Remove…");
+        assert!(rows(&window)[8].contains(at), "the point is on Remove…");
         double_click(&mut window, at, |window| {
             window.frame_at(Vec::new(), Some(5.1));
             assert!(window.shows(Which::Remove));
@@ -655,13 +969,13 @@ mod tests {
         window.session.repos_mut().unwrap().clear_marks();
         window.session.repos_mut().unwrap().pick("recipes");
         // The pointer rests where the menu's Remove line will stand.
-        let remove = layout(plan(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0)), dots(&window, "recipes")).pane).0[7].center();
+        let remove = layout(plan(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0)), dots(&window, "recipes"), false).pane).0[8].center();
         window.frame(vec![Event::PointerMoved(remove)]);
         window.frame(Vec::new());
         window.key(Key::Enter);
         window.frame(Vec::new());
         assert!(window.shows(Which::Menu));
-        assert_eq!(rows(&window)[7].center(), remove, "the pointer is over Remove");
+        assert_eq!(rows(&window)[8].center(), remove, "the pointer is over Remove");
         assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Update), "the resting pointer moved the highlight");
         // The Enter that opened it comes up, and a second one runs the highlighted line.
         window.frame(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
@@ -674,7 +988,7 @@ mod tests {
     fn enter_runs_nothing_while_the_core_highlights_a_line_the_window_does_not_show() {
         let mut window = demo();
         open_on(&mut window, "homelab");
-        window.session.repos_mut().unwrap().highlight_menu(MenuItem::Migrate);
+        window.session.repos_mut().unwrap().highlight_menu(MenuItem::ShowForks);
         window.frame(Vec::new());
         window.key(Key::Enter);
         assert!(window.shows(Which::Menu), "Enter ran a line nobody highlighted");
@@ -753,7 +1067,7 @@ mod tests {
     #[test]
     fn a_click_on_remove_opens_the_remove_dialog_and_deletes_nothing() {
         remove_comes_instead(|window| {
-            let at = rows(window)[7].center();
+            let at = rows(window)[8].center();
             window.click(at);
         });
     }
@@ -824,5 +1138,307 @@ mod tests {
         window.typed(Key::U, "u");
         assert_eq!(window.repos().status, HELD);
         assert!(window.repos().mode == CoreMode::List);
+    }
+
+    fn key_down(key: Key, repeat: bool) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat, modifiers: Modifiers::NONE }
+    }
+
+    fn key_up(key: Key) -> Event {
+        Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    /// `key` pressed, with the text it types, and let go, and a frame after.
+    fn tap(window: &mut Window, key: Key, text: Option<&str>) {
+        let mut down = vec![key_down(key, false)];
+        down.extend(text.map(|text| Event::Text(text.to_owned())));
+        window.frame(down);
+        window.frame(vec![key_up(key)]);
+        window.frame(Vec::new());
+    }
+
+    /// The place of Migrate among the lines shown.
+    fn migrate_line() -> usize {
+        SHOWN.iter().position(|item| *item == MenuItem::Migrate).unwrap()
+    }
+
+    /// Whether the last frame painted `words`.
+    fn painted(window: &Window, words: &str) -> bool {
+        window.texts.iter().any(|(said, _, _)| said == words)
+    }
+
+    /// The side menu's lines in the last frame, with their places.
+    fn side_rows(window: &Window) -> Vec<Rect> {
+        side_layout(window.submenu_pane().expect("the side menu was drawn"))
+    }
+
+    /// The lines the last frame painted on the selection's fill, in the menu and the side menu. (In the light mode the
+    /// rules and the row's "…" have the same colour: a line's fill is a line's height, inside a pane.)
+    fn lit(window: &Window) -> Vec<Rect> {
+        let selection = crate::theme::palette(crate::theme::Mode::Light).selection;
+        let panes: Vec<Rect> = window.menu_pane().into_iter().chain(window.submenu_pane()).collect();
+        window
+            .fills
+            .iter()
+            .filter(|(rect, fill)| *fill == selection && rect.height() == MENU_ROW && panes.iter().any(|pane| pane.contains_rect(*rect)))
+            .map(|(rect, _)| *rect)
+            .collect()
+    }
+
+    #[test]
+    fn migrate_opens_beside_the_menu_and_left_goes_back() {
+        let mut window = demo();
+        open_on(&mut window, "homelab");
+        let lines = rows(&window);
+        let migrate = migrate_line();
+        // Right on another line opens nothing.
+        tap(&mut window, Key::ArrowRight, None);
+        assert_eq!((window.repos().menu_highlight(), window.repos().migrate_highlight()), (Some(MenuItem::Update), None));
+        tap(&mut window, Key::End, None);
+        tap(&mut window, Key::ArrowUp, None);
+        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Migrate));
+        // On Migrate, Right opens its side menu: not drawn in the frame of the key, whose bake did not know it, but
+        // in the next one, with its glass.
+        window.frame(vec![key_down(Key::ArrowRight, false)]);
+        assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder));
+        assert!(window.baked_side.is_none() && !painted(&window, MigrateItem::Folder.label()), "the side menu was drawn without its glass");
+        assert!(window.repaint, "the next frame was not asked for at once");
+        window.frame(vec![key_up(Key::ArrowRight)]);
+        assert!(window.baked_side.is_some(), "its glass was not baked");
+        assert_eq!(window.baked_side, window.submenu_pane(), "drawn where its glass was baked");
+        assert!(MigrateItem::ALL.iter().all(|item| painted(&window, item.label())), "its lines in the core's words");
+        // Beside the menu, at its left, level with Migrate's bottom.
+        let (side, pane) = (window.submenu_pane().unwrap(), window.menu_pane().unwrap());
+        assert_eq!((side.right() + SUBMENU_GAP, side.bottom(), side.width()), (pane.left(), lines[migrate].bottom(), SUBMENU_WIDTH));
+        // Migrate keeps the selection's fill, its first line has it, nothing else.
+        assert_eq!(lit(&window), [lines[migrate], side_rows(&window)[0]]);
+        // Up and Down move in it and stop at its ends, Home and End go there; Right does nothing.
+        let steps = [
+            (Key::ArrowDown, MigrateItem::Service),
+            (Key::ArrowDown, MigrateItem::Service),
+            (Key::ArrowUp, MigrateItem::Folder),
+            (Key::ArrowUp, MigrateItem::Folder),
+            (Key::End, MigrateItem::Service),
+            (Key::Home, MigrateItem::Folder),
+            (Key::ArrowRight, MigrateItem::Folder),
+        ];
+        for (key, highlighted) in steps {
+            tap(&mut window, key, None);
+            assert_eq!(window.repos().migrate_highlight(), Some(highlighted), "after {key:?}");
+            assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Migrate), "after {key:?}");
+        }
+        assert_eq!(lit(&window), [lines[migrate], side_rows(&window)[0]]);
+        // The menu's letters do nothing while it is open.
+        for (key, letter) in [(Key::U, "u"), (Key::D, "d"), (Key::M, "m"), (Key::T, "t")] {
+            tap(&mut window, key, Some(letter));
+            assert!(window.shows(Which::Menu) && window.repos().migrate_highlight() == Some(MigrateItem::Folder), "{letter} acted");
+        }
+        assert_ne!(window.repos().status, HELD);
+        // Left closes it and the menu stays, on Migrate; no frame after shows its pane.
+        tap(&mut window, Key::ArrowLeft, None);
+        assert_eq!((window.repos().menu_highlight(), window.repos().migrate_highlight()), (Some(MenuItem::Migrate), None));
+        assert!(window.shows(Which::Menu));
+        assert!(window.baked_side.is_none() && window.submenu_pane().is_none() && !painted(&window, MigrateItem::Folder.label()));
+        assert_eq!(lit(&window), [lines[migrate]]);
+        // Enter on Migrate opens it again; Esc closes it, and a second Esc the menu.
+        tap(&mut window, Key::Enter, None);
+        assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder));
+        assert!(window.baked_side.is_some() && painted(&window, MigrateItem::Folder.label()));
+        tap(&mut window, Key::Escape, None);
+        assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_none());
+        assert!(!painted(&window, MigrateItem::Folder.label()));
+        tap(&mut window, Key::Escape, None);
+        assert!(window.repos().mode == CoreMode::List && !window.open());
+        assert_ne!(window.repos().status, HELD);
+    }
+
+    #[test]
+    fn the_pointer_moves_in_the_side_menu_and_back_to_the_menu() {
+        let mut window = demo();
+        open_at_time(&mut window, "homelab");
+        let lines = rows(&window);
+        let migrate = migrate_line();
+        // A click on Migrate opens its side menu; the pointer resting on Migrate chooses nothing in it.
+        click_at_time(&mut window, lines[migrate].center(), 2.0);
+        window.frame_at(Vec::new(), Some(2.1));
+        window.frame_at(Vec::new(), Some(2.2));
+        assert_eq!((window.repos().menu_highlight(), window.repos().migrate_highlight()), (Some(MenuItem::Migrate), Some(MigrateItem::Folder)));
+        let side = side_rows(&window);
+        // Over its second line, the pointer highlights it, and Migrate keeps its fill.
+        window.frame_at(vec![Event::PointerMoved(side[1].center())], Some(2.3));
+        window.frame_at(Vec::new(), Some(2.4));
+        assert_eq!((window.repos().menu_highlight(), window.repos().migrate_highlight()), (Some(MenuItem::Migrate), Some(MigrateItem::Service)));
+        assert_eq!(lit(&window), [lines[migrate], side[1]]);
+        // Back over Migrate, it stays open as it is.
+        window.frame_at(vec![Event::PointerMoved(lines[migrate].center())], Some(2.5));
+        assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Service));
+        // A click on Migrate closes it and keeps the menu; another opens it again.
+        click_at_time(&mut window, lines[migrate].center(), 4.0);
+        window.frame_at(Vec::new(), Some(4.1));
+        assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_none());
+        click_at_time(&mut window, lines[migrate].center(), 6.0);
+        window.frame_at(Vec::new(), Some(6.1));
+        assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder));
+        // Over another line of the menu, it closes and that line is highlighted.
+        window.frame_at(vec![Event::PointerMoved(lines[2].center())], Some(6.2));
+        assert_eq!((window.repos().menu_highlight(), window.repos().migrate_highlight()), (Some(MenuItem::Github), None));
+        window.frame_at(Vec::new(), Some(6.3));
+        assert!(window.shows(Which::Menu) && window.submenu_pane().is_none() && !painted(&window, MigrateItem::Folder.label()));
+        assert_eq!(lit(&window), [lines[2]]);
+        // A double click on Migrate opens it, and its second click does not close it again.
+        click_at_time(&mut window, lines[migrate].center(), 7.0);
+        click_at_time(&mut window, lines[migrate].center(), 7.2);
+        window.frame_at(Vec::new(), Some(7.3));
+        assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "the double click's second click closed it");
+        // A click outside both closes both, and goes no further.
+        let outside = pos2(400.0, 160.0);
+        assert!(!window.menu_pane().unwrap().contains(outside) && !window.submenu_pane().unwrap().contains(outside));
+        click_at_time(&mut window, outside, 9.0);
+        assert!(window.repos().mode == CoreMode::List);
+        window.frame_at(Vec::new(), Some(9.2));
+        assert!(!window.open());
+        assert_eq!(window.repos().selected.as_deref(), Some("homelab"));
+        assert_ne!(window.repos().status, HELD);
+    }
+
+    #[test]
+    fn a_click_on_the_side_menus_empty_room_keeps_both_open() {
+        let mut window = demo();
+        open_at_time(&mut window, "homelab");
+        let migrate = rows(&window)[migrate_line()].center();
+        click_at_time(&mut window, migrate, 2.0);
+        window.frame_at(Vec::new(), Some(2.1));
+        let side = window.submenu_pane().unwrap();
+        click_at_time(&mut window, pos2(side.center().x, side.top() + MENU_PAD / 2.0), 4.0);
+        window.frame_at(Vec::new(), Some(4.1));
+        assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_some(), "the click went through its pane");
+    }
+
+    /// How a line of the side menu is chosen.
+    #[derive(Clone, Copy, Debug)]
+    enum By {
+        Enter,
+        Letter,
+        Click,
+        DoubleClick,
+    }
+
+    #[test]
+    fn a_line_of_the_side_menu_opens_its_dialog_and_that_press_does_nothing_in_it() {
+        // What the core opens the move's folder field with, for homelab alone.
+        let folder_text = {
+            let mut repos = crate::demo::repos();
+            repos.clear_marks();
+            repos.pick("homelab");
+            repos.run_migrate(MigrateItem::Folder);
+            repos.prompt.as_ref().unwrap().input.clone()
+        };
+        for (index, item) in MigrateItem::ALL.into_iter().enumerate() {
+            for by in [By::Enter, By::Letter, By::Click, By::DoubleClick] {
+                let what = format!("{item:?} by {by:?}");
+                let mut window = demo();
+                open_at_time(&mut window, "homelab");
+                window.frame_at(vec![key_down(Key::T, false), Event::Text("t".to_owned())], Some(1.0));
+                window.frame_at(vec![key_up(Key::T)], Some(1.1));
+                window.frame_at(Vec::new(), Some(1.2));
+                assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "{what}: the side menu did not open");
+                let at = side_rows(&window)[index].center();
+                let letter = item.key().to_string();
+                let code = Key::from_name(&letter.to_uppercase()).unwrap();
+                match by {
+                    By::Enter => {
+                        if index == 1 {
+                            window.frame_at(vec![key_down(Key::ArrowDown, false)], Some(1.3));
+                            window.frame_at(vec![key_up(Key::ArrowDown)], Some(1.4));
+                        }
+                        // Pressed, held (its repeats) and let go.
+                        window.frame_at(vec![key_down(Key::Enter, false)], Some(2.0));
+                        window.frame_at(Vec::new(), Some(2.05));
+                        window.frame_at(vec![key_down(Key::Enter, true)], Some(2.1));
+                        window.frame_at(vec![key_down(Key::Enter, true)], Some(2.15));
+                        window.frame_at(vec![key_up(Key::Enter)], Some(2.2));
+                    }
+                    By::Letter => {
+                        // Typed, held (its repeats type it again) and let go.
+                        window.frame_at(vec![key_down(code, false), Event::Text(letter.clone())], Some(2.0));
+                        window.frame_at(Vec::new(), Some(2.05));
+                        window.frame_at(vec![key_down(code, true), Event::Text(letter.clone())], Some(2.1));
+                        window.frame_at(vec![key_down(code, true), Event::Text(letter.clone())], Some(2.15));
+                        window.frame_at(vec![key_up(code)], Some(2.2));
+                    }
+                    By::Click => click_at_time(&mut window, at, 2.0),
+                    By::DoubleClick => {
+                        // Its second click lands where the line was: on the dialog or its scrim.
+                        click_at_time(&mut window, at, 2.0);
+                        click_at_time(&mut window, at, 2.2);
+                    }
+                }
+                for tick in [3.0, 3.1, 3.2] {
+                    window.frame_at(Vec::new(), Some(tick));
+                }
+                let dialog = match item {
+                    MigrateItem::Folder => Which::Folder,
+                    MigrateItem::Service => Which::Push,
+                };
+                assert!(window.shows(dialog), "{what}: no dialog: {}", window.repos().status);
+                assert!(window.painted && window.menu_pane().is_none() && window.submenu_pane().is_none(), "{what}: a menu with the dialog");
+                assert!(!painted(&window, "Migrate") && !painted(&window, item.label()), "{what}: the menus' words with the dialog");
+                // Nothing was done in it: its field holds what the core opened it with, nothing was refused or run.
+                assert_ne!(window.repos().status, HELD, "{what}");
+                match item {
+                    MigrateItem::Folder => {
+                        let prompt = window.repos().prompt.as_ref().unwrap();
+                        assert_eq!((prompt.input.as_str(), prompt.error.as_ref()), (folder_text.as_str(), None), "{what}");
+                    }
+                    MigrateItem::Service => {
+                        let prompt = window.repos().service_prompt.as_ref().unwrap();
+                        assert_eq!((prompt.repo.as_str(), prompt.input.as_str(), prompt.error.as_ref()), ("homelab", "", None), "{what}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_frame_shows_a_menu_and_the_dialog_a_side_line_opens() {
+        for item in MigrateItem::ALL {
+            let mut window = demo();
+            open_on(&mut window, "homelab");
+            tap(&mut window, Key::T, Some("t"));
+            let letter = item.key().to_string();
+            let code = Key::from_name(&letter.to_uppercase()).unwrap();
+            window.frame(vec![key_down(code, false), Event::Text(letter)]);
+            // The frame of the letter still shows the menus as they were; every frame after, the dialog alone.
+            let mut frames = 0;
+            while frames < 4 {
+                window.frame(vec![]);
+                frames += 1;
+                let menus = painted(&window, "Migrate") || painted(&window, item.label()) || window.menu_pane().is_some();
+                assert!(!menus, "{item:?}: frame {frames} after the letter shows a menu");
+            }
+            assert!(window.open() && window.painted);
+        }
+    }
+
+    #[test]
+    fn a_push_with_several_rows_chosen_is_refused_in_the_cores_words() {
+        let mut window = demo();
+        open_on(&mut window, "api");
+        assert_eq!(window.repos().chosen(), ["api", "web"]);
+        tap(&mut window, Key::T, Some("t"));
+        tap(&mut window, Key::S, Some("s"));
+        // The core's refusal of the same push, on the demo as it starts (api and web ticked).
+        let mut probe = crate::demo::repos();
+        probe.run_migrate(MigrateItem::Service);
+        assert!(probe.service_prompt.is_none() && probe.status_error);
+        for _ in 0..3 {
+            window.frame(Vec::new());
+        }
+        assert!(window.repos().mode == CoreMode::List && !window.open(), "a dialog opened");
+        assert_eq!(window.repos().status, probe.status);
+        assert_ne!(window.repos().status, HELD);
+        let status = crate::repos_screen::status(&window.session).unwrap();
+        assert_eq!((status.text.as_str(), status.error), (probe.status.as_str(), true), "the status line shows the core's words");
+        assert_eq!(window.repos().marked, ["api", "web"], "the ticks stay");
     }
 }

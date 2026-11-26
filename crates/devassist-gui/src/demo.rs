@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use devassist_core::config::Settings;
 use devassist_core::repos::github::{PullCounts, RemoteRepo};
 use devassist_core::repos::gitops::{LocalRepo, PendingPulls};
-use devassist_core::repos::state::{Action, MigrateItem, Repos};
+use devassist_core::repos::state::{Action, MenuItem, MigrateItem, Repos};
 use devassist_core::task::job::{Job, JobEvent};
 
 /// The folder, under the system's temporary folder, of the demo's settings path, which is never written.
@@ -159,11 +159,12 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 9] = [
+pub const SHOWS: [(&str, Opener); 10] = [
     ("progress", show_progress),
     ("remove", show_remove),
     ("group", show_group),
     ("menu", show_menu),
+    ("migrate", show_migrate),
     ("add", show_add),
     (ADD_FOLDER, show_add),
     ("import", show_import),
@@ -243,6 +244,14 @@ fn show_menu(repos: &mut Repos) {
         repos.pick(&first);
     }
     repos.enter_row();
+}
+
+/// The row's menu as [`show_menu`] opens it, with Migrate highlighted and its side menu open, as the drawing has it
+/// (the drawing opens it on homelab, see [`show_menu`]): opened through the core's own methods.
+fn show_migrate(repos: &mut Repos) {
+    show_menu(repos);
+    repos.highlight_menu(MenuItem::Migrate);
+    repos.run_menu(MenuItem::Migrate);
 }
 
 /// The folder the demo's made-up folders are in: the drawing's `D:\code` (`/srv/code` on other systems).
@@ -380,7 +389,7 @@ mod tests {
         assert!(repos.mode == Mode::Progress && !repos.waiting());
         assert_eq!(
             show(&mut repos, "nothing").unwrap_err(),
-            "--show knows progress, remove, group, menu, add, add-folder, import, move, push, not nothing"
+            "--show knows progress, remove, group, menu, migrate, add, add-folder, import, move, push, not nothing"
         );
     }
 
@@ -450,6 +459,17 @@ mod tests {
         assert!(repos.mode == Mode::Menu);
         assert_eq!(repos.selected.as_deref(), Some("api"));
         assert_eq!(repos.chosen(), ["api", "web"]);
+    }
+
+    #[test]
+    fn the_demo_opens_the_menu_with_its_migrate_menu_open() {
+        let mut repos = repos();
+        show(&mut repos, "migrate").unwrap();
+        assert!(repos.mode == Mode::Menu);
+        assert_eq!(repos.chosen(), ["api", "web"]);
+        assert_eq!(repos.menu_highlight(), Some(devassist_core::repos::state::MenuItem::Migrate));
+        assert_eq!(repos.migrate_highlight(), Some(MigrateItem::Folder));
+        assert!(repos.work_held());
     }
 
     #[test]
@@ -550,6 +570,7 @@ mod tests {
         press_every_key_in_each_overlay(&mut window, before);
         press_every_control(&mut window, before);
         run_every_line_of_the_menu(&mut window, before);
+        run_every_line_of_the_side_menu(&mut window, before);
         press_every_button_of_the_dialogs(&mut window, before);
     }
 
@@ -679,13 +700,58 @@ mod tests {
                 let opens = match item {
                     devassist_core::repos::state::MenuItem::Group => Some(Which::Group),
                     devassist_core::repos::state::MenuItem::Remove => Some(Which::Remove),
+                    // Migrate opens its side menu, and the menu stays.
+                    devassist_core::repos::state::MenuItem::Migrate => Some(Which::Menu),
                     _ => None,
                 };
                 match opens {
                     Some(dialog) => assert!(window.shows(dialog), "{what}: no dialog"),
                     None => assert!(!window.open(), "{what}: the menu stayed"),
                 }
+                if item == devassist_core::repos::state::MenuItem::Migrate {
+                    assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "{what}: no side menu");
+                }
                 still_held(window, &what, if opens.is_some() { Expect::Free } else { Expect::Held }, before);
+            }
+        }
+    }
+
+    /// Every line of the menu's side menu (Migrate), by its letter and by a click, each on a fresh demo with the menu
+    /// opened on a ticked row (for api and web) and on one alone (homelab): Move opens its dialog, Push its dialog for
+    /// one row and the core's refusal for two. Nothing runs; the dialogs' buttons come next.
+    fn run_every_line_of_the_side_menu(window: &mut Window, before: [usize; 4]) {
+        for (row, rows) in [("api", 2), ("homelab", 1)] {
+            for item in MigrateItem::ALL {
+                for by_click in [false, true] {
+                    fresh(window, unchanged);
+                    let lines = crate::repos_view::lines(window.repos());
+                    let dots = table::dots_rect(window.layout().panel, &lines, 0.0, row).unwrap();
+                    window.click(dots.center());
+                    window.frame(Vec::new());
+                    assert_eq!(window.repos().chosen().len(), rows);
+                    window.frame(vec![key_event(Key::T, Modifiers::NONE, true), Event::Text("t".to_owned())]);
+                    window.frame(vec![key_event(Key::T, Modifiers::NONE, false)]);
+                    window.frame(Vec::new());
+                    assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "the side menu did not open");
+                    let what = format!("the side menu's {item:?} on {row} by {}", if by_click { "a click" } else { "its letter" });
+                    if by_click {
+                        let index = MigrateItem::ALL.iter().position(|known| *known == item).unwrap();
+                        let at = menu::side_line_rects(window.submenu_pane().unwrap())[index];
+                        window.click(at.center());
+                    } else {
+                        let letter = item.key().to_string();
+                        let code = Key::from_name(&letter.to_uppercase()).unwrap();
+                        window.frame(vec![key_event(code, Modifiers::NONE, true), Event::Text(letter)]);
+                        window.frame(vec![key_event(code, Modifiers::NONE, false)]);
+                    }
+                    window.frame(Vec::new());
+                    match (item, rows) {
+                        (MigrateItem::Folder, _) => assert!(window.shows(Which::Folder), "{what}: no dialog"),
+                        (MigrateItem::Service, 1) => assert!(window.shows(Which::Push), "{what}: no dialog"),
+                        (MigrateItem::Service, _) => assert!(!window.open() && window.repos().status_error, "{what}: not refused"),
+                    }
+                    still_held(window, &what, Expect::Free, before);
+                }
             }
         }
     }

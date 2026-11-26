@@ -28,12 +28,14 @@ use egui::{
 };
 
 use crate::baker::{Drawn, Want};
-use crate::theme::{BUTTON_GAP, BUTTON_HEIGHT, DIALOG_MARGIN, DIALOG_RADIUS, MENU_GAP, MENU_RADIUS, Palette, Surface};
+use crate::theme::{BUTTON_GAP, BUTTON_HEIGHT, DIALOG_MARGIN, DIALOG_RADIUS, MENU_GAP, MENU_RADIUS, Palette, SUBMENU_GAP, Surface};
 
 /// The glass pane of a dialog.
 pub const DIALOG: &str = "dialog";
 /// The glass pane of a menu.
 pub const MENU: &str = "menu";
+/// The glass pane of the side menu a menu's line opens, beside the menu: a second pane of the menu's overlay.
+pub const SUBMENU: &str = "submenu";
 
 /// What a button of a dialog is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,11 +60,18 @@ pub fn want_menu(rect: Rect) -> Want {
     Want { id: MENU, rect, radius: MENU_RADIUS, surface: Surface::Menu }
 }
 
+/// The glass pane of a menu's side menu at `rect`, to add to the panes baked this frame: the one way a side menu
+/// gets its glass, as [`want_menu`] gives the menu its own.
+#[must_use]
+pub fn want_submenu(rect: Rect) -> Want {
+    Want { id: SUBMENU, rect, radius: MENU_RADIUS, surface: Surface::Menu }
+}
+
 /// Whether the baked picture named `id` is an overlay's pane, which is drawn on the overlay over its scrim
 /// ([`glass`]), not under the screen.
 #[must_use]
 pub fn is_overlay_pane(id: &str) -> bool {
-    id == DIALOG || id == MENU
+    id == DIALOG || id == MENU || id == SUBMENU
 }
 
 /// Where a dialog of `size` stands in `window`: centred in it, never closer than [`DIALOG_MARGIN`] to an edge. A
@@ -88,6 +97,29 @@ pub fn menu_rect(anchor: Rect, size: Vec2, window: Rect) -> Rect {
     let y = if below + size.y <= bottom || bottom - below >= above - top { below } else { above - size.y };
     let x = anchor.right() - size.x;
     Rect::from_min_size(pos2(x.min(right - size.x).max(left), y.min(bottom - size.y).max(top)), size)
+}
+
+/// Where the side menu of `size` stands in `window` for the line `line` of the menu at `menu`: at the menu's left,
+/// [`SUBMENU_GAP`] away, its bottom level with the line's; at the menu's right when the left has no room. Neither
+/// side leaves the window's [`DIALOG_MARGIN`]: in a window too narrow for both, it lies over the menu at the side
+/// with more room. It is pushed up or down to stay inside the margin, and cut to the room when larger.
+#[must_use]
+pub fn submenu_rect(menu: Rect, line: Rect, size: Vec2, window: Rect) -> Rect {
+    let room = window.shrink(DIALOG_MARGIN);
+    let size = size.min(room.size()).max(Vec2::ZERO);
+    let left = menu.left() - SUBMENU_GAP - size.x;
+    let right = menu.right() + SUBMENU_GAP;
+    let x = if left >= room.left() {
+        left
+    } else if right + size.x <= room.right() {
+        right
+    } else if menu.left() - room.left() >= room.right() - menu.right() {
+        room.left()
+    } else {
+        room.right() - size.x
+    };
+    let y = (line.bottom() - size.y).min(room.bottom() - size.y).max(room.top());
+    Rect::from_min_size(pos2(x, y), size)
 }
 
 /// The places of buttons of `widths`, in the order given, at the bottom of `room`: [`BUTTON_HEIGHT`] high,
@@ -281,14 +313,97 @@ pub fn fresh_click(ui: &Ui, response: &Response) -> bool {
         // Enter or Space on the control with the focus.
         return true;
     }
-    let clicks = if response.triple_clicked() {
+    opening(ui.ctx()).is_some_and(|opening| opening.presses >= clicks(response))
+}
+
+/// How many presses the click on `response` is made of: three for a triple click, two for a double click, else one.
+fn clicks(response: &Response) -> u32 {
+    if response.triple_clicked() {
         3
     } else if response.double_clicked() {
         2
     } else {
         1
-    };
-    opening(ui.ctx()).is_some_and(|opening| opening.presses >= clicks)
+    }
+}
+
+/// What a menu's open side menu keeps from one frame to the next: as [`Opening`] for the overlay, for the side menu
+/// that opens on the menu's overlay without opening another.
+#[derive(Clone, Debug, Default)]
+struct SideOpening {
+    /// The pass it was opened in.
+    pass: u64,
+    /// The last pass it was shown in.
+    shown: Option<u64>,
+    /// Every key that was down as it opened (the Enter, the Right or the letter that asked for it): until each comes
+    /// up, its presses (its repeats) are not the side menu's, and while any is down, no text is.
+    held: Vec<Key>,
+    /// How many frames had a pointer button pressed after the pass it opened in ([`fresh_submenu_click`]).
+    presses: u32,
+}
+
+/// Where egui keeps the [`SideOpening`].
+fn side_opening_id() -> Id {
+    Id::unique("overlay-side-opening")
+}
+
+/// Opens a menu's side menu on the open overlay, the one way the window opens one: from now on the keys that are
+/// down (the one that asked for it) and the rest of the click that asked for it do nothing in it
+/// ([`submenu_events`], [`fresh_submenu_click`]). Its glass comes with the next bake ([`want_submenu`]).
+pub fn open_submenu(ctx: &Context) {
+    let held = ctx.input(|input| input.keys_down.iter().copied().collect());
+    let opened = SideOpening { pass: ctx.cumulative_pass_nr(), shown: None, held, presses: 0 };
+    ctx.data_mut(|data| data.insert_temp(side_opening_id(), opened));
+}
+
+/// This frame's events for the open side menu: without the presses of a key held since it opened (its repeats), and
+/// without text while such a key is down. Called once every frame the side menu is open, before its lines are asked
+/// for clicks; one the core opened without [`open_submenu`] is opened here, with the keys down now held.
+#[must_use]
+pub fn submenu_events(ctx: &Context) -> Vec<Event> {
+    let now = ctx.cumulative_pass_nr();
+    let kept = ctx
+        .data(|data| data.get_temp::<SideOpening>(side_opening_id()))
+        .filter(|opened| opened.pass + 1 >= now || opened.shown.is_some_and(|shown| shown + 1 >= now));
+    let mut opened = kept.unwrap_or_else(|| SideOpening {
+        pass: now,
+        shown: None,
+        held: ctx.input(|input| input.keys_down.iter().copied().collect()),
+        presses: 0,
+    });
+    let events = ctx.input(|input| {
+        let held = opened.held.clone();
+        opened.held.retain(|key| input.key_down(*key));
+        if now > opened.pass && input.pointer.any_pressed() {
+            opened.presses = opened.presses.saturating_add(1);
+        }
+        let typing = !opened.held.is_empty();
+        input
+            .events
+            .iter()
+            .filter(|event| match event {
+                Event::Key { key, pressed: true, .. } => !held.contains(key),
+                Event::Text(_) => !typing,
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    });
+    opened.shown = Some(now);
+    ctx.data_mut(|data| data.insert_temp(side_opening_id(), opened));
+    events
+}
+
+/// Whether `response`, of a line of a menu whose side menu is open, was clicked by a person: as [`fresh_click`], and
+/// with every press of the click made after the side menu opened, so the second click of a double click whose first
+/// click opened it does nothing in it, nor on the menu's line that opened it.
+#[must_use]
+pub fn fresh_submenu_click(ui: &Ui, response: &Response) -> bool {
+    if !fresh_click(ui, response) {
+        return false;
+    }
+    !response.clicked_by(PointerButton::Primary)
+        || ui.ctx().data(|data| data.get_temp::<SideOpening>(side_opening_id())).is_some_and(|opened| opened.presses >= clicks(response))
 }
 
 /// Lays the scrim over `window`, under a dialog. A menu has none.
@@ -297,9 +412,20 @@ pub fn scrim(ui: &Ui, window: Rect, palette: Palette) {
 }
 
 /// Paints the overlays' panes among `drawn` (the baker's pictures of this frame) on the overlay in `ui`, over its
-/// scrim; the others are painted under the screen.
+/// scrim; the others are painted under the screen. A menu's side menu is not among them: its menu paints its glass
+/// ([`submenu_glass`]) once it knows the side menu is shown in this frame.
 pub fn glass(ui: &Ui, drawn: &[Drawn]) {
-    for pane in drawn.iter().filter(|drawn| is_overlay_pane(drawn.id)) {
+    paint_panes(ui, drawn, |id| is_overlay_pane(id) && id != SUBMENU);
+}
+
+/// Paints the glass of a menu's side menu among `drawn` on the overlay in `ui`, under the side menu's lines.
+pub fn submenu_glass(ui: &Ui, drawn: &[Drawn]) {
+    paint_panes(ui, drawn, |id| id == SUBMENU);
+}
+
+/// Paints the pictures among `drawn` whose id `which` takes.
+fn paint_panes(ui: &Ui, drawn: &[Drawn], which: impl Fn(&str) -> bool) {
+    for pane in drawn.iter().filter(|drawn| which(drawn.id)) {
         let mut mesh = Mesh::with_texture(pane.texture);
         mesh.add_rect_with_uv(pane.rect, pane.uv, Color32::WHITE);
         ui.painter().add(mesh);
@@ -441,6 +567,81 @@ mod tests {
                 assert!(window.contains_rect(menu) && menu.height().to_bits() == size.y.to_bits(), "{menu:?} for {anchor:?}");
             }
         }
+    }
+
+    #[test]
+    #[expect(clippy::cast_precision_loss, reason = "window sizes and places of a few thousand points")]
+    fn the_side_menu_stays_inside_the_window() {
+        use crate::theme::{SUBMENU_GAP, SUBMENU_WIDTH};
+        // The drawing's menu with Migrate open: its line from 616 to 648, the placed menu of two lines at its left.
+        let (menu_size, size) = (vec2(256.0, 314.0), vec2(SUBMENU_WIDTH, 72.0));
+        let line_of = |menu: Rect| Rect::from_min_size(pos2(menu.left() + 4.0, menu.top() + 4.0 + 7.0 * 32.0 + 9.0), vec2(248.0, 32.0));
+        let menu = Rect::from_min_size(pos2(1164.0, 274.0), vec2(256.0, 415.0));
+        let placed = submenu_rect(menu, Rect::from_min_size(pos2(1168.0, 616.0), vec2(248.0, 32.0)), size, window());
+        assert_eq!(placed, Rect::from_min_max(pos2(892.0, 648.0 - 72.0), pos2(1156.0, 648.0)));
+        // A menu at the window's left: the placed menu flips to its right.
+        let left = Rect::from_min_size(pos2(DIALOG_MARGIN, 274.0), menu_size);
+        let placed = submenu_rect(left, line_of(left), size, window());
+        assert_eq!((placed.left(), placed.bottom()), (left.right() + SUBMENU_GAP, line_of(left).bottom()));
+        // Every window from 960 by 600 up, a menu at buttons all along each edge and across the middle: the placed
+        // menu is whole inside the window's margin, level with its line, never over the menu, at the left when
+        // there is room there.
+        for width in (960..=2560).step_by(160) {
+            for height in (600..=1440).step_by(120) {
+                let (w, h) = (width as f32, height as f32);
+                let window = Rect::from_min_size(Pos2::ZERO, vec2(w, h));
+                let room = window.shrink(DIALOG_MARGIN);
+                let mut anchors = Vec::new();
+                for x in (0..=width).step_by(16) {
+                    for y in [0.0, h / 2.0, h - 32.0] {
+                        anchors.push(pos2(x as f32, y));
+                    }
+                }
+                for y in (0..=height).step_by(16) {
+                    for x in [0.0, w / 2.0, w - 32.0] {
+                        anchors.push(pos2(x, y as f32));
+                    }
+                }
+                for at in anchors {
+                    let anchor = Rect::from_min_size(at, vec2(32.0, 32.0)).intersect(window);
+                    let menu = menu_rect(anchor, menu_size, window);
+                    let line = line_of(menu);
+                    let placed = submenu_rect(menu, line, size, window);
+                    let what = format!("{placed:?} for the menu {menu:?} in {w}x{h}");
+                    assert!(room.contains_rect(placed), "{what} leaves the window");
+                    assert_eq!(placed.size(), size, "{what} is cut");
+                    assert!((placed.bottom() - line.bottom()).abs() < 1e-3, "{what} is not level with its line");
+                    assert!(
+                        placed.right() + SUBMENU_GAP <= menu.left() + 1e-3 || placed.left() + 1e-3 >= menu.right() + SUBMENU_GAP,
+                        "{what} is over the menu"
+                    );
+                    if menu.left() - SUBMENU_GAP - size.x >= room.left() {
+                        assert!((placed.right() + SUBMENU_GAP - menu.left()).abs() < 1e-3, "{what} is not at the menu's left");
+                    }
+                }
+            }
+        }
+        // A window too narrow for it at either placed: over the menu, at the placed with more room, still inside.
+        let narrow = Rect::from_min_size(Pos2::ZERO, vec2(520.0, 600.0));
+        let menu = Rect::from_min_size(pos2(264.0, 40.0), menu_size);
+        let placed = submenu_rect(menu, line_of(menu), size, narrow);
+        assert_eq!((placed.left(), placed.bottom(), placed.size()), (DIALOG_MARGIN, line_of(menu).bottom(), size));
+        let menu = Rect::from_min_size(pos2(0.0, 40.0), menu_size);
+        let placed = submenu_rect(menu, line_of(menu), size, narrow);
+        assert_eq!(placed.right(), 520.0 - DIALOG_MARGIN);
+        // Low in a short window: pushed up to stay inside.
+        let short = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 300.0));
+        let menu = Rect::from_min_size(pos2(1164.0, 24.0), vec2(256.0, 252.0));
+        let line = Rect::from_min_size(pos2(1168.0, 260.0), vec2(248.0, 32.0));
+        assert_eq!(submenu_rect(menu, line, size, short).bottom(), 300.0 - DIALOG_MARGIN);
+    }
+
+    #[test]
+    fn a_side_menu_is_an_overlay_pane() {
+        assert!(is_overlay_pane(SUBMENU) && is_overlay_pane(MENU) && is_overlay_pane(DIALOG));
+        assert!(!is_overlay_pane("sidebar"));
+        let rect = Rect::from_min_size(pos2(892.0, 576.0), vec2(264.0, 72.0));
+        assert_eq!(want_submenu(rect), Want { id: SUBMENU, rect, radius: MENU_RADIUS, surface: Surface::Menu });
     }
 
     #[test]

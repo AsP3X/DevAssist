@@ -293,6 +293,14 @@ pub const MENU_ROW_GAP: f32 = 8.0;
 pub const MENU_KEY_WIDTH: f32 = 16.0;
 /// How strong the line between two parts of a menu is, of the text colour (`menuLine`'s `fill: soft(0.12)`).
 pub const MENU_LINE_OPACITY: f32 = 0.12;
+/// The width of the side menu a menu's line opens (the Migrate menu's `264`).
+pub const SUBMENU_WIDTH: f32 = 264.0;
+/// The gap between a menu and the side menu beside it (the Migrate menu ends at 892 + 264 = 1156, the actions menu
+/// starts at 1164).
+pub const SUBMENU_GAP: f32 = 8.0;
+/// The size of the chevron at the end of a menu's line that opens a side menu (`menuRow`'s `more`:
+/// `icon("chevron-right", QUIET)`, an icon's 16 points), drawn in the quiet colour.
+pub const MENU_CHEVRON: f32 = 16.0;
 /// The height of the fill behind a row's menu button, centred on the row; its ends are round (`Row actions`'s
 /// `height: 32`, `cornerRadius: 16`).
 pub const DOTS_HEIGHT: f32 = 32.0;
@@ -911,6 +919,9 @@ mod tests {
             ("MENU_ROW_GAP", MENU_ROW_GAP, 8.0),
             ("MENU_KEY_WIDTH", MENU_KEY_WIDTH, 16.0),
             ("MENU_LINE_OPACITY", MENU_LINE_OPACITY, 0.12),
+            ("SUBMENU_WIDTH", SUBMENU_WIDTH, 264.0),
+            ("SUBMENU_GAP", SUBMENU_GAP, 8.0),
+            ("MENU_CHEVRON", MENU_CHEVRON, 16.0),
             ("DOTS_HEIGHT", DOTS_HEIGHT, 32.0),
             ("DOTS_RADIUS", DOTS_RADIUS, 16.0),
             ("HEADER_GAP", HEADER_GAP, 4.0),
