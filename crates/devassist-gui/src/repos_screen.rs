@@ -397,7 +397,9 @@ pub(crate) fn commands(events: &[Event]) -> Vec<Command> {
                     Key::End => Command::End(false),
                     Key::Space if !modifiers.any() => Command::Tick,
                     Key::A if modifiers.command_only() => Command::TickAll,
-                    Key::Escape => Command::Escape,
+                    // Held, it does nothing more: the press that closed a dialog does not go on to stop work, clear
+                    // the ticks or clear the filter.
+                    Key::Escape if !repeat => Command::Escape,
                     Key::F5 => Command::Refresh,
                     Key::ArrowLeft => Command::Fold(true),
                     Key::ArrowRight => Command::Fold(false),
@@ -545,7 +547,7 @@ pub fn show(
     let events = if keys { ui.input(|input| input.events.clone()) } else { Vec::new() };
     if typing {
         // The text was the field's; an Esc that took its focus away clears it.
-        let escaped = events.iter().any(|event| matches!(event, Event::Key { key: Key::Escape, pressed: true, .. }));
+        let escaped = events.iter().any(|event| matches!(event, Event::Key { key: Key::Escape, pressed: true, repeat: false, .. }));
         if escaped && let Some(repos) = session.repos_mut() {
             repos.set_list_filter("");
         }
@@ -941,8 +943,10 @@ mod tests {
         frame(&ctx, &mut session, &mut screen, typed(Key::S, "s"));
         assert_eq!(repos(&session).list_filter, "pos");
         assert!(repos(&session).sort == SortMode::NeedsUpdate);
-        // Esc in the filter clears it and leaves the ticks alone.
-        frame(&ctx, &mut session, &mut screen, vec![press(Key::Escape)]);
+        // Esc in the filter clears it and leaves the ticks alone. (The Esc pressed before is let go first: a second
+        // press of a key egui holds down is a repeat, which does nothing.)
+        let up = Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
+        frame(&ctx, &mut session, &mut screen, vec![up, press(Key::Escape)]);
         assert_eq!(repos(&session).list_filter, "");
         assert_eq!(ticked(&session), ["api"]);
     }
@@ -1014,6 +1018,7 @@ mod tests {
         }
         assert_eq!(read(typed(Key::D, "d")), [Command::Remove]);
         assert_eq!(read(vec![press(Key::Delete)]), [Command::Remove]);
+        assert_eq!(read(held(Key::Escape, None, 3)), [Command::Escape], "a held Esc acts once");
         // As in the terminal app, a capital D is no key.
         assert_eq!(read(typed(Key::D, "D")), []);
         // With Ctrl, Alt or Cmd held, a letter is no key here, even where the system sends its text.
@@ -1229,7 +1234,8 @@ mod tests {
         assert_eq!(repos(&session).marked, ["api"], "Esc cancelled, it did not also clear the ticks");
         // A filter that lets nothing through is cleared first, as before.
         session.repos_mut().unwrap().set_list_filter("zzz");
-        frame(&ctx, &mut session, &mut screen, vec![press(Key::Escape)]);
+        let up = Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE };
+        frame(&ctx, &mut session, &mut screen, vec![up, press(Key::Escape)]);
         let cancelled = devassist_core::sys::process::was_cancelled();
         devassist_core::sys::process::clear_cancel();
         assert_eq!((repos(&session).list_filter.as_str(), cancelled), ("", false));

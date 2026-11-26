@@ -610,7 +610,9 @@ buttons, and `Enter` presses the main one.
 
 `Esc` does not cancel a run that has a progress dialog, shown or hidden; its
 Cancel button does (`l` brings a hidden one back). Work without a dialog, a
-deletion from disk or the automatic pull, stops with `Esc` on the list.
+deletion from disk or the automatic pull, stops with `Esc` on the list. A
+second `Esc` after closing a dialog stops a running deletion or automatic
+pull; a held `Esc` does nothing more than its first press.
 
 ### The demo
 

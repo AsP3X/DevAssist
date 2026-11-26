@@ -237,6 +237,35 @@ mod tests {
     }
 
     #[test]
+    fn a_held_esc_that_closed_the_dialog_does_not_stop_work() {
+        // The cancel flag is the whole process's: the tests that run git take turns with this one.
+        let _live = crate::session::tests::live_git();
+        let mut busy = devassist_core::repos::state::testing::grouped_app();
+        // A deletion runs (busy, no run with a dialog) while the remove dialog is open for api.
+        busy.busy = true;
+        busy.marked = vec!["api".to_owned()];
+        busy.begin_remove();
+        let mut window = Window::new(Session::Live(Box::new(busy)));
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Remove));
+        let esc = |pressed, repeat| Event::Key { key: Key::Escape, physical_key: None, pressed, repeat, modifiers: Modifiers::NONE };
+        window.frame(vec![esc(true, false)]);
+        for _ in 0..6 {
+            window.frame(vec![esc(true, true)]);
+        }
+        devassist_core::sys::process::clear_cancel();
+        assert!(!window.open() && window.repos().mode == CoreMode::List, "the first press closed the dialog");
+        // (The core's words say whether it was asked to stop: the cancel flag is shared with every test.)
+        assert_ne!(window.repos().status, "Cancelling…", "the held Esc stopped the work");
+        assert_eq!(window.repos().marked, ["api"], "the held Esc cleared the ticks");
+        // Let go, then a fresh press stops it.
+        window.frame(vec![esc(false, false)]);
+        window.frame(vec![esc(true, false)]);
+        devassist_core::sys::process::clear_cancel();
+        assert_eq!(window.repos().status, "Cancelling…");
+    }
+
+    #[test]
     fn the_quiet_line_is_never_cut() {
         let mut header = None;
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
