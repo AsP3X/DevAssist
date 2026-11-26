@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "devassist"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "devassist-core",
  "ratatui",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "devassist-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "devassist-glass"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "egui",
  "image",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "devassist-gui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "devassist-core",
  "devassist-glass",

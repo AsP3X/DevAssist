@@ -6,6 +6,12 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-26
+
+The forks of a repository can be cloned, shown and updated, a repository can
+be moved to another folder or pushed to another service with its pull
+requests, and the overview shows pull requests and paths.
+
 ### Added
 
 - A window is on its way: `devassist-gui`. It shows your repositories: groups,
@@ -343,7 +349,8 @@ a list of clones that can be anywhere on disk.
 The first version, as artcraft-repos: a terminal app that adds, updates and
 removes GitHub clones in one folder.
 
-[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/AsP3X/DevAssist/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AsP3X/DevAssist/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AsP3X/DevAssist/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/AsP3X/DevAssist/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/AsP3X/DevAssist/compare/v0.5.0...v0.5.1
