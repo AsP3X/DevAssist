@@ -282,7 +282,7 @@ fn task(ui: &Ui, painter: &Painter, row: Rect, item: &Item, palette: Palette) {
             #[expect(clippy::cast_possible_truncation, reason = "a share between 0 and 1 of the bar's width")]
             let filled = (f64::from(TASK_BAR) * share.clamp(0.0, 1.0)).round() as f32;
             let filled = filled.clamp(PROGRESS_LEAST, TASK_BAR);
-            painter.rect_filled(Rect::from_min_size(bar.min, vec2(filled, PROGRESS_HEIGHT)), PROGRESS_HEIGHT / 2.0, palette.accent);
+            painter.rect_filled(Rect::from_min_size(bar.min, vec2(filled, PROGRESS_HEIGHT)), PROGRESS_HEIGHT / 2.0, palette.progress);
         }
     }
     let colour = match item.state {

@@ -561,7 +561,7 @@ fn draw_origin(ui: &Ui, cell: Rect, origin: &Origin, palette: Palette) {
             let track = Rect::from_min_size(pos2(cell.left(), y - PROGRESS_HEIGHT / 2.0), vec2(RULE_WIDTH, PROGRESS_HEIGHT));
             painter.rect_filled(track, PROGRESS_HEIGHT / 2.0, soft(palette, PROGRESS_TRACK_OPACITY));
             let filled = (RULE_WIDTH * share.clamp(0.0, 1.0)).round().clamp(PROGRESS_LEAST, RULE_WIDTH);
-            painter.rect_filled(Rect::from_min_size(track.min, vec2(filled, PROGRESS_HEIGHT)), PROGRESS_HEIGHT / 2.0, palette.accent);
+            painter.rect_filled(Rect::from_min_size(track.min, vec2(filled, PROGRESS_HEIGHT)), PROGRESS_HEIGHT / 2.0, palette.progress);
             draw_text(painter, words_left, y, widgets::ellipsis(text, &regular, words_room, ui), false, palette.on_glass);
         }
         Origin::Failed(reason) => {

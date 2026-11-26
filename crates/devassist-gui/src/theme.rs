@@ -422,6 +422,13 @@ pub struct Palette {
     pub selection: Color32,
     /// The accent colour.
     pub accent: Color32,
+    /// The filled part of a progress bar, on its track: the accent in the light mode; in the dark mode a lighter blue
+    /// of the accent's hue, the least step that holds 3.0 against the track on every backdrop, also where the
+    /// track lies on a selected row's fill (the user's choice of 2026-11-26).
+    pub progress: Color32,
+    /// The ring around the control with the keyboard's focus: the accent in the light mode; in the dark mode a
+    /// lighter blue of the accent's hue, the least step that holds 3.0 against a dialog's glass on every backdrop.
+    pub focus: Color32,
     /// The fill of an input field.
     pub field: Color32,
     /// What is laid over the window behind a dialog.
@@ -450,10 +457,14 @@ pub fn palette(mode: Mode) -> Palette {
             quiet: rgb(0x00, 0x00, 0x00).gamma_multiply(quiet_opacity(mode)),
             selection: rgba(0, 0, 0, 0x1f),
             accent: rgb(0x0a, 0x47, 0xa3),
+            progress: rgb(0x0a, 0x47, 0xa3),
+            focus: rgb(0x0a, 0x47, 0xa3),
             field: rgba(255, 255, 255, 0x99),
             scrim: rgba(0, 0, 0, 0x33),
             warning: rgb(0x6e, 0x3a, 0x00),
-            danger: rgb(0xa0, 0x22, 0x1b),
+            // Darkened from #a0221b, hue kept, the least that holds 4.5 everywhere it is used (the user's choice of
+            // 2026-11-26).
+            danger: rgb(0x83, 0x1c, 0x16),
             danger_tint: rgba(0xb3, 0x26, 0x1e, 0x1a),
             ok: rgb(0x1c, 0x6b, 0x3a),
             veil: rgb(0xff, 0xff, 0xff),
@@ -464,6 +475,8 @@ pub fn palette(mode: Mode) -> Palette {
             quiet: rgb(0xff, 0xff, 0xff).gamma_multiply(quiet_opacity(mode)),
             selection: rgba(255, 255, 255, 0x24),
             accent: rgb(0x2a, 0x66, 0xd6),
+            progress: rgb(0xc7, 0xd7, 0xf4),
+            focus: rgb(0x48, 0x7c, 0xdc),
             field: rgba(255, 255, 255, 0x1a),
             scrim: rgba(0, 0, 0, 0x73),
             warning: rgb(0xfa, 0xe1, 0xb0),
@@ -595,7 +608,10 @@ mod tests {
         assert_eq!(dark.accent, Color32::from_rgb(0x2a, 0x66, 0xd6));
         assert_eq!(light.warning, Color32::from_rgb(0x6e, 0x3a, 0x00));
         assert_eq!(dark.warning, Color32::from_rgb(0xfa, 0xe1, 0xb0));
-        assert_eq!(light.danger, Color32::from_rgb(0xa0, 0x22, 0x1b));
+        assert_eq!(light.danger, Color32::from_rgb(0x83, 0x1c, 0x16));
+        assert_eq!((light.progress, light.focus), (light.accent, light.accent));
+        assert_eq!(dark.progress, Color32::from_rgb(0xc7, 0xd7, 0xf4));
+        assert_eq!(dark.focus, Color32::from_rgb(0x48, 0x7c, 0xdc));
         assert_eq!(dark.danger, Color32::from_rgb(0xff, 0xc8, 0xc1));
         assert_eq!(light.ok, Color32::from_rgb(0x1c, 0x6b, 0x3a));
         assert_eq!(dark.ok, Color32::from_rgb(0x77, 0xdb, 0xa0));

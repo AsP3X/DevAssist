@@ -244,7 +244,9 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
 
 /// Draws a one-line text field at `rect`, whose glass is baked ([`add_glass`]): `icon` at its left, then `text`,
 /// or `hint` in the quiet colour while `text` is empty. `id` names it, so it can be given the focus. While it has
-/// the focus, Tab and the arrows do not move the focus away.
+/// the focus, Tab and the arrows do not move the focus away. The hint is drawn in the quiet colour: egui gives a
+/// field's hint its style's weak text colour whatever colour the hint asks for, so that colour is set to `quiet` for
+/// the field.
 pub fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon, palette: Palette, id: Id) -> Response {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     draw_icon(&painter, pos2(rect.left() + FIELD_PAD + ICON / 2.0, rect.center().y), icon, ICON, palette.quiet);
@@ -263,7 +265,11 @@ pub fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon,
         // Tab and the arrows stay with the field: nothing else on a screen takes the keyboard's focus, and the
         // screen reads the up and down arrows itself.
         .event_filter(EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, ..EventFilter::default() });
-    ui.put(room, edit)
+    ui.scope(|ui| {
+        ui.visuals_mut().weak_text_color = Some(palette.quiet);
+        ui.put(room, edit)
+    })
+    .inner
 }
 
 /// How wide a dialog's button with `words` is: its words in the medium face and [`BUTTON_PAD`] at either side.
@@ -295,7 +301,7 @@ pub fn button(ui: &mut Ui, rect: Rect, words: &str, kind: Kind, palette: Palette
         painter.rect_filled(rect, BUTTON_RADIUS, palette.on_glass.gamma_multiply(HOVER_OPACITY));
     }
     if response.has_focus() {
-        painter.rect_stroke(rect.expand(FOCUS_GAP), BUTTON_RADIUS + FOCUS_GAP, Stroke::new(FOCUS_RING, palette.accent), StrokeKind::Outside);
+        painter.rect_stroke(rect.expand(FOCUS_GAP), BUTTON_RADIUS + FOCUS_GAP, Stroke::new(FOCUS_RING, palette.focus), StrokeKind::Outside);
     }
     painter.with_clip_rect(rect.intersect(ui.clip_rect())).text(
         rect.center(),
@@ -359,6 +365,30 @@ pub(crate) mod tests {
         });
         output.drop_without_applying_deltas();
         out.unwrap()
+    }
+
+    #[test]
+    fn an_empty_fields_hint_is_drawn_in_the_quiet_colour() {
+        for mode in [Mode::Light, Mode::Dark] {
+            let palette = theme::palette(mode);
+            let ctx = context();
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), ..Default::default() };
+            let mut text = String::new();
+            let output = ctx.run_ui(input, |ui| {
+                let rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(280.0, 36.0));
+                field(ui, rect, &mut text, "Filter repositories", Icon::Search, palette, Id::unique("hint-test"));
+            });
+            // egui would draw it in its own weak text colour, whatever colour the hint asks for.
+            let hint = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == "Filter repositories" => {
+                    let section = shape.galley.job.sections[0].format.color;
+                    Some(if section == Color32::PLACEHOLDER { shape.fallback_color } else { section })
+                }
+                _ => None,
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(hint, Some(palette.quiet), "{mode:?}");
+        }
     }
 
     #[test]

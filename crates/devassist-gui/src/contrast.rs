@@ -18,23 +18,33 @@
 //! of the demo is measured in every state, because any row can be ticked, highlighted or under the pointer. The
 //! fills are laid over the panel's pixels as the window lays them, in the order the table paints them.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::thread;
 
 use devassist_core::config::BACKDROPS;
+use devassist_core::repos::state::{MenuItem, Repos};
 use devassist_glass::raster::{self, Bitmap, Pixel};
-use egui::epaint::{Mesh, Shape, TessellationOptions, Tessellator};
-use egui::{Color32, Pos2, Rect, TextureId, pos2, vec2};
+use egui::epaint::text::LayoutSection;
+use egui::epaint::{ClippedShape, Mesh, RectShape, Shape, TessellationOptions, Tessellator, TextShape};
+use egui::{Color32, ColorImage, Context, FontFamily, FontId, Pos2, RawInput, Rect, StrokeKind, TextureId, pos2, vec2};
 
-use crate::baker::{Scene, Sheet, SheetPicture, frosted_pane_picture, pane_picture, sheet_picture};
+use crate::assets::{self, Icon};
+use crate::baker::{Drawn, Scene, Sheet, SheetPicture, Wallpaper, Want, frosted_pane_picture, pane_picture, sheet_picture};
 use crate::columns::{self, Span};
-use crate::picture::{over, wallpaper_window};
+use crate::dialogs::{self, Dialogs};
+use crate::picture::{self, over, wallpaper_window};
+use crate::repos_screen::{self, Screen as ReposScreen};
 use crate::repos_view::{self, Line};
+use crate::session::Session;
+use crate::shell::{Page, Shown as ShellShown};
 use crate::theme::{
-    self, CHECK_MARK, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, Mode, PANEL_TEXT_INSET, Palette,
-    RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING, RULE_LABEL_GAP, RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL,
-    TEXT_TITLE, WINDOW,
+    self, BUTTON_OFF_OPACITY, CHECK_MARK, FOCUS_RING, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY, MIN_WINDOW,
+    Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING, RULE_LABEL_GAP, RULE_WIDTH,
+    SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
 };
-use crate::{demo, frost, shell, table, widgets};
+use crate::{demo, frost, overlay, shell, table, widgets};
 
 /// The least contrast of text at `TEXT` (WCAG's level AA for normal text).
 const LEAST_TEXT: f64 = 4.5;
@@ -45,6 +55,8 @@ const SOLID: f32 = 0.99;
 /// The fewest pixels a place may leave to measure: a mask or rectangle that leaves (almost) none would pass
 /// without having checked anything. The smallest real place, a group label's line, has several thousand.
 const LEAST_PIXELS: usize = 100;
+/// The fewest pixels of a focus ring: its straight runs, two points wide, around a dialog's button of a few words.
+const LEAST_RING_PIXELS: usize = 60;
 /// The room, in points, kept above and below a line of text.
 const LINE_SLACK: f32 = 2.0;
 /// The least contrast of a graphic: the check in a ticked box (WCAG's level AA for non-text contrast).
@@ -547,4 +559,620 @@ fn every_text_in_the_window_holds_its_contrast_on_all_six_backdrops() {
         "text below its contrast:
 {failures}"
     );
+}
+
+// The dialogs, the menu and the screen's new controls, measured on the frames the window draws.
+//
+// Each of these places is measured on a whole frame of the window, drawn by the window's own code on a demo set up
+// as a person would see it: the wallpaper, the shell's and the toolbar's glass panes laid over it (frosted or
+// through the shader, as the rendering draws them), then every shape the frame paints, in its order, from the
+// frosted panel and the table's fills to the overlay's scrim, its baked glass and the fills on it. A text is
+// measured where its galley lies (cut to its clip), against the pixels as they are when it is painted, so the
+// stack under it is the real one; its ink is the colour it is painted in. The geometry is the code's own: nothing
+// here places a rectangle. A place's name carries its stack: the part of the screen under it, then the fills
+// painted over that (the scrim, the glass, an inset, a button's fill), then its ink and its face.
+
+/// What a frame shows over the screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Over {
+    /// Nothing: the screen's own controls are measured.
+    Nothing,
+    /// A dialog, on its scrim.
+    Dialog,
+    /// The row's menu, without a scrim.
+    Menu,
+}
+
+/// A demo set up as a person would see it, to draw: its name, what is over the screen, and what sets it up.
+struct Shot {
+    name: &'static str,
+    over: Over,
+    set_up: fn(&mut Repos),
+}
+
+/// The demo's states whose text is measured. The screen with the ticked api and web (the selection bar, "Update
+/// all"), homelab highlighted (the "…" on a plain, a ticked and the highlighted row) and an error on the status
+/// bar; the progress dialog of the drawing's run, and with its Cancel pressed ("Cancelling…", which cannot be
+/// pressed); the remove dialog for a clean and a dirty repository ("clean", "uncommitted changes"); the group dialog
+/// moving api and web with its name, and renaming home with none (its hint, and the danger note the core gives when the rename is pressed then); the menu
+/// on the ticked api, its first line highlighted and its last (Remove, in the danger colour).
+const SHOTS: [Shot; 8] = [
+    Shot {
+        name: "screen",
+        over: Over::Nothing,
+        set_up: |repos| {
+            repos.pick("homelab");
+            repos.ask_for_repositories_to_remove();
+        },
+    },
+    Shot { name: "progress", over: Over::Dialog, set_up: |repos| demo::show(repos, "progress").unwrap() },
+    Shot {
+        name: "progress cancelling",
+        over: Over::Dialog,
+        set_up: |repos| {
+            demo::show(repos, "progress").unwrap();
+            repos.job.as_mut().unwrap().cancelling = true;
+        },
+    },
+    Shot {
+        name: "remove",
+        over: Over::Dialog,
+        set_up: |repos| {
+            repos.clear_marks();
+            repos.toggle_mark_of("api");
+            repos.toggle_mark_of("portal");
+            repos.begin_remove();
+        },
+    },
+    Shot { name: "group", over: Over::Dialog, set_up: |repos| demo::show(repos, "group").unwrap() },
+    Shot {
+        name: "group refused",
+        over: Over::Dialog,
+        set_up: |repos| {
+            // A rename of home with its name cleared: the core refuses a group without a name (a move with none
+            // takes the rows out of their group, so it is no refusal).
+            repos.clear_marks();
+            repos.pick("group::home");
+            repos.open_group_prompt();
+            repos.set_group_name("");
+            repos.accept_group();
+            assert!(repos.group_prompt.as_ref().is_some_and(|prompt| prompt.error.is_some()), "the core did not refuse");
+        },
+    },
+    Shot { name: "menu", over: Over::Menu, set_up: |repos| demo::show(repos, "menu").unwrap() },
+    Shot {
+        name: "menu on remove",
+        over: Over::Menu,
+        set_up: |repos| {
+            demo::show(repos, "menu").unwrap();
+            repos.highlight_menu(MenuItem::Remove);
+        },
+    },
+];
+
+/// The window sizes a shot is drawn at: the design's, and for an overlay also the smallest the window allows, where
+/// a dialog lies over the sidebar as well as the table.
+fn sizes(over: Over) -> &'static [[f32; 2]] {
+    if over == Over::Nothing { &[WINDOW] } else { &[WINDOW, MIN_WINDOW] }
+}
+
+/// How many frames a shot is drawn for before the one measured: the overlay opens, its glass is placed and baked,
+/// the menu finds its row's button, the faces are laid out.
+const SETTLE: usize = 4;
+
+/// The texture of the panel's sheet in the shots.
+const SHEET_TEXTURE: TextureId = TextureId::User(1);
+/// The texture of the overlay's glass in the shots.
+const GLASS_TEXTURE: TextureId = TextureId::User(2);
+
+/// One thing measured in a shot: its name, the contrast it needs, what it was (to check that the dark mode
+/// measures the same things in the same order), its lowest contrast and every contrast measured.
+struct Probe {
+    name: String,
+    least: f64,
+    what: String,
+    found: Lowest,
+    all: Vec<f64>,
+}
+
+/// The name of a colour the window paints in `mode`, for a place's name; another colour by its value.
+fn colour_name(colour: Color32, mode: Mode) -> String {
+    let p = theme::palette(mode);
+    let named = [
+        (p.on_glass, "on-glass"),
+        (p.on_dark_glass, "white"),
+        (p.quiet, "quiet"),
+        (p.danger, "danger"),
+        (p.warning, "warning"),
+        (p.accent, "accent"),
+        (p.selection, "selection"),
+        (p.field, "field"),
+        (p.scrim, "scrim"),
+        (p.danger_tint, "danger tint"),
+        (p.selection.gamma_multiply(BUTTON_OFF_OPACITY), "off fill"),
+        (p.on_glass.gamma_multiply(BUTTON_OFF_OPACITY), "off"),
+        (theme::selected_fill(mode), "ticked"),
+        (p.on_glass.gamma_multiply(GROUP_FILL_OPACITY), "group"),
+        (p.on_glass.gamma_multiply(HEAD_FILL_OPACITY), "head"),
+        (p.on_glass.gamma_multiply(HOVER_OPACITY), "hover"),
+        (p.on_glass.gamma_multiply(PROGRESS_TRACK_OPACITY), "track"),
+    ];
+    named.iter().find(|(known, _)| *known == colour).map_or_else(|| format!("{colour:?}"), |(_, name)| (*name).to_owned())
+}
+
+/// The lowest contrast of `ink` against `bitmap` at the pixels of `rect` whose centre `inside` takes, and every
+/// contrast measured.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "pixel places on a window of a few thousand points"
+)]
+fn measured(bitmap: &Bitmap, rect: Rect, ink: Color32, inside: &dyn Fn(Pos2) -> bool) -> (Lowest, Vec<f64>) {
+    let ink = raster::pixel(ink);
+    let (x0, x1) = (rect.left().floor().max(0.0) as usize, (rect.right().ceil().max(0.0) as usize).min(bitmap.w));
+    let (y0, y1) = (rect.top().floor().max(0.0) as usize, (rect.bottom().ceil().max(0.0) as usize).min(bitmap.h));
+    let mut found = Lowest { contrast: f64::INFINITY, at: (0, 0), count: 0 };
+    let mut all = Vec::new();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if !inside(pos2(x as f32 + 0.5, y as f32 + 0.5)) {
+                continue;
+            }
+            let under = bitmap.px[y * bitmap.w + x];
+            let contrast = ratio(luminance(over(under, ink)), luminance(under));
+            found.count += 1;
+            all.push(contrast);
+            if contrast < found.contrast {
+                found = Lowest { contrast, at: (x, y), count: found.count };
+            }
+        }
+    }
+    (found, all)
+}
+
+/// A text shape's words, where its galley lies (cut to its clip), its ink and its face; `None` for an empty one.
+fn text_of(text: &TextShape, clip: Rect) -> Option<(String, Rect, Color32, FontId)> {
+    let words = text.galley.text().to_owned();
+    let rect = text.galley.rect.translate(text.pos.to_vec2()).intersect(clip);
+    if words.trim().is_empty() || !rect.is_positive() {
+        return None;
+    }
+    let sections = &text.galley.job.sections;
+    let colour = |section: &LayoutSection| {
+        let colour = if section.format.color == Color32::PLACEHOLDER { text.fallback_color } else { section.format.color };
+        text.override_text_color.unwrap_or(colour).gamma_multiply(text.opacity_factor)
+    };
+    let ink = colour(&sections[0]);
+    assert!(sections.iter().all(|section| colour(section) == ink), "{words}: a text in more than one colour");
+    Some((words, rect, ink, sections[0].format.font_id.clone()))
+}
+
+/// The contrast a text in `font` whose ink is named `ink` needs: a graphic's for an icon, and for the words of a
+/// button that cannot be pressed ("Cancelling…": WCAG 1.4.3 leaves disabled controls out of the text rule, so they
+/// are held to the graphics' 3.0 to stay seen); 6.0 for 12-point text; 4.5 for the rest.
+fn least_for(font: &FontId, ink: &str) -> f64 {
+    if font.family == assets::icons_family() || ink == "off" {
+        LEAST_GRAPHIC
+    } else if font.size <= TEXT_SMALL {
+        LEAST_QUIET
+    } else {
+        LEAST_TEXT
+    }
+}
+
+/// A text's face in a place's name: its size, and whether it is an icon or monospaced.
+fn face_name(font: &FontId) -> String {
+    let kind = if font.family == assets::icons_family() {
+        " icon"
+    } else if font.family == FontFamily::Monospace {
+        " mono"
+    } else {
+        ""
+    };
+    format!("{}pt{kind}", font.size)
+}
+
+/// Which pixels of a graphic's rectangle are measured.
+type Inside = Box<dyn Fn(Pos2) -> bool>;
+
+/// A graphic of the overlay that is measured, as the progress dialog and a dialog's button paint it: the progress
+/// bar's fill against its track (it says how far a task is: held to 3.0), the track against the inset (reported, not
+/// held: the fill carries how far, the track only shows where the bar would end), and the focus ring against the
+/// dialog's glass (3.0). Gives its name, the contrast it needs, its colour, its rectangle and which pixels count.
+fn graphic(shape: &RectShape, palette: Palette) -> Option<(&'static str, f64, Color32, Rect, Inside)> {
+    let bar = (shape.rect.height() - PROGRESS_HEIGHT).abs() < 1e-3;
+    if bar && shape.fill == palette.progress {
+        return Some(("graphic: progress bar's fill on its track", LEAST_GRAPHIC, shape.fill, shape.rect, Box::new(|_| true)));
+    }
+    if bar && shape.fill == palette.on_glass.gamma_multiply(PROGRESS_TRACK_OPACITY) {
+        return Some(("graphic: progress bar's track on the field (reported, not held)", 1.0, shape.fill, shape.rect, Box::new(|_| true)));
+    }
+    if shape.stroke.color == palette.focus && (shape.stroke.width - FOCUS_RING).abs() < 1e-3 && shape.stroke_kind == StrokeKind::Outside {
+        // The ring's straight runs, outside the rectangle; its round corners are antialiased thin.
+        let (inner, round) = (shape.rect, f32::from(shape.corner_radius.nw));
+        let outer = inner.expand(FOCUS_RING);
+        let inside = move |at: Pos2| {
+            let across = at.x > inner.left() + round && at.x < inner.right() - round && (at.y < inner.top() || at.y > inner.bottom());
+            let down = at.y > inner.top() + round && at.y < inner.bottom() - round && (at.x < inner.left() || at.x > inner.right());
+            outer.contains(at) && (across || down)
+        };
+        return Some(("graphic: focus ring on the glass", LEAST_GRAPHIC, shape.stroke.color, outer, Box::new(inside)));
+    }
+    None
+}
+
+/// A baked glass pane's id and the bits of its rectangle's corners.
+type PaneKey = (&'static str, [u32; 4]);
+
+/// The names of a shot's places from the light mode: each one's name, what it is, and the contrast it needs.
+type Names = Vec<(String, String, f64)>;
+
+/// What every shot on one backdrop, in one mode, at one size and drawn as one rendering draws it shares, made
+/// once: the scene, its wallpaper, the window's picture of it, the panel's sheet, and each glass pane once baked.
+struct Stage {
+    scene: Scene,
+    rendering: Rendering,
+    wall: Wallpaper,
+    window: Bitmap,
+    sheet: SheetPicture,
+    panes: RefCell<HashMap<PaneKey, Rc<Bitmap>>>,
+}
+
+impl Stage {
+    fn new(scene: Scene, rendering: Rendering) -> Stage {
+        let (wall, window) = wallpaper_window(&scene);
+        let sheet = sheet_picture(&wall, &scene, Surface::Panel).unwrap();
+        Stage { scene, rendering, wall, window, sheet, panes: RefCell::new(HashMap::new()) }
+    }
+
+    /// The picture of the glass pane `want` as the rendering draws it, baked once.
+    fn pane(&self, want: &Want) -> Rc<Bitmap> {
+        let key = (want.id, [want.rect.min.x, want.rect.min.y, want.rect.max.x, want.rect.max.y].map(f32::to_bits));
+        let baked = self.panes.borrow().get(&key).cloned();
+        baked.unwrap_or_else(|| {
+            let picture = Rc::new(match self.rendering {
+                Rendering::Frosted => frosted_pane_picture(&self.wall, &self.scene, want).unwrap(),
+                Rendering::Glass => pane_picture(&self.wall, &self.scene, want).unwrap(),
+            });
+            self.panes.borrow_mut().insert(key, Rc::clone(&picture));
+            picture
+        })
+    }
+}
+
+/// The pictures of the glass panes `wants` laid over `bitmap`, as `stage` draws them.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixel places on a window of a few thousand points")]
+fn lay_panes(bitmap: &mut Bitmap, stage: &Stage, wants: &[Want]) {
+    let (w, h) = (bitmap.w, bitmap.h);
+    for want in wants {
+        let picture = stage.pane(want);
+        let (left, top) = (want.rect.min.x.round() as usize, want.rect.min.y.round() as usize);
+        for y in 0..picture.h.min(h.saturating_sub(top)) {
+            for x in 0..picture.w.min(w.saturating_sub(left)) {
+                let at = (top + y) * w + left + x;
+                bitmap.px[at] = over(bitmap.px[at], picture.px[y * picture.w + x]);
+            }
+        }
+    }
+}
+
+/// A context with the window's faces and the visuals the window sets in `mode`.
+fn shot_context(mode: Mode) -> Context {
+    let ctx = widgets::tests::context();
+    ctx.set_theme(if mode == Mode::Dark { egui::Theme::Dark } else { egui::Theme::Light });
+    let mut visuals = if mode == Mode::Dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+    visuals.panel_fill = Color32::TRANSPARENT;
+    ctx.set_visuals(visuals);
+    ctx
+}
+
+/// What the measured frame of a shot drew: its shapes in their order, how many of the last ones are the overlay's,
+/// the glass panes under the screen, and the shell's layout.
+struct Frame {
+    ctx: Context,
+    shapes: Vec<ClippedShape>,
+    overlay: usize,
+    wants: Vec<Want>,
+    layout: shell::Layout,
+}
+
+/// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
+/// textures painted from go into `textures`.
+#[expect(clippy::cast_precision_loss, reason = "picture sizes of a few thousand pixels")]
+fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, ColorImage>) -> Frame {
+    let (size, mode) = (vec2(stage.scene.size[0], stage.scene.size[1]), stage.scene.mode);
+    let window = Rect::from_min_size(Pos2::ZERO, size);
+    let sheet = Sheet { texture: SHEET_TEXTURE, uv: stage.sheet.uv, edge: stage.sheet.edge };
+    textures.insert(SHEET_TEXTURE, stage.sheet.bitmap.image());
+    let mut session = Session::demo(demo::repos());
+    (shot.set_up)(session.repos_mut().unwrap());
+    let ctx = shot_context(mode);
+    let (mut screen, mut dialogs) = (ReposScreen::default(), Dialogs::default());
+    let mut glass: Option<(Rect, Rc<Bitmap>)> = None;
+    let mut last = None;
+    for _ in 0..=SETTLE {
+        let mut drew = None;
+        let input = RawInput { screen_rect: Some(window), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
+            let mut overlay_glass = Vec::new();
+            if let Some(plan) = &planned {
+                let want = plan.want();
+                if glass.as_ref().is_none_or(|(rect, _)| *rect != want.rect) {
+                    glass = Some((want.rect, stage.pane(&want)));
+                }
+                let picture = &glass.as_ref().unwrap().1;
+                let uv = Rect::from_min_max(Pos2::ZERO, pos2(want.rect.width() / picture.w as f32, want.rect.height() / picture.h as f32));
+                overlay_glass.push(Drawn { id: want.id, texture: GLASS_TEXTURE, rect: want.rect, uv });
+            }
+            let layout = shell::layout(size, true, repos_screen::has_toolbar(&session));
+            let plan = repos_screen::plan(ui.painter(), &layout, &session);
+            let mut wants = shell::wants(&layout);
+            if let Some(plan) = &plan {
+                plan.add_wants(&mut wants);
+            }
+            if shot.over == Over::Nothing {
+                let status = repos_screen::status(&session);
+                let shown = ShellShown { mode, waiting: 0, status: status.as_ref() };
+                shell::draw(ui, &layout, &mut true, &mut Page::Repositories, shown);
+            }
+            let keys = !overlay::is_open(&ctx);
+            repos_screen::show(ui, &layout, plan.as_ref(), &mut session, Some(&sheet), mode, &mut screen, keys);
+            dialogs::after(&ctx, planned, session.repos_mut(), &overlay_glass, mode, &mut dialogs);
+            let count = ctx.graphics(|layers| layers.get(overlay::layer()).map_or(0, |list| list.next_idx().0));
+            drew = Some((count, wants.as_slice().to_vec(), layout));
+        });
+        picture::take_textures(std::mem::take(&mut output.textures_delta), textures);
+        if let Some((_, picture)) = &glass {
+            textures.insert(GLASS_TEXTURE, picture.image());
+        }
+        let (overlay, wants, layout) = drew.unwrap();
+        last = Some(Frame { ctx: ctx.clone(), shapes: std::mem::take(&mut output.shapes), overlay, wants, layout });
+    }
+    if shot.over != Over::Nothing {
+        assert!(overlay::is_open(&ctx) && glass.is_some(), "{}: its overlay is not drawn", shot.name);
+    }
+    last.unwrap()
+}
+
+/// Measures the shot `shot` on `stage`: every text and measured graphic of its overlay, and, on the screen, the
+/// selection bar's, "Update all"'s and the status bar's text and every row's "…". Names its places in the stage's
+/// mode's colours; `tag` tells the window's size.
+fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
+    let mode = stage.scene.mode;
+    let palette = theme::palette(mode);
+    let mut textures = HashMap::new();
+    let frame = draw_shot(shot, stage, &mut textures);
+    let mut bitmap = stage.window.clone();
+    lay_panes(&mut bitmap, stage, &frame.wants);
+    let dots = assets::icon(Icon::Ellipsis).to_string();
+    // The screen's controls whose text is measured: the selection bar, "Update all" and the status bar.
+    let controls: Vec<(&str, Rect)> =
+        frame.wants.iter().filter(|want| ["selection", "actions", "status"].contains(&want.id)).map(|want| (want.id, want.rect)).collect();
+    // What part of the screen lies under a place.
+    let region = |at: Pos2| {
+        if let Some((id, _)) = frame.wants.iter().map(|want| (want.id, want.rect)).find(|(_, rect)| rect.contains(at)) {
+            id
+        } else if frame.layout.panel.contains(at) {
+            "table panel"
+        } else {
+            "wallpaper"
+        }
+    };
+    let overlay_from = frame.shapes.len() - frame.overlay;
+    // The fills painted so far, where they are and by name: the table's (on the screen) and the overlay's.
+    let mut fills: Vec<(Rect, String, bool)> = Vec::new();
+    let mut probes = Vec::new();
+    for (index, clipped) in frame.shapes.into_iter().enumerate() {
+        let on_overlay = index >= overlay_from;
+        let stack = |at: Pos2, fills: &[(Rect, String, bool)]| {
+            let mut stack = vec![region(at).to_owned()];
+            stack.extend(fills.iter().filter(|(rect, _, overlaid)| *overlaid == on_overlay && rect.contains(at)).map(|(_, name, _)| name.clone()));
+            stack.join(" > ")
+        };
+        match &clipped.shape {
+            Shape::Text(text) => {
+                if let Some((words, rect, ink, font)) = text_of(text, clipped.clip_rect) {
+                    let wanted = match shot.over {
+                        Over::Nothing => words == dots || controls.iter().any(|(_, control)| control.contains(rect.center())),
+                        Over::Dialog => on_overlay,
+                        Over::Menu => on_overlay || words == dots,
+                    };
+                    if wanted {
+                        let ink_name = colour_name(ink, mode);
+                        let name = format!("{}{tag}: {}: {ink_name} {}", shot.name, stack(rect.center(), &fills), face_name(&font));
+                        let (found, all) = measured(&bitmap, rect, ink, &|_| true);
+                        let centre = rect.center();
+                        // 12-point text on a dialog's field inset ("clean", "uncommitted changes", a task's state, the
+                        // output) and the 12-point danger status are held to 4.5, WCAG's level AA, not to the 6.0 this
+                        // project holds small text to elsewhere: there even white cannot reach 6.0 on every backdrop
+                        // (the controller's ruling of 2026-11-26).
+                        let on_inset = shot.over == Over::Dialog
+                            && fills.iter().any(|(fill, name, overlaid)| *overlaid && name == "field" && fill.contains(centre));
+                        let danger_status = shot.over == Over::Nothing && region(centre) == "status" && ink_name == "danger";
+                        let least = match least_for(&font, &ink_name) {
+                            least if least == LEAST_QUIET && (on_inset || danger_status) => LEAST_TEXT,
+                            least => least,
+                        };
+                        probes.push(Probe { name, least, what: words, found, all });
+                        // A measured text is not painted: what comes after it is measured against what is under it.
+                        continue;
+                    }
+                }
+            }
+            Shape::Rect(rect) => {
+                if on_overlay && let Some((name, least, ink, area, inside)) = graphic(rect, palette) {
+                    let (found, all) = measured(&bitmap, area, ink, &inside);
+                    probes.push(Probe {
+                        // Named by what is under its top edge's middle, where it is drawn (a ring's middle is its button).
+                        name: format!("{}{tag}: {}: {name}", shot.name, stack(pos2(area.center().x, area.top() + 0.5), &fills)),
+                        least,
+                        what: name.to_owned(),
+                        found,
+                        all,
+                    });
+                }
+                if rect.brush.is_none() && rect.fill.a() > 0 {
+                    // The light mode's track and selection are the same colour: a bar's height tells the track.
+                    let track =
+                        (rect.rect.height() - PROGRESS_HEIGHT).abs() < 1e-3 && rect.fill == palette.on_glass.gamma_multiply(PROGRESS_TRACK_OPACITY);
+                    let name = if track { "track".to_owned() } else { colour_name(rect.fill, mode) };
+                    fills.push((rect.rect.intersect(clipped.clip_rect), name, on_overlay));
+                }
+            }
+            Shape::Mesh(mesh) if mesh.texture_id == GLASS_TEXTURE => {
+                let glass = if shot.over == Over::Menu { "menu glass" } else { "dialog glass" };
+                fills.push((mesh.calc_bounds(), glass.to_owned(), on_overlay));
+            }
+            _ => {}
+        }
+        picture::paint(&mut bitmap, &frame.ctx.tessellate(vec![clipped], 1.0), &textures);
+    }
+    probes
+}
+
+/// One place of the shots on a backdrop in a mode, drawn as one rendering draws it: the lowest contrast of the
+/// texts and graphics sharing its name, and every contrast measured there.
+struct ShotRow {
+    row: Row,
+    all: Vec<f64>,
+}
+
+/// A shot's name and its probes.
+type ShotProbes = (&'static str, Vec<Probe>);
+
+/// A take and what its shots measured.
+type Taken = (Take, Vec<ShotProbes>);
+
+/// One drawing of the shots: on a backdrop, as a rendering draws it, at a window size, in a mode.
+#[derive(Clone, Copy)]
+struct Take {
+    backdrop: &'static str,
+    rendering: Rendering,
+    size: [f32; 2],
+    mode: Mode,
+}
+
+/// What every shot drawn at `take`'s size measures in `take`: its name and its probes, in the shots' order.
+fn measure_take(take: Take) -> Vec<ShotProbes> {
+    let tag = if take.size == WINDOW { String::new() } else { format!(" at {}x{}", take.size[0], take.size[1]) };
+    let scene = Scene { size: take.size, pixels_per_point: 1.0, mode: take.mode, backdrop: take.backdrop.to_owned(), blur: true };
+    let stage = Stage::new(scene, take.rendering);
+    SHOTS.iter().filter(|shot| sizes(shot.over).contains(&take.size)).map(|shot| (shot.name, measure_shot(shot, &stage, &tag))).collect()
+}
+
+/// The rows of the takes on one backdrop drawn as one rendering draws it, `light` and `dark` their two modes at the
+/// same sizes in the same order. The places are named in the light mode; the dark mode measures the same texts in
+/// the same order under those names. Places sharing a name give their lowest.
+fn rows_of(light: Vec<Taken>, dark: Vec<Taken>) -> Vec<ShotRow> {
+    let mut rows: Vec<ShotRow> = Vec::new();
+    let mut light_names: HashMap<(&str, u32), Names> = HashMap::new();
+    for (take, shots) in light.into_iter().chain(dark) {
+        let first = if take.mode == Mode::Light { 0 } else { rows.iter().take_while(|row| row.row.mode == Mode::Light).count() };
+        for (shot, probes) in shots {
+            let names = light_names
+                .entry((shot, take.size[0].to_bits()))
+                .or_insert_with(|| probes.iter().map(|probe| (probe.name.clone(), probe.what.clone(), probe.least)).collect());
+            let said: Vec<&str> = probes.iter().map(|probe| probe.what.as_str()).collect();
+            let whats: Vec<&str> = names.iter().map(|(_, what, _)| what.as_str()).collect();
+            assert_eq!(said, whats, "{shot} {} {:?}: the dark mode drew other things than the light", take.backdrop, take.rendering);
+            for (probe, (name, _, least)) in probes.into_iter().zip(names.iter()) {
+                match rows[first..].iter_mut().find(|row| row.row.name == *name && row.row.mode == take.mode) {
+                    Some(row) => {
+                        let count = row.row.found.count + probe.found.count;
+                        if probe.found.contrast < row.row.found.contrast {
+                            row.row.found = probe.found;
+                        }
+                        row.row.found.count = count;
+                        row.all.extend(probe.all);
+                    }
+                    None => rows.push(ShotRow {
+                        row: Row {
+                            rendering: take.rendering,
+                            backdrop: take.backdrop,
+                            mode: take.mode,
+                            name: name.clone(),
+                            least: *least,
+                            found: probe.found,
+                        },
+                        all: probe.all,
+                    }),
+                }
+            }
+        }
+    }
+    for row in &rows {
+        assert!(
+            row.row.found.count >= if row.row.name.contains("focus ring") { LEAST_RING_PIXELS } else { LEAST_PIXELS },
+            "{:?} {} {:?} {}: only {} pixels measured",
+            row.row.rendering,
+            row.row.backdrop,
+            row.row.mode,
+            row.row.name,
+            row.row.found.count
+        );
+    }
+    rows
+}
+
+/// The rows of every shot on every backdrop in both modes, drawn as each of `renderings` draws them: every take
+/// drawn at once, each on a thread of its own.
+fn measure_all_shots(renderings: &[Rendering]) -> Vec<ShotRow> {
+    let takes: Vec<Take> = renderings
+        .iter()
+        .flat_map(|&rendering| {
+            BACKDROPS.into_iter().flat_map(move |backdrop| {
+                [WINDOW, MIN_WINDOW].into_iter().flat_map(move |size| [Mode::Light, Mode::Dark].map(|mode| Take { backdrop, rendering, size, mode }))
+            })
+        })
+        .collect();
+    let mut measured_takes: Vec<Taken> = thread::scope(|scope| {
+        let jobs: Vec<_> = takes.iter().map(|&take| (take, scope.spawn(move || measure_take(take)))).collect();
+        jobs.into_iter().map(|(take, job)| (take, job.join().unwrap())).collect()
+    });
+    let mut rows = Vec::new();
+    for &rendering in renderings {
+        for backdrop in BACKDROPS {
+            let (mine, rest): (Vec<_>, Vec<_>) =
+                measured_takes.into_iter().partition(|(take, _)| take.rendering == rendering && take.backdrop == backdrop);
+            measured_takes = rest;
+            let (light, dark) = mine.into_iter().partition(|(take, _)| take.mode == Mode::Light);
+            rows.extend(rows_of(light, dark));
+        }
+    }
+    rows
+}
+
+/// The value a share `at` (0 to 1) of `values` lies at or under: 0.05 for the 5th percentile, 0.5 for the median.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss, reason = "an index into a list of pixels")]
+fn share(values: &[f64], at: f64) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[((sorted.len() - 1) as f64 * at).round() as usize]
+}
+
+#[test]
+fn every_text_of_the_dialogs_the_menu_and_the_selection_bar_holds_its_contrast_on_all_six_backdrops() {
+    let mut renderings = vec![Rendering::Frosted];
+    if shader_runs() {
+        renderings.push(Rendering::Glass);
+    }
+    let rows = measure_all_shots(&renderings);
+    // Every place on every backdrop, in both modes and renderings.
+    let mut names: Vec<&str> = rows.iter().map(|row| row.row.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(rows.len(), names.len() * BACKDROPS.len() * 2 * renderings.len(), "one row per place, backdrop, mode and rendering");
+    let table: String = rows.iter().map(|row| row.row.text()).collect();
+    eprintln!("{table}");
+    eprintln!("{} places", names.len());
+    let failures: Vec<String> = rows
+        .iter()
+        .filter(|row| row.row.found.contrast < row.row.least)
+        .map(|row| format!("{}    5th percentile {:.2}, median {:.2}", row.row.text().trim_end(), share(&row.all, 0.05), share(&row.all, 0.5)))
+        .collect();
+    let failures = failures.join("\n");
+    assert!(failures.is_empty(), "text below its contrast:\n{failures}");
 }
