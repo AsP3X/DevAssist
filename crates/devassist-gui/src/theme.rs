@@ -410,6 +410,9 @@ pub const ADD_PICK: [f32; 2] = GROUP_PICK;
 /// The width of the folder dialog (Import and Move): the Add dialog's, whose parts it is built from, and the design's
 /// Move dialog's (`dialog("Move", 600, …)`; the design draws no Import dialog).
 pub const FOLDER_DIALOG_WIDTH: f32 = ADD_WIDTH;
+/// The most lines the folder dialog's line under its field wraps to (the core's reason, a move's hint): a long path in
+/// a reason keeps its end.
+pub const UNDER_LINES: usize = 3;
 /// The most rows the Move dialog's "What moves" shows before it scrolls.
 pub const MOVE_ROWS: usize = 6;
 /// The fewest rows the Move dialog's "What moves" keeps (all, when fewer) while the window is short: the folder

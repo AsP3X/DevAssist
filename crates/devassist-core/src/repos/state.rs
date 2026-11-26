@@ -2349,7 +2349,7 @@ impl Repos {
                                 .as_deref()
                                 .is_some_and(|other| paths::same_path(other, to))
                     });
-                    (!held && to.exists()) || earlier || to.starts_with(from)
+                    (!held && to.exists()) || earlier || paths::is_within(to, from)
                 });
             lines.push(MoveLine {
                 name: name.clone(),
@@ -2391,6 +2391,24 @@ impl Repos {
             }
         }
         known.then_some(false)
+    }
+
+    /// Why the open folder question would refuse its text, as `Confirm`
+    /// would say it, without submitting it: None while nothing is typed,
+    /// while the folder is usable, or while no question is open. While
+    /// work is held it reads nothing: only what the text tells. It looks
+    /// at the disk otherwise: ask again only when the text changed.
+    pub fn path_reason(&self) -> Option<String> {
+        let prompt = self.prompt.as_ref()?;
+        if prompt.input.trim().is_empty() {
+            return None;
+        }
+        let checked = if self.work_held {
+            pathprompt::resolve_text(&prompt.input)
+        } else {
+            prompt.folder()
+        };
+        checked.err()
     }
 
     /// Esc in the folder dialog. It goes back to Add when it asked where
@@ -6600,7 +6618,10 @@ mod tests {
             [to(&elsewhere, "api"), to(&elsewhere, "web")]
         );
         assert!(lines.iter().all(|line| !line.there && !line.taken));
-        assert_eq!(app.move_crosses_volumes(), Some(true));
+        // Told by the drive in the text on Windows; elsewhere a mount point
+        // cannot be told from it, and nothing is said.
+        let crosses = cfg!(windows).then_some(true);
+        assert_eq!(app.move_crosses_volumes(), crosses);
         // What is on the disk is not looked at.
         let there = root.join("there");
         app.set_path_input(&there.display().to_string());
@@ -6609,7 +6630,7 @@ mod tests {
         assert!(!lines[0].taken, "a held question looked at the disk");
         assert_eq!(
             app.move_crosses_volumes(),
-            Some(true),
+            crosses,
             "{} is on another drive",
             there.display()
         );
@@ -6620,6 +6641,62 @@ mod tests {
         app.set_path_input("dev");
         assert!(app.move_lines().iter().all(|line| line.to.is_none()));
         assert_eq!(app.move_crosses_volumes(), None);
+    }
+
+    #[test]
+    fn the_folder_questions_reason_is_told_while_typing_without_submitting() {
+        let temp = Temp::new("path-reason");
+        let file = temp.0.join("notes.txt");
+        std::fs::create_dir_all(&temp.0).unwrap();
+        std::fs::write(&file, "notes").unwrap();
+        let mut app = Repos::empty(test_settings());
+        assert_eq!(app.path_reason(), None, "no question is open");
+        app.open_import();
+        let says = |app: &mut Repos, text: &str| {
+            app.set_path_input(text);
+            app.path_reason()
+        };
+        assert_eq!(says(&mut app, ""), None, "nothing typed yet");
+        assert_eq!(says(&mut app, "   "), None, "nothing typed yet");
+        assert!(says(&mut app, "dev").is_some_and(|reason| reason.starts_with("Use a full path")));
+        assert_eq!(
+            says(&mut app, &file.display().to_string()),
+            Some(format!("{} is a file, not a folder.", file.display()))
+        );
+        assert_eq!(says(&mut app, &temp.0.display().to_string()), None);
+        // Nothing was submitted: the question is open and has no error.
+        assert!(app.mode == Mode::Path && app.prompt.as_ref().unwrap().error.is_none());
+        // Held: only what the text tells.
+        app.hold_work();
+        assert_eq!(
+            says(&mut app, &file.display().to_string()),
+            None,
+            "a held question looked at the disk"
+        );
+        assert!(says(&mut app, "dev").is_some());
+    }
+
+    #[test]
+    fn a_target_inside_the_checkout_by_another_case_is_refused_where_case_does_not_count() {
+        let temp = Temp::new("move-case");
+        let api = temp.0.join("code").join("api");
+        std::fs::create_dir_all(&api).unwrap();
+        let mut app = Repos::empty(test_settings());
+        let mut repo = installed("acme", "api");
+        repo.folder = "api".into();
+        repo.path = api.clone();
+        app.checkouts.push(api.clone());
+        app.installed.push(repo);
+        app.marked = vec!["api".into()];
+        app.run_migrate(MigrateItem::Folder);
+        let inside = PathBuf::from(api.display().to_string().to_uppercase()).join("sub");
+        app.set_path_input(&inside.display().to_string());
+        assert_eq!(
+            app.move_lines()[0].taken,
+            cfg!(windows),
+            "{}",
+            inside.display()
+        );
     }
 
     #[test]

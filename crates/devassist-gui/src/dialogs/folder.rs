@@ -38,6 +38,7 @@ use crate::overlay::{self, Kind};
 use crate::theme::{
     ADD_FOLDER_GAP, BUTTON_HEIGHT, DIALOG_FIELD_HEIGHT, DIALOG_GAP, DIALOG_MARGIN, DIALOG_PAD, FOLDER_DIALOG_WIDTH, HAIRLINE, HEADER_LINE_HEIGHT,
     ICON, LINE_OPACITY, LIST_GAP, LIST_PAD, LIST_ROW, MOVE_LEAST_ROWS, MOVE_NOTE_LINE_HEIGHT, MOVE_NOTE_WIDTH, MOVE_ROWS, Palette, TEXT, TEXT_SMALL,
+    UNDER_LINES,
 };
 use crate::widgets::{self, font};
 
@@ -135,17 +136,51 @@ fn note(line: &MoveLine) -> Option<&'static str> {
     }
 }
 
-/// The drive or root the move takes the checkouts to, to name in the note: that of the first row that moves.
+/// The drive the move takes the checkouts to, to name in the note: that of the first row that moves, when the core can
+/// tell it from the path (`gitops::volume_root`: on Windows only).
 fn target_root(lines: &[MoveLine]) -> Option<String> {
     lines.iter().filter(|line| moves(line)).find_map(|line| line.to.as_deref().and_then(gitops::volume_root))
 }
 
-/// The note on another drive, naming `root`.
-fn drive_note(root: &str) -> String {
+/// The note on another drive, naming its `root` when the core can tell it ("E: is another drive."), else "That folder
+/// is on another drive.": off Windows a mount point cannot be told from a path.
+fn drive_note(root: Option<&str>) -> String {
+    let first = root.map_or_else(|| "That folder is on another drive.".to_owned(), |root| format!("{root} is another drive."));
     format!(
-        "{root} is another drive. Everything is copied first, and the original is deleted only after the copy is complete. Close programs that have \
-         files of these repositories open."
+        "{first} Everything is copied first, and the original is deleted only after the copy is complete. Close programs that have files of \
+         these repositories open."
     )
+}
+
+/// How the line under the field is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    /// The quiet colour: a move's hint, or why the typed folder cannot be used yet.
+    Quiet,
+    /// The danger colour: the core refused the folder.
+    Danger,
+}
+
+/// What stands under the field and how: the core's refusal `error` (until the text changes); for a move, why the
+/// folder typed cannot be used (`reason`, the core's `path_reason`), else the hint; nothing under Import's field
+/// otherwise.
+fn under_words(error: Option<&str>, reason: Option<&str>, moving: bool) -> Option<(String, Tone)> {
+    match (error, moving) {
+        (Some(error), _) => Some((error.to_owned(), Tone::Danger)),
+        (None, true) => Some((reason.unwrap_or(MOVE_HINT).to_owned(), Tone::Quiet)),
+        (None, false) => None,
+    }
+}
+
+/// The line under the field, `text`, laid out with `painter`'s faces in `width`: 12-point text at the header's line
+/// height, wrapped to [`UNDER_LINES`] lines at most (a reason is never cut short of that).
+fn under_galley(painter: &Painter, text: &str, width: f32) -> Arc<Galley> {
+    let mut job = LayoutJob::simple(text.to_owned(), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, width);
+    job.wrap.max_rows = UNDER_LINES;
+    for section in &mut job.sections {
+        section.format.line_height = Some(line_height(TEXT_SMALL));
+    }
+    painter.layout_job(job)
 }
 
 /// The id of the folder field, which has the focus when the dialog opens.
@@ -169,6 +204,8 @@ pub(super) struct State {
     lines: Vec<MoveLine>,
     /// For a move, whether it takes a checkout to another drive (`Repos::move_crosses_volumes`), asked for with them.
     crosses: Option<bool>,
+    /// For a move, why the folder typed cannot be used (`Repos::path_reason`), asked for with them.
+    reason: Option<String>,
 }
 
 impl State {
@@ -186,12 +223,20 @@ impl State {
         self.suggestions = folder_suggestions(repos, &text);
         self.lines = repos.move_lines();
         self.crosses = if self.lines.is_empty() { None } else { repos.move_crosses_volumes() };
+        // Only a move says why while typing; Import's line is the refusal alone.
+        self.reason = if self.lines.is_empty() { None } else { repos.path_reason() };
         self.text = text;
     }
 
-    /// The drive the note names, when the core can tell that the move crosses to another one.
+    /// The note on another drive, when the core can tell that the move crosses to one.
     fn other_drive(&self) -> Option<String> {
-        if self.crosses == Some(true) { target_root(&self.lines) } else { None }
+        if self.crosses == Some(true) { Some(drive_note(target_root(&self.lines).as_deref())) } else { None }
+    }
+
+    /// What stands under the field for `repos`'s question, and how ([`under_words`]).
+    fn under(&self, repos: &Repos) -> Option<(String, Tone)> {
+        let prompt = repos.prompt.as_ref()?;
+        under_words(prompt.error.as_deref(), self.reason.as_deref(), matches!(prompt.purpose, Purpose::Move(_)))
     }
 }
 
@@ -200,6 +245,14 @@ impl State {
 pub(super) fn said(repos: &Repos) -> Vec<String> {
     let moving = moving(&repos.move_lines());
     repos.prompt.as_ref().and_then(|prompt| words(&prompt.purpose, moving)).map_or_default(|words| vec![CANCEL.to_owned(), words.button])
+}
+
+/// The line under the field at `places` while it says why the folder cannot be used for `repos` (the core's refusal,
+/// or a move's reason while typing, as `state` has it); not while it shows a move's hint.
+#[cfg(test)]
+pub(super) fn reason_box(places: Places, repos: &Repos, state: &State) -> Option<Rect> {
+    let refused = repos.prompt.as_ref().is_some_and(|prompt| prompt.error.is_some());
+    if refused || state.reason.is_some() { places.note.or(places.hint) } else { None }
 }
 
 /// The parts of the folder dialog.
@@ -228,13 +281,16 @@ pub(super) struct Places {
 /// What stands under the folder field besides its rows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Under {
-    /// Import: the core's reason, when it refused the folder.
+    /// Import: the core's reason, `refused` points tall, when it refused the folder.
     Import {
-        /// It refused the folder.
-        refused: bool,
+        /// How tall the reason is, when it refused the folder.
+        refused: Option<f32>,
     },
-    /// Move: the hint line, a box of `lines` rows, and the note on another drive, `drive` points tall, when it shows.
+    /// Move: the line under the field, `below` points tall, a box of `lines` rows, and the note on another drive,
+    /// `drive` points tall, when it shows.
     Move {
+        /// How tall the line under the field is.
+        below: f32,
         /// How many checkouts move.
         lines: usize,
         /// How tall the note on another drive is, when it shows.
@@ -252,11 +308,14 @@ fn line_height(size: f32) -> f32 {
 /// takes what the window leaves, at least [`MOVE_LEAST_ROWS`] rows (all, when fewer) and at most [`MOVE_ROWS`]; the
 /// field's rows give up their room before that, and the buttons stay inside the pane.
 fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places {
-    let small = line_height(TEXT_SMALL);
+    let small = match under {
+        Under::Import { refused } => refused.unwrap_or_default(),
+        Under::Move { below, .. } => below,
+    };
     let (under_field, list_want, list_least, drive_want) = match under {
-        Under::Import { refused } => (if refused { ADD_FOLDER_GAP + small } else { 0.0 }, 0.0, 0.0, 0.0),
-        Under::Move { lines, drive } => (
-            ADD_FOLDER_GAP + small,
+        Under::Import { refused } => (refused.map_or(0.0, |refused| ADD_FOLDER_GAP + refused), 0.0, 0.0, 0.0),
+        Under::Move { below, lines, drive } => (
+            ADD_FOLDER_GAP + below,
             DIALOG_GAP + list_height(lines.min(MOVE_ROWS)),
             DIALOG_GAP + list_height(lines.min(MOVE_LEAST_ROWS)),
             drive.map_or(0.0, |drive| DIALOG_GAP + drive),
@@ -284,7 +343,7 @@ fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places
     let field = at(label.bottom() + ADD_FOLDER_GAP, DIALOG_FIELD_HEIGHT + rows_height);
     let below = at(field.bottom() + ADD_FOLDER_GAP, small);
     let (note, hint) = match under {
-        Under::Import { refused } => (refused.then_some(below), None),
+        Under::Import { refused } => (refused.map(|_| below), None),
         Under::Move { .. } => (None, Some(below)),
     };
     let (list, drive) = match under {
@@ -300,8 +359,8 @@ fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places
 
 /// The note on another drive naming `root`, laid out with `painter`'s faces: quiet 12-point text that wraps at
 /// [`MOVE_NOTE_WIDTH`], at the design's line height.
-fn drive_galley(painter: &Painter, root: &str) -> Arc<Galley> {
-    let mut job = LayoutJob::simple(drive_note(root), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, MOVE_NOTE_WIDTH);
+fn drive_galley(painter: &Painter, note: &str) -> Arc<Galley> {
+    let mut job = LayoutJob::simple(note.to_owned(), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, MOVE_NOTE_WIDTH);
     for section in &mut job.sections {
         section.format.line_height = Some(TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT);
     }
@@ -315,9 +374,15 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, state: &State
     let words = words(&prompt.purpose, moving(&state.lines))?;
     let header = Header::new(painter, &words.title, words.line, FOLDER_DIALOG_WIDTH - 2.0 * DIALOG_PAD);
     let rows = widgets::folder_field_rows(painter.ctx(), field_id(), state.suggestions.len());
+    let width = FOLDER_DIALOG_WIDTH - 2.0 * DIALOG_PAD;
+    let below = state.under(repos).map(|(words, _)| under_galley(painter, &words, width).size().y);
     let under = match prompt.purpose {
-        Purpose::Move(_) => Under::Move { lines: state.lines.len(), drive: state.other_drive().map(|root| drive_galley(painter, &root).size().y) },
-        _ => Under::Import { refused: prompt.error.is_some() },
+        Purpose::Move(_) => Under::Move {
+            below: below.unwrap_or_else(|| line_height(TEXT_SMALL)),
+            lines: state.lines.len(),
+            drive: state.other_drive().map(|note| drive_galley(painter, &note).size().y),
+        },
+        _ => Under::Import { refused: below },
     };
     let places = folder_places(window, header.height(), rows, under);
     Some(Plan::dialog(header, Parts::Folder(places)))
@@ -372,23 +437,19 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     }
     done.close |= take_press(ui, Key::Escape, None);
 
-    // Under the field: the core's reason while it stands (until the text changes), else a move's hint.
-    let small = font(TEXT_SMALL, FontFamily::Proportional);
-    let reason = error.filter(|_| !did.changed);
-    if let Some(rect) = places.note.or(places.hint) {
-        let (said, colour) = match (&reason, places.hint) {
-            (Some(reason), _) => (reason.as_str(), palette.danger),
-            (None, Some(_)) => (MOVE_HINT, palette.quiet),
-            (None, None) => ("", palette.quiet),
-        };
-        let said = widgets::ellipsis(said, &small, rect.width(), ui);
-        ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, said, small, colour);
+    // Under the field: the core's refusal while it stands (until the text changes), else for a move why the folder
+    // cannot be used, or the hint; wrapped, never cut.
+    let error = error.filter(|_| !did.changed);
+    let moving_purpose = places.hint.is_some();
+    if let (Some(rect), Some((words, tone))) = (places.note.or(places.hint), under_words(error.as_deref(), state.reason.as_deref(), moving_purpose)) {
+        let colour = if tone == Tone::Danger { palette.danger } else { palette.quiet };
+        ui.painter().galley(rect.min, under_galley(ui.painter(), &words, rect.width()), colour);
     }
     if let Some(rect) = places.list {
         list(ui, rect, &state.lines, palette, dialogs);
     }
-    if let (Some(rect), Some(root)) = (places.drive, state.other_drive()) {
-        let note = drive_galley(ui.painter(), &root);
+    if let (Some(rect), Some(note)) = (places.drive, state.other_drive()) {
+        let note = drive_galley(ui.painter(), &note);
         let painter = ui.painter();
         let first_line = TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT;
         widgets::draw_icon(painter, pos2(rect.left() + ICON / 2.0, rect.top() + first_line / 2.0), Icon::HardDrive, ICON, palette.quiet);
@@ -487,6 +548,7 @@ fn act(ui: &Ui, repos: &mut Repos, state: &mut State, done: &Done) {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use devassist_core::config::Settings;
     use devassist_core::repos::state::testing::{hold_github, installed, test_settings};
     use devassist_core::repos::state::{HELD, MigrateItem, Mode as CoreMode};
     use egui::{Event, Memory, Modifiers, Pos2};
@@ -642,7 +704,7 @@ mod tests {
         for size in [MIN_WINDOW, WINDOW] {
             let window = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
             for (rows, note) in [(0, false), (0, true), (6, false), (6, true)] {
-                let places = folder_places(window, 60.0, rows, Under::Import { refused: note });
+                let places = folder_places(window, 60.0, rows, Under::Import { refused: note.then_some(17.4) });
                 assert!(window.contains_rect(places.pane), "{size:?} {rows} {note}");
                 assert!((places.pane.width() - FOLDER_DIALOG_WIDTH).abs() < 1e-3);
                 for part in [places.header, places.label, places.field, places.buttons] {
@@ -654,7 +716,7 @@ mod tests {
         }
         // The dialog grows with the rows.
         let window = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
-        let import = Under::Import { refused: false };
+        let import = Under::Import { refused: None };
         assert!(folder_places(window, 60.0, 3, import).pane.height() > folder_places(window, 60.0, 0, import).pane.height());
     }
 
@@ -836,13 +898,13 @@ mod tests {
     #[test]
     fn the_other_drive_note_shows_only_when_the_core_can_tell() {
         assert_eq!(
-            drive_note("E:"),
+            drive_note(Some("E:")),
             "E: is another drive. Everything is copied first, and the original is deleted only after the copy is complete. Close programs that \
              have files of these repositories open."
         );
         let mut window = move_dialog(&["api", "web"], OTHER);
         assert_eq!(state(&window).crosses, Some(true));
-        assert_eq!(state(&window).other_drive().as_deref(), Some("E:"));
+        assert!(state(&window).other_drive().is_some_and(|note| note.starts_with("E: is another drive.")));
         let places = parts(&window);
         let (list, drive) = (places.list.unwrap(), places.drive.expect("the note on another drive"));
         assert!(drive.top() >= list.bottom() && drive.bottom() <= places.buttons.top() && places.pane.contains_rect(drive));
@@ -862,12 +924,106 @@ mod tests {
     }
 
     #[test]
+    fn the_note_names_no_drive_it_cannot_tell() {
+        assert_eq!(
+            drive_note(None),
+            "That folder is on another drive. Everything is copied first, and the original is deleted only after the copy is complete. Close \
+             programs that have files of these repositories open."
+        );
+        // A target whose drive the core cannot tell from its text (a path without a drive, as every path off Windows).
+        let line = MoveLine {
+            name: "api".to_owned(),
+            from: PathBuf::from(r"D:\code\api"),
+            to: Some(PathBuf::from("/mnt/work/api")),
+            there: false,
+            taken: false,
+        };
+        let state = State { lines: vec![line], crosses: Some(true), ..State::default() };
+        assert!(state.other_drive().is_some_and(|note| note.starts_with("That folder is on another drive.")), "{:?}", state.other_drive());
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_used_says_why_while_typing() {
+        // A live session (not held): the core looks at the disk.
+        let root = Temp(std::env::temp_dir().join(format!("devassist-gui-move-why-{}", std::process::id())));
+        let code = root.0.join("code");
+        let mut repos = Repos::offline(Settings { config_path: root.0.join("devassist.toml"), ..test_settings() });
+        for name in ["api", "web"] {
+            let mut repo = installed("acme", name);
+            repo.folder = name.to_owned();
+            repo.path = code.join(name);
+            std::fs::create_dir_all(&repo.path).unwrap();
+            repos.checkouts.push(repo.path.clone());
+            repos.marked.push(name.to_owned());
+            repos.installed.push(repo);
+        }
+        let file = root.0.join("notes.txt");
+        std::fs::write(&file, "notes").unwrap();
+        repos.run_migrate(MigrateItem::Folder);
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Folder));
+        let under = |window: &Window| state(window).under(window.repos());
+        // Where they are: the hint.
+        assert_eq!(under(&window), Some((MOVE_HINT.to_owned(), Tone::Quiet)));
+        // A file: nothing can move, and the line under the field says why, quietly; nothing was submitted.
+        type_over(&mut window, &file.display().to_string());
+        assert_eq!(targets(&window), [None, None]);
+        assert_eq!(window.said(), ["Cancel", "Move"]);
+        assert_eq!(under(&window), Some((format!("{} is a file, not a folder.", file.display()), Tone::Quiet)));
+        assert_eq!(window.repos().prompt.as_ref().unwrap().error, None);
+        // No full path: the core's words for that.
+        type_over(&mut window, "dev");
+        assert!(under(&window).is_some_and(|(words, tone)| words.starts_with("Use a full path") && tone == Tone::Quiet), "{:?}", under(&window));
+        // A usable folder: the hint again.
+        type_over(&mut window, &root.0.join("moved").display().to_string());
+        assert_eq!(under(&window), Some((MOVE_HINT.to_owned(), Tone::Quiet)));
+        assert_eq!(window.said(), ["Cancel", "Move 2 repositories"]);
+        // Import says nothing while typing: its line is the refusal only.
+        let state = State { reason: Some("why".to_owned()), ..State::default() };
+        assert_eq!(under_words(None, state.reason.as_deref(), false), None);
+        assert_eq!(under_words(Some("no"), Some("why"), true), Some(("no".to_owned(), Tone::Danger)), "a refusal stands over the reason");
+    }
+
+    #[test]
+    fn a_long_reason_wraps_and_keeps_its_end() {
+        let file = std::env::current_exe().unwrap();
+        let said = format!("{} is a file, not a folder.", file.display());
+        for name in ["import", "move"] {
+            let mut repos = crate::demo::repos();
+            crate::demo::show(&mut repos, name).unwrap();
+            let mut window = Window::new(Session::demo(repos));
+            window.size = MIN_WINDOW;
+            window.frame(Vec::new());
+            type_over(&mut window, &file.display().to_string());
+            tap(&mut window, Key::Enter, None);
+            assert!(window.shows(Which::Folder), "{name}: no refusal");
+            assert_eq!(window.repos().prompt.as_ref().unwrap().error.as_deref(), Some(said.as_str()), "{name}");
+            let places = parts(&window);
+            let line = places.note.or(places.hint).unwrap();
+            assert!(line.height() > 1.5 * line_height(TEXT_SMALL), "{name}: the reason is not wrapped: {line:?}");
+            let screen = Rect::from_min_size(Pos2::ZERO, vec2(MIN_WINDOW[0], MIN_WINDOW[1]));
+            assert!(screen.contains_rect(places.pane) && places.pane.contains_rect(places.buttons), "{name}");
+            assert!(line.bottom() <= places.list.map_or(places.buttons.top(), |list| list.top()), "{name}");
+        }
+        // Laid out whole: every word of it, nothing cut.
+        let mut galley = None;
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        crate::widgets::tests::context()
+            .run_ui(input, |ui| galley = Some(under_galley(ui.painter(), &said, FOLDER_DIALOG_WIDTH - 2.0 * DIALOG_PAD)))
+            .drop_without_applying_deltas();
+        let galley = galley.unwrap();
+        assert!(!galley.elided && galley.text() == said && galley.rows.len() >= 2, "{} rows, cut: {}", galley.rows.len(), galley.elided);
+    }
+
+    #[test]
     fn fifty_rows_scroll_and_the_buttons_stay_in_view() {
         // Placed: in the smallest window, with the folder rows open and the note shown, the box keeps three rows and
         // the buttons stay inside the pane; in the design's window it shows six.
         let small = Rect::from_min_size(Pos2::ZERO, vec2(MIN_WINDOW[0], MIN_WINDOW[1]));
         let big = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
-        let fifty = Under::Move { lines: 50, drive: Some(3.0 * TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT) };
+        // The line under the field at three lines: a long reason.
+        let fifty = Under::Move { below: 3.0 * line_height(TEXT_SMALL), lines: 50, drive: Some(3.0 * TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT) };
         for (window, rows) in [(small, 0), (small, 6), (big, 0), (big, 6)] {
             let places = folder_places(window, 45.0, rows, fifty);
             let (list, drive, hint) = (places.list.unwrap(), places.drive.unwrap(), places.hint.unwrap());

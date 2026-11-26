@@ -435,6 +435,16 @@ pub(crate) fn add_found_box(plan: &Plan) -> Option<Rect> {
     }
 }
 
+/// The line under the folder dialog's field that `plan` places, while it says why the folder cannot be used (the
+/// core's refusal, or a move's reason while typing) for `repos` with what `dialogs` keep.
+#[cfg(test)]
+pub(crate) fn folder_reason_box(plan: &Plan, repos: &Repos, dialogs: &Dialogs) -> Option<Rect> {
+    match &plan.0 {
+        Planned::Dialog(_, Parts::Folder(places)) => folder::reason_box(*places, repos, dialogs.folder.as_ref()?),
+        _ => None,
+    }
+}
+
 /// Gives the keyboard's focus to the Add dialog's folder field, when the Add dialog is open on `repos`; says
 /// whether it did. For a picture of its suggestions (`--show add-folder`).
 pub fn focus_add_folder(ctx: &Context, repos: Option<&Repos>) -> bool {

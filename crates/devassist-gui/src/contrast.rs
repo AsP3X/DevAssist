@@ -659,8 +659,9 @@ struct Shot {
 /// where it gives way, and the Import dialog as the demo opens it and with a folder the core refused; the screen with
 /// the pointer on the top row's "Add repository"; the Move dialog as the demo opens it (its rows, the note on another
 /// drive), with rows that are there already and that cannot move, with no usable folder (its quiet targets, the main
-/// button off), and with a folder the core refused.
-const SHOTS: [Shot; 26] = [
+/// button off; why the folder cannot be used, in the place of the hint), and with a folder the core refused; and the
+/// Import dialog refusing a long path, its reason wrapped across the dialog's width.
+const SHOTS: [Shot; 27] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -772,6 +773,15 @@ const SHOTS: [Shot; 26] = [
             demo::show(repos, "import").unwrap();
             // A relative folder: the core refuses it when Enter imports.
             repos.set_path_input("code");
+        },
+    },
+    Shot {
+        name: "import refused long",
+        over: Over::Entered,
+        set_up: |repos| {
+            demo::show(repos, "import").unwrap();
+            // A file with a long path: the reason spans the dialog's width, and wraps.
+            repos.set_path_input(&std::env::current_exe().unwrap().display().to_string());
         },
     },
     Shot { name: "add repository hovered", over: Over::MainHovered, set_up: |_| {} },
@@ -1059,6 +1069,8 @@ struct Frame {
     layout: shell::Layout,
     /// The box of the Add dialog's found repositories, when the Add dialog is drawn.
     found_box: Option<Rect>,
+    /// The line under the folder dialog's field while it says why the folder cannot be used.
+    reason_box: Option<Rect>,
     /// The rows of the Add dialog's found repositories, each with whether it is installed.
     rows: Vec<(Rect, bool)>,
     /// The top row's capsule and main button, when the screen placed them.
@@ -1082,16 +1094,10 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let mut glass: Option<(Rect, Rc<Bitmap>)> = None;
     let mut last = None;
     // The test dialog's folder field: its text and the folders it suggests, and where the pointer rests on it.
-    let (mut folder_text, folder_suggestions) = match shot.over {
-        Over::Folder(FolderShot::Lit | FolderShot::Hovered) => {
-            let text = widgets::tests::path(&["D:", "code", "work", ""]);
-            let suggestions = widgets::tests::matching(&widgets::tests::folders(), &text);
-            (text, suggestions)
-        }
-        _ => (String::new(), Vec::new()),
-    };
+    let (mut folder_text, folder_suggestions) = test_folder(shot.over);
     let mut pointer = None;
     let mut found = None;
+    let mut reason = None;
     let mut main = None;
     let mut rows: Vec<(Rect, bool)> = Vec::new();
     for frame in 0..=SETTLE {
@@ -1102,6 +1108,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             let ctx = ui.ctx().clone();
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
             found = planned.as_ref().and_then(dialogs::add_found_box);
+            reason = planned.as_ref().zip(session.repos()).and_then(|(plan, repos)| dialogs::folder_reason_box(plan, repos, &dialogs));
             let mut overlay_glass = Vec::new();
             let wanted = if let Over::Folder(_) = shot.over {
                 if frame == 0 {
@@ -1161,6 +1168,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             wants,
             layout,
             found_box: found,
+            reason_box: reason,
             rows: rows.clone(),
             top,
             state: state_words(&session),
@@ -1172,6 +1180,19 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let last = last.unwrap();
     hover_lands(shot, &last, size, mode);
     last
+}
+
+/// The test dialog's folder field in a shot over `over`: `D:\code\work\` and the folders it suggests while its rows are
+/// shown; empty otherwise.
+fn test_folder(over: Over) -> (String, Vec<String>) {
+    match over {
+        Over::Folder(FolderShot::Lit | FolderShot::Hovered) => {
+            let text = widgets::tests::path(&["D:", "code", "work", ""]);
+            let suggestions = widgets::tests::matching(&widgets::tests::folders(), &text);
+            (text, suggestions)
+        }
+        _ => (String::new(), Vec::new()),
+    }
 }
 
 /// The words the panel of `session` shows instead of the table: its title and the lines under it; none with a table.
@@ -1292,8 +1313,12 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                         let in_installed = on_overlay
                             && frame.found_box.is_some_and(|found_box| found_box.contains(centre))
                             && frame.rows.iter().any(|(row, installed)| *installed && row.contains(centre));
+                        // The folder dialog's reason under its field (the core's refusal in the danger colour, or why
+                        // a move's folder cannot be used, quiet), 12 point on the dialog's glass, is held to 4.5 by its
+                        // place, as the danger status is (the controller's ruling of 2026-11-26, Task 6 fix round 1).
+                        let in_reason = on_overlay && frame.reason_box.is_some_and(|reason| reason.contains(centre));
                         let least = match least_for(&font, &ink_name) {
-                            _ if in_installed => LEAST_TEXT,
+                            _ if in_installed || in_reason => LEAST_TEXT,
                             least if least == LEAST_QUIET && (on_inset || danger_status) => LEAST_TEXT,
                             least => least,
                         };

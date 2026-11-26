@@ -27,6 +27,12 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
     plain(left) == plain(right)
 }
 
+/// Whether `path` is `folder` or lies inside it, comparing as `same_path`
+/// does: case does not count on Windows.
+pub fn is_within(path: &Path, folder: &Path) -> bool {
+    path.ancestors().any(|above| same_path(above, folder))
+}
+
 /// Adds `path` unless it is listed already. True when it was added.
 pub fn push_path(list: &mut Vec<PathBuf>, path: PathBuf) -> bool {
     if list.iter().any(|item| same_path(item, &path)) {
@@ -50,6 +56,23 @@ mod tests {
     fn same_path_ignores_case_only_on_windows() {
         assert_eq!(
             same_path(Path::new("/A/b"), Path::new("/a/b")),
+            cfg!(windows)
+        );
+    }
+
+    #[test]
+    fn a_path_is_within_a_folder_as_same_path_compares_them() {
+        let api = Path::new("/srv/code/api");
+        assert!(is_within(Path::new("/srv/code/api/sub"), api));
+        assert!(
+            is_within(Path::new("/srv/code/api/"), api),
+            "a folder is within itself"
+        );
+        assert!(!is_within(Path::new("/srv/code/api-copy"), api));
+        assert!(!is_within(Path::new("/srv/code"), api));
+        // Case counts only where `same_path` counts it.
+        assert_eq!(
+            is_within(Path::new("/srv/Code/API/sub"), api),
             cfg!(windows)
         );
     }

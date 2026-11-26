@@ -922,7 +922,7 @@ pub fn move_checkout(
     if to.exists() {
         return Err(format!("{} is there already", to.display()));
     }
-    if to.starts_with(from) {
+    if paths::is_within(to, from) {
         return Err("a folder cannot be moved into itself".into());
     }
     if let Some(parent) = to.parent() {
@@ -959,15 +959,14 @@ pub fn same_volume(a: &Path, b: &Path) -> Option<bool> {
     same_device(&nearest(a)?, &nearest(b)?)
 }
 
-/// The drive or root `path` is on, told by its text alone, to name in a
-/// sentence: on Windows its drive ("E:") or its network share
-/// ("\\server\share"); elsewhere the first folder under the root ("/srv"),
-/// or "/" for the root itself. A mount point is not looked up. None for a
-/// relative path. Reads nothing.
+/// The drive `path` is on, told by its text alone, to name in a sentence:
+/// on Windows its drive ("E:") or its network share ("\\server\share").
+/// None for a path without one (relative, `\code`, a device path), and
+/// always on other systems, where a mount point cannot be told from the
+/// text. Reads nothing.
 pub fn volume_root(path: &Path) -> Option<String> {
     use std::path::Component;
-    let mut parts = path.components();
-    match parts.next()? {
+    match path.components().next()? {
         #[cfg(windows)]
         Component::Prefix(prefix) => {
             use std::path::Prefix;
@@ -983,10 +982,6 @@ pub fn volume_root(path: &Path) -> Option<String> {
                 _ => None,
             }
         }
-        Component::RootDir if !cfg!(windows) => match parts.next() {
-            Some(Component::Normal(first)) => Some(format!("/{}", first.to_string_lossy())),
-            _ => Some("/".to_owned()),
-        },
         _ => None,
     }
 }
@@ -3725,12 +3720,15 @@ refs/remotes/fork/dev\tiii\t\t
             );
             assert_eq!(volume_root(Path::new(r"code\api")), None);
         } else {
-            assert_eq!(
-                volume_root(Path::new("/srv/code/api")),
-                Some("/srv".to_owned())
-            );
-            assert_eq!(volume_root(Path::new("/")), Some("/".to_owned()));
+            // A mount point cannot be told from the text: no root is named.
+            assert_eq!(volume_root(Path::new("/srv/code/api")), None);
+            assert_eq!(volume_root(Path::new("/")), None);
             assert_eq!(volume_root(Path::new("code/api")), None);
+        }
+        if cfg!(windows) {
+            // A root without a drive, and a device path: no drive to name.
+            assert_eq!(volume_root(Path::new(r"\code")), None);
+            assert_eq!(volume_root(Path::new(r"\\.\C:")), None);
         }
         assert_eq!(volume_root(Path::new("")), None);
     }
@@ -3751,6 +3749,22 @@ refs/remotes/fork/dev\tiii\t\t
         assert!(taken.contains("there already"), "{taken}");
         let inside = move_checkout(&old, &old.join("deeper").join("api"), |_, _| {}).unwrap_err();
         assert!(inside.contains("into itself"), "{inside}");
+        // Inside it by a name that differs only in case: the same folder on Windows.
+        let upper = PathBuf::from(old.display().to_string().to_uppercase())
+            .join("deeper")
+            .join("api");
+        let cased = move_checkout(&old, &upper, |_, _| {});
+        if cfg!(windows) {
+            assert!(
+                cased.as_ref().is_err_and(|err| err.contains("into itself")),
+                "{cased:?}"
+            );
+        } else {
+            assert!(
+                !cased.as_ref().is_err_and(|err| err.contains("into itself")),
+                "{cased:?}"
+            );
+        }
         assert!(old.join(".git").exists());
 
         // The folder it goes into is made when it is not there yet.
