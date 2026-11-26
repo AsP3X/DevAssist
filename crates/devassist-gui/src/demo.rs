@@ -707,9 +707,9 @@ mod tests {
         shows_what_it_claims(window, name);
     }
 
-    /// Whether the last frame painted a text that starts with `words`.
+    /// Whether the last frame painted the text `words`, whole.
     fn painted(window: &Window, words: &str) -> bool {
-        window.texts.iter().any(|(said, _, _)| said.starts_with(words))
+        window.texts.iter().any(|(said, _, _)| said == words)
     }
 
     /// Checks that the overlay `name` of [`walked_overlays`] shows what its step presses: Add failed its Retry and the
@@ -1265,6 +1265,7 @@ mod tests {
                 }
                 _ => {
                     tap(window, Key::Tab, None);
+                    assert!(window.add_retry_focused(), "Retry in Add: Tab did not give Retry the keys");
                     tap(window, Key::Enter, None);
                 }
             }

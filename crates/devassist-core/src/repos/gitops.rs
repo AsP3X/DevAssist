@@ -1097,8 +1097,8 @@ pub fn move_checkout(
 /// junctions followed. None when it cannot be told: nothing of a path
 /// exists, or it cannot be read.
 ///
-/// On Windows the drive letters or network shares are compared; a volume
-/// mounted into a folder, or a drive made with `subst`, is not seen. On
+/// On Windows the drive letters or network shares of the canonical paths
+/// are compared; a volume mounted into a folder is not seen. On
 /// Unix the devices are compared. It asks the disk, which for a network
 /// share can take seconds.
 pub fn same_volume(a: &Path, b: &Path) -> Option<bool> {

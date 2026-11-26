@@ -74,7 +74,7 @@ fn cancel_id() -> Id {
 }
 
 /// The id of the Retry button.
-fn retry_id() -> Id {
+pub(super) fn retry_id() -> Id {
     Id::unique("dialog-add-retry")
 }
 

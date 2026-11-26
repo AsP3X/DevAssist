@@ -260,6 +260,11 @@ impl Window {
         self.plan.as_ref().map(Plan::whole)
     }
 
+    /// Whether the Add dialog's Retry button has the keyboard's focus.
+    pub(crate) fn add_retry_focused(&self) -> bool {
+        self.ctx.memory(|memory| memory.has_focus(add::retry_id()))
+    }
+
     /// The Add dialog's Retry button in the last frame, while GitHub failed.
     pub(crate) fn add_retry(&self) -> Option<Rect> {
         match self.plan.as_ref()?.0 {
@@ -394,9 +399,13 @@ pub(crate) fn until(window: &mut Window, what: &str, done: impl Fn(&Window) -> b
     }
 }
 
-/// A window on the live repositories of `settings`, `count` of them, read and fetched.
+/// A window on the live repositories of `settings`, `count` of them, read and fetched. GitHub is held
+/// (`testing::hold_github`): no test that uses it asks `gh auth token` or GitHub anything; the checkouts' origins are
+/// folders on this disk. A test that needs GitHub asked makes its window itself.
 pub(crate) fn live(settings: Settings, count: usize) -> Window {
-    let mut window = Window::new(Session::Live(Box::new(Repos::new(settings))));
+    let mut repos = Repos::new(settings);
+    devassist_core::repos::state::testing::hold_github(&mut repos);
+    let mut window = Window::new(Session::Live(Box::new(repos)));
     until(&mut window, "read and fetched", |window| !window.repos().waiting() && window.repos().installed.len() == count);
     assert!(!window.open());
     window
