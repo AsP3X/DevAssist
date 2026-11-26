@@ -62,6 +62,11 @@ What changed in each version of DevAssist. The format follows
   branch and tag there, without forcing anything. The repository keeps
   GitHub as its origin, and the address is kept as a remote named after the
   host, so the copy can be brought up to date again.
+- **The forks of one repository can be updated from the menu.** The line
+  **Clone the forks** (`n`) reads **Update the forks** once the forks of the
+  highlighted or ticked repositories are cloned. It always did that when
+  chosen again, but nothing said so. **Update all cloned forks** (`a`) is now
+  **Update the forks of all repositories**.
 - **Pushing to another service takes every pull request and the newest
   branches along.** It fetches from GitHub first, so branches and pull
   requests that were not fetched yet are not left behind, and pushes each

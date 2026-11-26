@@ -322,7 +322,7 @@ impl MenuItem {
             (MenuItem::PullRequests, _) => "Fetch the pull requests",
             (MenuItem::Forks, _) => "Clone the forks",
             (MenuItem::ShowForks, _) => "Show the forks",
-            (MenuItem::AllForks, _) => "Update all cloned forks",
+            (MenuItem::AllForks, _) => "Update the forks of all repositories",
             (MenuItem::Migrate, _) => "Migrate ▸",
             (MenuItem::Open, false) => "Open the folder",
             (MenuItem::Open, true) => "Open the folders",
@@ -457,6 +457,19 @@ pub struct Menu {
     pub selected: usize,
     /// The Migrate submenu is open, with this line highlighted.
     pub migrate: Option<usize>,
+    /// Every repository it is about has its forks cloned beside it.
+    pub forks_cloned: bool,
+}
+
+impl Menu {
+    /// What a line says in this menu.
+    pub fn label(&self, item: MenuItem) -> &'static str {
+        match item {
+            // Choosing it again fetches what is new, so it says so.
+            MenuItem::Forks if self.forks_cloned => "Update the forks",
+            item => item.label(self.repos.len() > 1),
+        }
+    }
 }
 
 /// The dialog that moves repositories into a group or renames a group.
@@ -1500,10 +1513,16 @@ impl Repos {
             self.notice("Select a repository first.", true);
             return;
         }
+        let forks_cloned = self
+            .installed
+            .iter()
+            .filter(|repo| repos.contains(&repo.folder))
+            .all(|repo| gitops::forks_cloned(&repo.path));
         self.menu = Some(Menu {
             repos,
             selected: 0,
             migrate: None,
+            forks_cloned,
         });
         self.mode = Mode::Menu;
     }
@@ -5625,6 +5644,37 @@ mod tests {
         );
         app.accept_group();
         assert_eq!(app.installed[0].group, "Tools");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_menu_offers_to_update_the_forks_of_a_repository_that_has_them_cloned() {
+        let (mut app, root) = held_app("menu-forks");
+        app.enter_row();
+        let menu = app.menu.as_ref().unwrap();
+        assert_eq!(menu.label(MenuItem::Forks), "Clone the forks");
+        let folder = menu.repos[0].clone();
+        app.close_menu();
+
+        // Its forks are cloned beside it: the same line now updates them.
+        let path = app
+            .installed
+            .iter()
+            .find(|repo| repo.folder == folder)
+            .unwrap()
+            .path
+            .clone();
+        let forks = gitops::forks_folder(&path).unwrap();
+        std::fs::create_dir_all(forks.join(".git")).unwrap();
+        app.enter_row();
+        let menu = app.menu.as_ref().unwrap();
+        assert_eq!(menu.label(MenuItem::Forks), "Update the forks");
+        assert_eq!(
+            menu.label(MenuItem::AllForks),
+            "Update the forks of all repositories"
+        );
+        assert_eq!(menu.label(MenuItem::Open), "Open the folder");
+        let _ = std::fs::remove_dir_all(&forks);
         let _ = std::fs::remove_dir_all(&root);
     }
 

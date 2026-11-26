@@ -1187,7 +1187,7 @@ fn draw_menu(frame: &mut Frame, app: &mut App, screen: Rect) {
         None => MenuItem::ALL
             .iter()
             .map(|item| menu::Entry {
-                label: item.label(many),
+                label: menu.label(*item),
                 key: item.key(),
                 warn: *item == MenuItem::Remove,
             })
@@ -2933,6 +2933,7 @@ mod tests {
             repos: vec!["docs".into()],
             selected: 1,
             migrate: None,
+            forks_cloned: false,
         });
         app.mode = Mode::Menu;
         let screen = render(&mut app, 120, 30);
@@ -2955,6 +2956,17 @@ mod tests {
                 .filter(|(_, name)| name.starts_with("menu:"))
                 .count(),
             MenuItem::ALL.len()
+        );
+
+        // With the forks cloned, the line that clones them updates them.
+        assert!(screen.contains("Clone the forks"), "{screen}");
+        app.menu.as_mut().unwrap().forks_cloned = true;
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("Update the forks "), "{screen}");
+        assert!(!screen.contains("Clone the forks"), "{screen}");
+        assert!(
+            screen.contains("Update the forks of all repositories"),
+            "{screen}"
         );
 
         // The submenu takes the place of the lines, and says where it is.
@@ -2995,6 +3007,7 @@ mod tests {
             repos: vec!["api".into(), "docs".into(), "web".into()],
             selected: 0,
             migrate: None,
+            forks_cloned: false,
         });
         let screen = render(&mut app, 120, 30);
         assert!(screen.contains("╭ 3 repositories "));

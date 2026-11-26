@@ -293,20 +293,26 @@ something else is left alone. Only commits are saved: titles and comments of
 pull requests are not. GitHub lists at most 10,000 forks of one repository
 here.
 
-### Updating them all
+### Updating them
 
-**Update all cloned forks** in the actions menu (`Enter`, then `a`) brings
-every `-fork` folder up to date in one go: the forks of each repository on
-the overview that has them cloned. What is highlighted or ticked does not
-matter, and a repository whose forks were never cloned is left out.
+Once the forks of a repository are cloned, its line in the actions menu
+reads **Update the forks** instead of **Clone the forks**, on the same key
+(`Enter`, then `n`). It brings the forks of the highlighted repository up to
+date, or of every ticked one, and also brings in forks made since. `u` in
+the fork overview does the same for the repository shown there.
+
+**Update the forks of all repositories** in the actions menu (`Enter`, then
+`a`) brings every `-fork` folder up to date in one go: the forks of each
+repository on the overview that has them cloned. What is highlighted or
+ticked does not matter, and a repository whose forks were never cloned is
+left out.
 
 An update is much quicker than the first run. GitHub says for each fork when
 it was last pushed to and how many pull requests it has open, and a fork
 where both are as they were is not fetched again: of hundreds of forks only
 the few that changed are. Those are fetched eight at a time, as they are the
 first time. The result says how many forks there are and how many were
-fetched now. **Clone the forks** on a repository that has its folder already
-does the same for that one, and also brings in forks made since.
+fetched now.
 
 A fork that could not be fetched is tried again every time. A pull request
 opened on a fork from a third repository is seen with the fork's next push
@@ -372,8 +378,8 @@ ticked, update, remove, open and move-to-group act on all of them.
 - Auto-pull on or off
 - Fetch the pull requests
 - Show the forks
-- Clone the forks
-- Update all cloned forks
+- Clone the forks, or Update the forks once they are cloned
+- Update the forks of all repositories
 - Migrate, which opens a submenu
 - Remove
 
