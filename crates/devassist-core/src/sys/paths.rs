@@ -27,10 +27,72 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
     plain(left) == plain(right)
 }
 
+/// `path` with its `.` and `..` worked out by the text alone, the way
+/// Windows reads them: `C:\code\x\..\api\.` is `C:\code\api`. A `..` at
+/// the root stays at the root; one that a relative path starts with
+/// stays. On Windows `\\?\C:\code` is written `C:\code` and
+/// `\\?\UNC\server\share` is `\\server\share`. Reads nothing: a link or
+/// a junction is not followed.
+pub fn tidy(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    // How many plain names `out` ends with, which a `..` can take back.
+    let mut names = 0usize;
+    for part in path.components() {
+        match part {
+            Component::Prefix(prefix) => out.push(plain_prefix(prefix)),
+            Component::RootDir => out.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir if names > 0 => {
+                out.pop();
+                names -= 1;
+            }
+            Component::ParentDir => {
+                if !out.has_root() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(name) => {
+                out.push(name);
+                names += 1;
+            }
+        }
+    }
+    out
+}
+
+/// A path's prefix without the `\\?\` that only tells Windows to read the
+/// rest as it is.
+#[cfg(windows)]
+fn plain_prefix(prefix: std::path::PrefixComponent<'_>) -> std::ffi::OsString {
+    use std::path::Prefix;
+    match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => format!("{}:", char::from(letter)).into(),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut text = std::ffi::OsString::from(r"\\");
+            text.push(server);
+            text.push(r"\");
+            text.push(share);
+            text
+        }
+        _ => prefix.as_os_str().to_os_string(),
+    }
+}
+
+/// Other systems have no prefix in a path.
+#[cfg(not(windows))]
+fn plain_prefix(prefix: std::path::PrefixComponent<'_>) -> std::ffi::OsString {
+    prefix.as_os_str().to_os_string()
+}
+
 /// Whether `path` is `folder` or lies inside it, comparing as `same_path`
-/// does: case does not count on Windows.
+/// does: case does not count on Windows. Both are read with their `.` and
+/// `..` worked out first (`tidy`), by the text alone.
 pub fn is_within(path: &Path, folder: &Path) -> bool {
-    path.ancestors().any(|above| same_path(above, folder))
+    let folder = tidy(folder);
+    tidy(path)
+        .ancestors()
+        .any(|above| same_path(above, &folder))
 }
 
 /// Adds `path` unless it is listed already. True when it was added.
@@ -75,6 +137,33 @@ mod tests {
             is_within(Path::new("/srv/Code/API/sub"), api),
             cfg!(windows)
         );
+    }
+
+    #[test]
+    fn dots_are_worked_out_by_the_text_alone() {
+        let same = |a: &str, b: &str| assert!(same_path(&tidy(Path::new(a)), Path::new(b)), "{a}");
+        same("/srv/code/api/.", "/srv/code/api");
+        same("/srv/code/x/../api", "/srv/code/api");
+        same("/srv/code/api/../other.git", "/srv/code/other.git");
+        same("/srv/./code//api/", "/srv/code/api");
+        same("/../srv", "/srv");
+        same("a/../../b", "../b");
+        // Inside the checkout or not, as the dots say.
+        let api = Path::new("/srv/code/api");
+        assert!(is_within(Path::new("/srv/code/api/."), api));
+        assert!(is_within(Path::new("/srv/code/x/../api"), api));
+        assert!(is_within(Path::new("/srv/code/x/../api/sub/.."), api));
+        assert!(!is_within(Path::new("/srv/code/api/../other.git"), api));
+        assert!(is_within(api, Path::new("/srv/code/api/sub/..")));
+        if cfg!(windows) {
+            same(r"\\?\C:\code\api", r"C:\code\api");
+            same(r"\\?\UNC\server\share\api", r"\\server\share\api");
+            same(r"C:\code\api\..\..\..", r"C:\");
+            assert!(is_within(
+                Path::new(r"\\?\C:\code\api"),
+                Path::new(r"c:\code\api")
+            ));
+        }
     }
 
     #[test]

@@ -38,6 +38,18 @@ What changed in each version of DevAssist. The format follows
   the terminal app too.
 - After a cancelled push the status line says that what was already sent stays
   on the other service and that the address was not kept.
+- A move onto another drive whose old folder cannot be deleted completely no
+  longer ends as "Moved": it ends with a fault that names the folder left
+  behind, and its progress dialog stays open until it is closed. A partial
+  copy that cannot be removed after a cancelled or failed copy is named the
+  same way. The settings follow the copy, which is complete. This holds in the
+  terminal app too.
+- A push to another service refuses the repository itself however its folder
+  is written: with `.` or `..` in it, as a `file://` address, as `\\?\C:\…`,
+  or through a link or a junction. A `file://` address must name a folder that
+  exists, as a path does.
+- Moving and copying onto another drive keeps a symbolic link as a link on
+  Linux and macOS, and refuses a pipe or a socket instead of waiting on it.
 
 ## [0.7.0] - 2026-11-26
 

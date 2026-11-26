@@ -1864,9 +1864,11 @@ impl Repos {
             let mut moved = 0;
             let mut stayed = 0;
             let mut failed = Vec::new();
+            // What was left on the disk that should not have been.
+            let mut left: Vec<String> = Vec::new();
             for (index, (name, from)) in repos.iter().enumerate() {
                 if process::was_cancelled() {
-                    return Err("cancelled".into());
+                    return Err(cancelled_leaving(&left));
                 }
                 send(tx, JobEvent::Start(index));
                 let Some(to) = move_target(&dir, from) else {
@@ -1890,32 +1892,29 @@ impl Repos {
                             from: from.clone(),
                             to,
                         });
-                        if let Some(warning) = &warning {
-                            send_line(tx, warning, false);
-                        }
-                        send(tx, JobEvent::Done(index, "moved".into()));
+                        let note = match warning {
+                            Some(warning) => {
+                                send_line(tx, &warning, false);
+                                left.push(warning);
+                                "moved, the old folder stayed"
+                            }
+                            None => "moved",
+                        };
+                        send(tx, JobEvent::Done(index, note.into()));
                     }
                     Err(err) => {
+                        if let Some((_, rest)) = err.split_once(". The partial copy at ") {
+                            left.push(format!("The partial copy at {rest}"));
+                        }
                         failed.push(name.clone());
                         send(tx, JobEvent::Failed(index, err));
                     }
                 }
             }
-            if !failed.is_empty() {
-                return Err(format!(
-                    "Moved {moved}, {} failed: {}",
-                    failed.len(),
-                    failed.join(", ")
-                ));
+            if process::was_cancelled() {
+                return Err(cancelled_leaving(&left));
             }
-            Ok(match (moved, stayed) {
-                (0, _) => format!("{named} is in {} already.", dir.display()),
-                (_, 0) => format!("Moved {named} to {}.", dir.display()),
-                _ => format!(
-                    "Moved {moved} to {}. {stayed} already there.",
-                    dir.display()
-                ),
-            })
+            moved_words(&named, &dir, (moved, stayed), &failed, &left)
         });
     }
 
@@ -4514,13 +4513,72 @@ impl Repos {
     }
 }
 
+/// How a move of `named` into `dir` ended: `moved` and `stayed` count
+/// the checkouts moved and those that were there already. With checkouts
+/// that `failed`, or with something `left` on the disk that should not be
+/// there (an old folder that could not be deleted, a partial copy that
+/// could not be removed), it is an error, which the progress dialog keeps
+/// open and the status line shows whole.
+fn moved_words(
+    named: &str,
+    dir: &Path,
+    (moved, stayed): (usize, usize),
+    failed: &[String],
+    left: &[String],
+) -> Result<String, String> {
+    let mut words = if failed.is_empty() {
+        match (moved, stayed) {
+            (0, _) => format!("{named} is in {} already.", dir.display()),
+            (_, 0) => format!("Moved {named} to {}.", dir.display()),
+            _ => format!(
+                "Moved {moved} to {}. {stayed} already there.",
+                dir.display()
+            ),
+        }
+    } else {
+        format!(
+            "Moved {moved}, {} failed: {}",
+            failed.len(),
+            failed.join(", ")
+        )
+    };
+    for sentence in left {
+        if !words.ends_with('.') {
+            words.push('.');
+        }
+        words.push(' ');
+        words.push_str(sentence);
+    }
+    if failed.is_empty() && left.is_empty() {
+        Ok(words)
+    } else {
+        Err(words)
+    }
+}
+
+/// The error of a run that was cancelled with something `left` on the
+/// disk: the status line says "Cancelled." and then what was left.
+fn cancelled_leaving(left: &[String]) -> String {
+    if left.is_empty() {
+        "cancelled".to_string()
+    } else {
+        format!("{CANCELLED_LEAVING}{}", left.join(" "))
+    }
+}
+
+/// How the error of a cancelled run starts that has more to say.
+const CANCELLED_LEAVING: &str = "cancelled. ";
+
 /// What the status line says when a run ends with `result`: "Cancelled."
 /// when it was `cancelled`, and for a `push` to another service also what
 /// stays there; else its message, or its error (true).
 fn finished_words(result: Result<String, String>, cancelled: bool, push: bool) -> (String, bool) {
     match result {
         Err(_) if cancelled && push => (PUSH_CANCELLED.to_string(), false),
-        Err(_) if cancelled => ("Cancelled.".to_string(), false),
+        Err(err) if cancelled => match err.strip_prefix(CANCELLED_LEAVING) {
+            Some(left) => (format!("Cancelled. {left}"), true),
+            None => ("Cancelled.".to_string(), false),
+        },
         Ok(message) => (message, false),
         Err(err) => (err, true),
     }
@@ -6647,6 +6705,83 @@ mod tests {
                 line("api", &api, Some(there.join("api")), false, false),
                 line("api-copy", &copy, Some(there.join("api")), false, true),
             ]
+        );
+    }
+
+    #[test]
+    fn a_move_that_leaves_the_old_folder_says_so_and_stays_on_screen() {
+        let temp = Temp::new("move-left");
+        let root = temp.0.clone();
+        let old = root.join("here").join("api");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("readme"), "api").unwrap();
+        let there = root.join("there");
+        let settings = Settings {
+            config_path: root.join("devassist.toml"),
+            ..test_settings()
+        };
+        let mut app = Repos::empty(settings);
+        let mut repo = installed("acme", "api");
+        repo.path = old.clone();
+        app.checkouts.push(old.clone());
+        app.installed.push(repo);
+        gitops::seams::as_if_another_drive(&old);
+        gitops::seams::refuse(&old);
+
+        app.move_checkouts(vec![("api".into(), old.clone())], there.clone());
+        finish(&mut app);
+        let words = format!(
+            "Moved api to {}. The old folder {} could not be deleted: refused by the test.",
+            there.display(),
+            old.display()
+        );
+        assert_eq!(app.status, words);
+        assert!(app.status_error, "it is said as a fault");
+        let job = app.job.as_ref().unwrap();
+        assert_eq!(job.result, Some(Err(words)));
+        assert!(app.job_close_at.is_none(), "the dialog waits to be closed");
+        // The copy is complete: it is the repository now.
+        assert!(app.checkouts.contains(&there.join("api")));
+        assert!(!app.checkouts.contains(&old));
+        assert!(there.join("api").join("readme").is_file());
+    }
+
+    #[test]
+    fn what_a_move_left_is_said_after_how_it_went() {
+        let dir = Path::new("/srv/new");
+        let old = "The old folder /srv/old/api could not be deleted: busy.".to_string();
+        assert_eq!(
+            moved_words("api", dir, (1, 0), &[], &[]),
+            Ok("Moved api to /srv/new.".into())
+        );
+        assert_eq!(
+            moved_words(
+                "2 repositories",
+                dir,
+                (2, 0),
+                &[],
+                std::slice::from_ref(&old)
+            ),
+            Err(format!("Moved 2 repositories to /srv/new. {old}"))
+        );
+        assert_eq!(
+            moved_words(
+                "2 repositories",
+                dir,
+                (1, 0),
+                &["web".into()],
+                std::slice::from_ref(&old)
+            ),
+            Err(format!("Moved 1, 1 failed: web. {old}"))
+        );
+        let partial = "The partial copy at /srv/new/web could not be removed: busy.";
+        assert_eq!(
+            finished_words(Err(cancelled_leaving(&[partial.into()])), true, false),
+            (format!("Cancelled. {partial}"), true)
+        );
+        assert_eq!(
+            finished_words(Err(cancelled_leaving(&[])), true, false),
+            ("Cancelled.".into(), false)
         );
     }
 

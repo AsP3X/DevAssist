@@ -742,11 +742,17 @@ itself is a run with a progress dialog. Its Cancel is looked at between
 repositories and between the files of a copy, so the file being copied is
 finished first. What was moved before stays moved. The original of a
 repository is not touched until its copy is complete, so it is never lost;
-a copy that was cancelled is removed again. If that removal fails, for
-instance because a file is held open, the partial copy stays at the target
-without a message, and a later move there says "is there already": look at
-the target folder then. Once a copy is complete, deleting the original is not
-interrupted. The repositories stay on the list.
+a copy that was cancelled or failed is removed again. If that removal fails,
+for instance because a file is held open, the partial copy stays at the
+target and the run says so: "The partial copy at E:\work\api could not be
+removed: …", in the progress dialog and on the status line. Once a copy is
+complete, deleting the original is not interrupted. If the original cannot be
+deleted completely, the copy is the repository from then on (the list and the
+settings follow it), and the run ends with a fault that names the folder left
+behind: "Moved api to E:\work. The old folder D:\code\api could not be
+deleted: …". The progress dialog then stays open until you close it, and the
+status line keeps the sentence. Delete what is left of the old folder
+yourself. The repositories stay on the list.
 
 ### Pushing a repository to another service
 

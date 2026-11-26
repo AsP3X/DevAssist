@@ -641,38 +641,145 @@ fn pull_prefix(branches: &[String]) -> &'static str {
 /// that exists, for a bare repository on a disk: a relative path is
 /// refused, since Git would read it from inside the checkout, and so is
 /// the checkout itself or a folder inside it. Anything Git would read as
-/// an option or as a command to run does not pass.
+/// an option or as a command to run does not pass. A `file://` address is
+/// a folder like a path is, and is checked as one.
 pub fn push_address(input: &str, checkout: &Path) -> Result<String, String> {
+    match read_push_address(input, checkout)? {
+        PushAddress::Remote(url) => Ok(url),
+        PushAddress::Folder(url, folder) if folder.is_dir() => Ok(url),
+        PushAddress::Folder(..) => Err(NOT_AN_ADDRESS.into()),
+    }
+}
+
+/// The name the remote of an address typed for the checkout at `checkout`
+/// would get (`remote_name_for`), once the text can be an address: told
+/// by the text alone, so a folder named is not looked for. None while
+/// `push_address` would refuse it for its text.
+pub fn push_remote_name(input: &str, checkout: &Path) -> Option<(String, String)> {
+    let url = match read_push_address(input, checkout).ok()? {
+        PushAddress::Remote(url) | PushAddress::Folder(url, _) => url,
+    };
+    Some((remote_name_for(&url), url))
+}
+
+const NOT_AN_ADDRESS: &str = "That is not an address Git can push to. It looks like https://host/you/name.git or git@host:you/name.git.";
+
+const PUSH_TO_ITSELF: &str = "That folder is this repository itself, or inside it.";
+
+/// An address to push to, as its text reads.
+enum PushAddress {
+    /// On another machine.
+    Remote(String),
+    /// A folder on this one: the address as typed, and the folder it names.
+    Folder(String, PathBuf),
+}
+
+/// What `push_address` checks by the text alone: everything but whether
+/// a folder named is there.
+fn read_push_address(input: &str, checkout: &Path) -> Result<PushAddress, String> {
     let url = input.trim();
     if url.is_empty() {
         return Err("Type the address of the empty repository on the other service.".into());
     }
     let lower = url.to_ascii_lowercase();
-    let scheme = ["https://", "http://", "ssh://", "file://"]
+    let scheme = ["https://", "http://", "ssh://"]
         .iter()
         .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len());
     let plain =
         !url.starts_with('-') && !url.chars().any(|ch| ch.is_control() || ch.is_whitespace());
-    let refused = || {
-        Err("That is not an address Git can push to. It looks like https://host/you/name.git or git@host:you/name.git.".into())
-    };
     if !plain {
-        return refused();
+        return Err(NOT_AN_ADDRESS.into());
     }
     if scheme || scp_host(url).is_some() {
-        return Ok(url.to_string());
+        return Ok(PushAddress::Remote(url.to_string()));
     }
-    let folder = Path::new(url);
+    let folder = match file_url_path(url) {
+        Some(Some(folder)) => folder,
+        Some(None) => return Err(NOT_AN_ADDRESS.into()),
+        None => PathBuf::from(url),
+    };
     if !folder.is_absolute() {
         return Err("Type the full path of the folder, or the address of the repository.".into());
     }
-    if paths::is_within(folder, checkout) {
-        return Err("That folder is this repository itself, or inside it.".into());
+    if paths::is_within(&folder, checkout) {
+        return Err(PUSH_TO_ITSELF.into());
     }
-    if folder.is_dir() {
-        Ok(url.to_string())
+    Ok(PushAddress::Folder(url.to_string(), folder))
+}
+
+/// The folder a `file://` address names, as Git reads it: `file:///srv/x`
+/// is `/srv/x`, `file:///C:/x` is `C:\x` on Windows, a host before the
+/// path (other than `localhost`) is a network share, and `%20` is a
+/// space. None when `url` is no file address; Some(None) when it is one
+/// that names no folder.
+fn file_url_path(url: &str) -> Option<Option<PathBuf>> {
+    let scheme = "file://";
+    if !url.get(..scheme.len())?.eq_ignore_ascii_case(scheme) {
+        return None;
+    }
+    let rest = &url[scheme.len()..];
+    let Some(rest) = percent_decoded(rest) else {
+        return Some(None);
+    };
+    let rest = match rest.get(..10) {
+        Some(host) if host.eq_ignore_ascii_case("localhost/") => rest[9..].to_string(),
+        _ => rest,
+    };
+    // `C:/x` is a drive on Windows; elsewhere the path is as it is.
+    let drive = |text: &str| {
+        let bytes = text.as_bytes();
+        cfg!(windows) && bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+    };
+    let path = if let Some(local) = rest.strip_prefix('/') {
+        if drive(local) {
+            local.to_string()
+        } else {
+            rest
+        }
+    } else if drive(&rest) {
+        rest
+    } else if rest.is_empty() {
+        return Some(None);
     } else {
-        refused()
+        // A host: the share `//host/share/x`.
+        format!("//{rest}")
+    };
+    Some(Some(PathBuf::from(path)))
+}
+
+/// `text` with each `%XX` read as the byte it stands for. None when that
+/// is no text, or a `%` is not followed by two hex digits.
+fn percent_decoded(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = text.get(index + 1..index + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The check `push_address` makes by the text, made again by the folders
+/// the disk has: a link, a junction, a short name or a `\\?\` path that
+/// is the checkout, or a folder inside it, is refused. A folder that is
+/// not there (or a remote address) passes; Git then says what it finds.
+fn push_target_is_checkout(url: &str, checkout: &Path) -> bool {
+    let folder = match file_url_path(url) {
+        Some(Some(folder)) => folder,
+        Some(None) => return false,
+        None if scp_host(url).is_some() || url.contains("://") => return false,
+        None => PathBuf::from(url),
+    };
+    match (folder.canonicalize(), checkout.canonicalize()) {
+        (Ok(folder), Ok(checkout)) => paths::is_within(&folder, &checkout),
+        _ => false,
     }
 }
 
@@ -792,6 +899,11 @@ pub fn migrate_to(
     mut on_line: impl FnMut(&str, bool),
 ) -> Result<Migrated, String> {
     let url = push_address(url, path)?;
+    // By the disk, before anything is fetched or pushed: the text may
+    // name the checkout by a link or another spelling.
+    if push_target_is_checkout(&url, path) {
+        return Err(PUSH_TO_ITSELF.into());
+    }
     let same = |a: &str, b: &str| {
         let tidy = |text: &str| {
             text.trim()
@@ -939,7 +1051,9 @@ pub fn migrate_to(
 /// Moves a checkout to `to`, a path that must be free. On the same drive
 /// that is a rename; onto another drive everything is copied first and
 /// the original deleted after. A warning comes back when the copy is
-/// complete but the original could not be deleted.
+/// complete but the original could not be deleted, as a sentence: "The
+/// old folder D:\code\api could not be deleted: <why>." The copy is the
+/// checkout then.
 ///
 /// `on_line` hears what is going on, the way Git reports a transfer: while
 /// copying, a line with a percentage and the files done out of all.
@@ -960,6 +1074,10 @@ pub fn move_checkout(
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
+    }
+    #[cfg(any(test, feature = "testing"))]
+    if seams::far(from) {
+        return copy_then_delete(from, to, &mut on_line);
     }
     match fs::rename(from, to) {
         Ok(()) => return Ok(None),
@@ -1040,7 +1158,9 @@ fn same_device(_: &Path, _: &Path) -> Option<bool> {
 }
 
 /// The slow way to move a folder: copies everything to `to`, a path that
-/// is free, and deletes `from` once the copy is complete.
+/// is free, and deletes `from` once the copy is complete. When the copy
+/// fails or is cancelled, what was copied is removed again; when that
+/// cannot be done either, the error says so.
 fn copy_then_delete(
     from: &Path,
     to: &Path,
@@ -1069,17 +1189,35 @@ fn copy_then_delete(
     if let Err(err) = copy_tree(from, to, &mut |_| copied(on_line)) {
         // Leave nothing half-copied behind; the original is untouched.
         on_line("Removing what was copied so far…", true);
-        let _ = remove_tree(to);
-        return Err(format!("could not copy to {}: {err}", to.display()));
+        let mut text = format!("could not copy to {}: {err}", to.display());
+        if let Err(left) = delete_tree(to) {
+            text.push_str(&format!(
+                ". The partial copy at {} could not be removed: {}",
+                to.display(),
+                sentence(&left.to_string())
+            ));
+        }
+        return Err(text);
     }
     on_line(&format!("Copied {total} files."), false);
     on_line("Deleting the old folder…", true);
-    Ok(remove_tree(from).err().map(|err| {
+    Ok(delete_tree(from).err().map(|err| {
         format!(
-            "copied, but the old folder {} could not be deleted: {err}",
-            from.display()
+            "The old folder {} could not be deleted: {}",
+            from.display(),
+            sentence(&err.to_string())
         )
     }))
+}
+
+/// `text` ending as a sentence does, with one full stop.
+fn sentence(text: &str) -> String {
+    let text = text.trim_end();
+    if text.ends_with('.') {
+        text.to_string()
+    } else {
+        format!("{text}.")
+    }
 }
 
 /// How many files a folder holds, with everything below it. What cannot
@@ -1114,10 +1252,35 @@ fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(
             .map_err(|err| format!("{}: {err}", source.display()))?;
         if kind.is_dir() {
             copy_tree(&source, &target, on_file)?;
-        } else {
-            fs::copy(&source, &target).map_err(|err| format!("{}: {err}", source.display()))?;
-            on_file(&source);
+            continue;
         }
+        // A link stays a link, and what is no file is not read: a pipe
+        // would wait for a writer for ever.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if kind.is_symlink() {
+                let points_at =
+                    fs::read_link(&source).map_err(|err| format!("{}: {err}", source.display()))?;
+                std::os::unix::fs::symlink(&points_at, &target)
+                    .map_err(|err| format!("{}: {err}", target.display()))?;
+                on_file(&source);
+                continue;
+            }
+            if kind.is_fifo() || kind.is_socket() || kind.is_block_device() || kind.is_char_device()
+            {
+                return Err(format!(
+                    "{} is not a file or a folder, so it cannot be copied",
+                    source.display()
+                ));
+            }
+        }
+        #[cfg(any(test, feature = "testing"))]
+        if seams::refused(&source) {
+            return Err(format!("{}: {}", source.display(), seams::refusal()));
+        }
+        fs::copy(&source, &target).map_err(|err| format!("{}: {err}", source.display()))?;
+        on_file(&source);
     }
     Ok(())
 }
@@ -2996,7 +3159,7 @@ fn run_git(
     })
 }
 
-pub(crate) fn remove_tree(path: &Path) -> Result<(), String> {
+fn delete_tree(path: &Path) -> std::io::Result<()> {
     fn clear_readonly(path: &Path) {
         #[cfg(windows)]
         {
@@ -3042,7 +3205,69 @@ pub(crate) fn remove_tree(path: &Path) -> Result<(), String> {
             fs::remove_file(path)
         }
     }
-    rec(path).map_err(|err| format!("could not delete {}: {err}", path.display()))
+    #[cfg(any(test, feature = "testing"))]
+    if seams::refused(path) {
+        return Err(seams::refusal());
+    }
+    rec(path)
+}
+
+/// Deletes a folder with everything in it, read-only files too, without
+/// following a link inside it.
+pub(crate) fn remove_tree(path: &Path) -> Result<(), String> {
+    delete_tree(path).map_err(|err| format!("could not delete {}: {err}", path.display()))
+}
+
+/// Test-only ways to make the disk refuse, without locking real files.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod seams {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// What the seams act on, by path. Tests run side by side, each with
+    /// folders of its own, so a path names one test's case.
+    struct Set {
+        refused: Vec<PathBuf>,
+        far: Vec<PathBuf>,
+    }
+
+    static SET: Mutex<Set> = Mutex::new(Set {
+        refused: Vec::new(),
+        far: Vec::new(),
+    });
+
+    fn with<T>(act: impl FnOnce(&mut Set) -> T) -> T {
+        let mut set = SET
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        act(&mut set)
+    }
+
+    /// From now on, deleting the folder `path` fails, and so does copying
+    /// the file `path`.
+    pub fn refuse(path: &Path) {
+        with(|set| set.refused.push(path.to_path_buf()));
+    }
+
+    /// From now on, moving the folder `path` copies and deletes it, as onto
+    /// another drive.
+    pub fn as_if_another_drive(path: &Path) {
+        with(|set| set.far.push(path.to_path_buf()));
+    }
+
+    pub(super) fn refused(path: &Path) -> bool {
+        with(|set| set.refused.iter().any(|known| known == path))
+    }
+
+    pub(super) fn far(path: &Path) -> bool {
+        with(|set| set.far.iter().any(|known| known == path))
+    }
+
+    /// The error a refused path gives.
+    pub(super) fn refusal() -> std::io::Error {
+        std::io::Error::other("refused by the test")
+    }
 }
 
 fn first_line(text: &str) -> String {
@@ -3526,9 +3751,111 @@ refs/remotes/fork/dev\tiii\t\t
         );
     }
 
+    /// Deletes a test's folder when the test ends, also by a panic.
+    struct Gone(PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = remove_tree(&self.0);
+        }
+    }
+
+    /// A `file://` address for a folder on this disk.
+    fn file_address(path: &Path) -> String {
+        let text = path.display().to_string().replace('\\', "/");
+        if text.starts_with('/') {
+            format!("file://{text}")
+        } else {
+            format!("file:///{text}")
+        }
+    }
+
+    #[test]
+    fn a_folder_spelled_another_way_is_still_the_checkout() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-push-spell-{}", std::process::id()));
+        let _gone = Gone(root.clone());
+        let checkout = root.join("api");
+        let other = root.join("other.git");
+        for dir in [&checkout.join("sub"), &other, &root.join("x")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let itself = "That folder is this repository itself, or inside it.";
+        let sep = std::path::MAIN_SEPARATOR;
+        let api = checkout.display().to_string();
+        let mut spellings = vec![
+            format!("{api}{sep}."),
+            format!("{}{sep}x{sep}..{sep}api", root.display()),
+            format!("{api}{sep}sub{sep}..{sep}sub"),
+            file_address(&checkout),
+            file_address(&checkout.join("sub")),
+            format!("{}/.", file_address(&checkout)),
+        ];
+        if cfg!(windows) {
+            spellings.push(format!(r"\\?\{api}"));
+        }
+        for spelling in &spellings {
+            assert_eq!(
+                push_address(spelling, &checkout).unwrap_err(),
+                itself,
+                "{spelling}"
+            );
+        }
+        // Out of the checkout by its dots: another folder, which is taken.
+        let beside = format!("{api}{sep}..{sep}other.git");
+        assert_eq!(push_address(&beside, &checkout).unwrap(), beside);
+        let address = file_address(&other);
+        assert_eq!(push_address(&address, &checkout).unwrap(), address);
+        // A file address is a folder like any other: one that is not there
+        // is no address.
+        assert!(push_address(&file_address(&root.join("nothing")), &checkout).is_err());
+    }
+
+    #[test]
+    fn a_link_to_the_checkout_is_found_before_anything_is_pushed() {
+        let root = std::env::temp_dir().join(format!("devassist-push-link-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let checkout = root.join("api");
+        fs::create_dir_all(checkout.join("sub")).unwrap();
+        let link = root.join("link");
+        // A junction on Windows (no rights needed), a symbolic link elsewhere.
+        #[cfg(windows)]
+        let made = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&checkout)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&checkout, &link).is_ok();
+        assert!(made, "the link could not be made");
+        // The text passes: it names another folder.
+        let address = link.display().to_string();
+        assert_eq!(push_address(&address, &checkout).unwrap(), address);
+        // The push itself looks, and pushes nothing.
+        let itself = "That folder is this repository itself, or inside it.";
+        for target in [link.clone(), link.join("sub")] {
+            for typed in [target.display().to_string(), file_address(&target)] {
+                let mut lines = 0;
+                assert_eq!(
+                    migrate_to(&checkout, &typed, None, |_, _| lines += 1).unwrap_err(),
+                    itself,
+                    "{typed}"
+                );
+                assert_eq!(lines, 0, "nothing was fetched or pushed");
+            }
+        }
+        // The checkout reached through the link is the same checkout.
+        assert_eq!(
+            migrate_to(&link, &checkout.display().to_string(), None, |_, _| {}).unwrap_err(),
+            itself
+        );
+    }
+
     #[test]
     fn a_folder_to_push_to_is_a_full_path_outside_the_checkout() {
         let root = std::env::temp_dir().join(format!("devassist-push-path-{}", std::process::id()));
+        let _gone = Gone(root.clone());
         let checkout = root.join("api");
         let inside = checkout.join("sub");
         let target = root.join("target.git");
@@ -3557,7 +3884,6 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(push_address(&address, &checkout).unwrap(), address);
         // A full path that is no folder is no address.
         assert!(push_address(&root.join("nothing").display().to_string(), &checkout).is_err());
-        let _ = remove_tree(&root);
     }
 
     #[test]
@@ -3872,6 +4198,98 @@ refs/remotes/fork/dev\tiii\t\t
         // Never more lines than percents, however many files there are.
         assert!(lines.len() <= 110, "{}", lines.len());
         let _ = remove_tree(&root);
+    }
+
+    #[test]
+    fn what_a_move_onto_another_drive_leaves_behind_is_said() {
+        let root = std::env::temp_dir().join(format!("devassist-move-left-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let old = root.join("old").join("api");
+        fs::create_dir_all(old.join("src")).unwrap();
+        fs::write(old.join("readme"), "api").unwrap();
+        fs::write(old.join("src").join("main.rs"), "fn main() {}").unwrap();
+
+        // The copy is complete, the original cannot be deleted: a warning
+        // that names it, and the copy is whole.
+        let new = root.join("new").join("api");
+        seams::refuse(&old);
+        seams::as_if_another_drive(&old);
+        let warning = move_checkout(&old, &new, |_, _| {}).unwrap();
+        assert_eq!(
+            warning,
+            Some(format!(
+                "The old folder {} could not be deleted: refused by the test.",
+                old.display()
+            ))
+        );
+        assert_eq!(
+            fs::read_to_string(new.join("src").join("main.rs")).unwrap(),
+            "fn main() {}"
+        );
+
+        // A copy that fails leaves nothing behind, and says nothing more.
+        let broken = root.join("broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join("a"), "a").unwrap();
+        fs::write(broken.join("b"), "b").unwrap();
+        seams::refuse(&broken.join("b"));
+        let far = root.join("far");
+        let err = copy_then_delete(&broken, &far, &mut |_, _| {}).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "could not copy to {}: {}: refused by the test",
+                far.display(),
+                broken.join("b").display()
+            )
+        );
+        assert!(!far.exists(), "the partial copy is removed");
+        assert!(broken.join("b").exists(), "the original is untouched");
+
+        // One whose partial copy cannot be removed either says that too.
+        let stuck = root.join("stuck");
+        seams::refuse(&stuck);
+        let err = copy_then_delete(&broken, &stuck, &mut |_, _| {}).unwrap_err();
+        assert!(
+            err.ends_with(&format!(
+                ". The partial copy at {} could not be removed: refused by the test.",
+                stuck.display()
+            )),
+            "{err}"
+        );
+        assert!(stuck.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_keeps_links_as_links_and_refuses_a_pipe() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-copy-links-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let from = root.join("from");
+        fs::create_dir_all(&from).unwrap();
+        fs::write(from.join("file"), "x").unwrap();
+        std::os::unix::fs::symlink("file", from.join("link")).unwrap();
+        std::os::unix::fs::symlink("/nowhere/at/all", from.join("dangling")).unwrap();
+        let to = root.join("to");
+        copy_tree(&from, &to, &mut |_| {}).unwrap();
+        assert_eq!(fs::read_link(to.join("link")).unwrap(), Path::new("file"));
+        assert_eq!(
+            fs::read_link(to.join("dangling")).unwrap(),
+            Path::new("/nowhere/at/all")
+        );
+
+        let piped = root.join("piped");
+        fs::create_dir_all(&piped).unwrap();
+        let made = Command::new("mkfifo")
+            .arg(piped.join("pipe"))
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(made, "mkfifo");
+        let err = copy_tree(&piped, &root.join("piped-copy"), &mut |_| {}).unwrap_err();
+        assert!(err.contains("is not a file or a folder"), "{err}");
     }
 
     #[test]
