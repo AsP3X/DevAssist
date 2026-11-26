@@ -6,6 +6,39 @@ What changed in each version of DevAssist. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The window can add repositories.** `a`, or **Add repository** in the top
+  row, opens a dialog that searches your accounts on GitHub, lists another
+  account for `owner/` or a pasted link, ticks several repositories and clones
+  them into a folder. A repository that is ticked and then hidden by a changed
+  search is still cloned, and the dialog names it. **Retry** asks GitHub
+  again after an error.
+- **The window can import clones you already have.** `i`, or **Import** in
+  the top row, adds the GitHub clones in a folder, and the folder itself, to
+  the list. Nothing on disk is changed.
+- The folder fields of the window's dialogs show the folders that match what
+  you type, under the field: `↓` and `↑` choose one, `Enter` takes it and
+  `Esc` closes them. There is no `Tab` completion and no folder picker yet.
+- **The window can move repositories to another folder.** The dialog lists
+  where each one goes, says "is there already" or "cannot move there" for the
+  ones that will not move, and counts only the ones that will. Its Cancel
+  stops the move without losing the original.
+- **The window can push a repository to another Git service.** The dialog
+  asks for the address and lists what goes over and what does not.
+- **Migrate** is in the window's row menu, with **Move to another folder…**
+  and **Push to another service…** in a side menu.
+- `devassist-gui --demo --show` also opens `migrate`, `add`, `add-folder`,
+  `import`, `move` and `push`.
+
+### Changed
+
+- A push to another service to a local folder needs the folder's full path,
+  and the folder cannot be the repository itself or inside it. This holds in
+  the terminal app too.
+- After a cancelled push the status line says that what was already sent stays
+  on the other service and that the address was not kept.
+
 ## [0.7.0] - 2026-11-26
 
 The forks of a repository can be cloned, shown and updated, a repository can

@@ -31,10 +31,11 @@ cargo run -- --config scratch.toml
 
 `devassist-gui` is a second program, a window in a "liquid glass" design. It
 shows your repositories and acts on them: update, watch, open, group and
-remove. What the program does by itself it also does here: it fetches every
-repository when it starts, and it pulls the repositories you watch when their
-interval is over, as the terminal app does (see the window in
-[USAGE.md](USAGE.md)). It is not in the installers or the release downloads.
+remove, and it adds, imports, moves and pushes them. What the program does
+by itself it also does here: it fetches every repository when it starts, and
+it pulls the repositories you watch when their interval is over, as the
+terminal app does (see the window in [USAGE.md](USAGE.md)). It is not in the
+installers or the release downloads.
 
 ```
 cargo run -p devassist-gui
@@ -56,7 +57,7 @@ frosted instead.
 | `--no-blur` | Does not blur the backdrop |
 | `--no-sidebar` | Opens with the sidebar hidden |
 | `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder, no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. All work is held (see below). |
-| `--show NAME` | With `--demo` only: opens `progress`, `remove`, `group` or `menu` at start, so a picture can show it |
+| `--show NAME` | With `--demo` only: opens one menu or dialog at start, so a picture can show it. The names are `progress`, `remove`, `group`, `menu`, `migrate` (the menu with its side menu), `add`, `add-folder` (Add with the folder field's suggestions showing), `import`, `move` and `push` |
 
 At start the window reads `theme`, `backdrop` and `blur` from the settings
 file. It cannot change them yet. A settings file with a mistake makes the
@@ -119,6 +120,9 @@ About the tests:
   temporary folder and remove them again.
 - Screen tests draw the interface into an in-memory terminal and check the
   text, so no real terminal is needed.
+- No test starts the window on your real settings. The window's tests use the
+  demo, or the core's `testing` helpers on temporary folders, and a picture of
+  the window is taken with `--demo`.
 - No test talks to GitHub, opens a browser or touches the clipboard. The one
   exception is marked `#[ignore]` and only runs when asked for: it downloads
   the latest release and checks it against its checksum.
@@ -268,14 +272,18 @@ use. The root package turns it on as a dev-dependency.
 | `src/repos_view.rs` | What each row of the table says, decided from the core's state |
 | `src/columns.rs` | Where the table's columns sit for a row of any width |
 | `src/table.rs` | Draws the table and says what was clicked |
-| `src/widgets.rs` | The small pieces the screens are drawn with: checkbox, cut-off text, capsule of actions, text field |
+| `src/widgets.rs` | The small pieces the screens are drawn with: checkbox, cut-off text, capsule of actions, text field, and the folder field with its suggestions (`folder_field`) |
 | `src/repos_screen.rs` | The Repositories screen: its toolbar, its keys and what it shows when there is no table |
 | `src/overlay.rs` | What every menu and dialog shares: the shield, the scrim, the pane's glass, the buttons and how Tab walks them |
-| `src/menu.rs` | The row's menu: its lines, in the core's words and keys |
+| `src/menu.rs` | The row's menu: its lines, in the core's words and keys, and the side menu of Migrate (its pane is placed by `overlay.rs`) |
 | `src/dialogs/mod.rs` | The bridge from the core's mode to the overlay, and the parts the dialogs share |
 | `src/dialogs/progress.rs` | The progress of a run |
 | `src/dialogs/remove.rs` | The question before repositories are forgotten or deleted |
 | `src/dialogs/group.rs` | Moving repositories into a group, and renaming a group |
+| `src/dialogs/add.rs` | Add: the search, the found repositories, the folder to clone into |
+| `src/dialogs/folder.rs` | The folder question: Import, and Move with its rows of what moves |
+| `src/dialogs/push.rs` | Push to another service: the address and what a push does |
+| `src/dialogs/testing.rs` | A test-only module: the dialogs' tests share its window, held run and temporary checkouts |
 | `src/app.rs` | The window and its drawing loop |
 | `src/screenshot.rs` | `--screenshot`: saves a picture of the window |
 | `src/contrast.rs` | A test-only module that checks every text's contrast on all six backdrops |

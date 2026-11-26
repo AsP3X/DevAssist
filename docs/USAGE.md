@@ -435,10 +435,19 @@ on the list as before. The address is kept as one more remote, named after the
 host (`gitlab`, `codeberg`), so doing it again later brings the copy up to
 date, and `git push gitlab` works in a terminal.
 
+A local folder works as an address too, for a bare repository on a disk: it
+must be given by its full path, and it cannot be the repository itself or a
+folder inside it. A path that is not a full one is refused.
+
+If you cancel a push, the status line says that what was already sent stays
+on the other service and that the address was not kept.
+
 What it does not do:
 
-- It never forces. If the other repository already holds different commits,
-  the push is refused and nothing there is overwritten.
+- It never forces a branch or a tag. If the other repository holds commits
+  that the branch being pushed lacks, the push stops with an error, and what
+  was sent before it stays. The branches of pull requests are the one thing
+  that is replaced there, since they follow what the pull request is now.
 - It does not create the repository on the other service, and it does not
   delete or archive the one on GitHub.
 - Pull requests, issues, releases and wikis are not part of a Git repository
@@ -508,12 +517,15 @@ behind and ahead. Above the table are a filter, the sort and, once something
 is ticked, how many are ticked, with a button that clears the ticks.
 
 From the window you can update, watch, open, group and remove the repositories
-that are on the list. Add, Import, the forks, Migrate and Settings are still
-done in the terminal app. Folding a group is saved to the settings file, as in
+that are on the list, add repositories from GitHub, import clones you already
+have, move repositories to another folder and push one to another Git
+service. The forks, with everything about them, and Settings are still done in
+the terminal app. Folding a group is saved to the settings file, as in
 the terminal app, and so are clones it takes over from an older place at
 start. What the program does by itself it also does here: it fetches when it
 starts, and it pulls the repositories you watch when their interval is over.
-With no repositories it says so and points to the terminal app. With a
+With no repositories it says "No repositories yet" and names Add repository
+and Import. With a
 settings file that has a mistake it shows the mistake and loads nothing.
 
 | Key | What it does |
@@ -525,6 +537,8 @@ settings file that has a mistake it shows the mistake and loads nothing.
 | `Space` | Tick or untick the highlighted row and move down |
 | `Ctrl-A` | Tick every row shown |
 | `Enter` | Open the menu of the highlighted row, as its "…" does; on a group's header, fold the group (with rows ticked, open the menu for them) |
+| `a` | Open Add, to find repositories on GitHub and clone them |
+| `i`, `I` | Open Import, to add the clones in a folder |
 | `u` | Update the ticked rows, or the highlighted row (all of a highlighted group) |
 | `U` | Update every repository |
 | `w` | Turn the automatic pull on or off for the ticked rows, or the highlighted row |
@@ -540,17 +554,19 @@ settings file that has a mistake it shows the mistake and loads nothing.
 `U` is a capital letter. With Caps Lock on, `u` types `U` and updates every
 repository, as it does in the terminal app. A key that acts, such as `u`, `w`
 or `d`, acts once when it is held down. `w`, `o`, `m`, `l` and `s` also take
-their capital letter; `d` only the small one.
+their capital letter; `i` takes `I`; `a` and `d` only the small one.
 
 A click on a row highlights it, on its box ticks it, on a group's header
 highlights and folds it, and on the box in the head ticks every row shown. A
 row's "…" opens its menu. If the row is not ticked, the menu is for that row
 alone and the other ticks are cleared; if it is ticked, the menu is for every
-ticked row. In the top row, beside the window's own buttons, "Update all"
-updates every repository. Once something is ticked, a bar above the table says
-how many, with Update, Move to group, Open folder and Remove, and a button that
-clears the ticks. A double click on a button acts once. A double click on a row
-does not update, as it does in the terminal app.
+ticked row. In the top row, beside the window's own buttons, "Import"
+opens Import, "Update all" updates every repository, and "Add repository"
+opens Add; they are there with no repositories too. In a narrow window the
+buttons show their icons only. Once something is ticked, a bar above the table
+says how many, with Update, Move to group, Open folder and Remove, and a
+button that clears the ticks. A double click on a button acts once. A double
+click on a row does not update, as it does in the terminal app.
 
 While the filter has the keyboard, `↑` `↓` and `PgUp` `PgDn` still move the
 highlight. `Home` and `End` belong to the text. `Tab` keeps the keyboard in the
@@ -574,13 +590,14 @@ menu:
 | Copy the path (the paths) | `c` |
 | Auto-pull on or off | `w` |
 | Fetch the pull requests | `p` |
+| Migrate | `t` |
 | Remove… | `d` |
 
 `↑` `↓` (or `k` `j`) move the highlight and stop at the ends. `Home` and `End`
 go to the first and the last line. `Enter` runs the highlighted line, a line's
 key runs that line, and `Esc` or `q` closes the menu. A click on a line runs
-it; a click outside the menu closes it and goes no further. The menu leaves
-out the forks' three lines and Migrate.
+it; a click outside the menu closes it and goes no further. Migrate opens a
+side menu (see below). The menu leaves out the forks' three lines.
 
 ### The dialogs
 
@@ -620,12 +637,187 @@ deletion from disk or the automatic pull, stops with `Esc` on the list. A
 second `Esc` after closing a dialog stops a running deletion or automatic
 pull; a held `Esc` does nothing more than its first press.
 
+### Adding repositories
+
+`a`, or "Add repository" in the top row, opens "Add a repository". Its search
+field has the keyboard. Under it a line says how things stand: how many
+repositories are listed and how many of them you have cloned, "Loading
+repositories from GitHub…" while GitHub is asked, or GitHub's own error.
+With an error, a Retry button beside the line asks GitHub again.
+
+- Type to search the list. A search has no spaces, so `Space` is never typed
+  there.
+- Type `owner/` or paste a link to an account to list all of its
+  repositories. Type `owner/name` or paste a repository link to add exactly
+  that one. When nothing in your list matches a plain word, the box offers
+  "List github.com/" and the word: a click on it, or `Enter`, lists that
+  account.
+- `↑` `↓` move the highlight. `Space` ticks the highlighted row, so you can
+  tick several; so does a click on the row's box. A click elsewhere on a row
+  highlights it.
+- A repository you have cloned already is greyed out, marked "Installed" and
+  cannot be ticked. Others are marked "archived" or "private" where they are.
+- "Clone into" holds the folder. It starts with the folder you used last.
+  `~` is your home folder, and a folder that does not exist yet is created.
+  In that field `Space` types, and the folder field's own keys work (see
+  below).
+- The main button says what it will clone: "Clone 2 repositories" for what is
+  ticked, else "Clone" and the name of the highlighted repository. It is off
+  while there is nothing to clone. `Enter` presses it, in the search and in
+  the folder field.
+
+A repository that is ticked stays ticked when you change the search so that
+the list no longer shows it, and it is cloned all the same. A line above the
+buttons names those ("Also ticked: owner/a, owner/b and 3 more"), and the
+button counts them.
+
+When the folder cannot be used, the dialog stays open and says why under the
+field. Otherwise it closes and the progress dialog shows the clones. Each
+repository goes into a folder of its own, named after it, inside the one you
+chose; one that is there already as a clone of the same repository is put on
+the list instead. `Esc`, Cancel and a click outside the dialog close it.
+
+### Importing clones
+
+`i`, or "Import" in the top row, opens "Import clones you already have". Its
+field "Folder" starts with the folder you cloned into last. Every GitHub
+clone directly inside the folder you name is put on the list, and so is the
+folder itself if it is one. Nothing on disk is changed. The status line says
+how many were added, that everything there was on the list already, or that
+the folder holds no GitHub clones. When the folder cannot be used, the dialog
+stays open and says why under the field.
+
+### The folder field
+
+Add's "Clone into", Import's "Folder" and Move's "Move into" are one kind of
+field. A folder is given by its full path, or from `~`.
+
+While the field has the keyboard, the folders that match what you typed show
+under it: those whose names start with the last part of the text, whatever
+the case, up to forty. Six rows show at a time; the wheel scrolls the rest.
+
+| Key | Does |
+|---|---|
+| `↓` | Light the first suggestion, then the next; it stops at the last |
+| `↑` | Light the one above; from the first, back into the field |
+| `Enter` | With a suggestion lit, take it: the text becomes that folder with a separator at its end, so you can go on into it. With none lit, `Enter` is the dialog's |
+| `Esc` | Close the suggestions; they come back when the text changes. A second `Esc` closes the dialog |
+
+A click on a suggestion takes it. A long folder is cut from the left so its
+last name shows, and all of it shows when you point at it. There is no `Tab`
+completion in the window (`Tab` moves between a dialog's controls) and no
+folder picker of the system.
+
+### Moving repositories
+
+**Migrate**, then **Move to another folder…**, asks for a folder and moves the
+chosen repositories into it. The dialog's title names them ("Move api and web
+to another folder", "Move 5 repositories to another folder"), and its field
+"Move into" starts at the folder the first one is in. Each repository keeps
+its folder name, its group, the automatic pull and the saved pull requests.
+
+Under the field a box has a row for each repository: where it
+is now, an arrow and where it goes. A row can say:
+
+- "is there already": it is in that folder already, and stays where it is.
+- "cannot move there": something is at its place already, an earlier row of
+  this move goes to the same place, or the folder lies inside the repository
+  itself. The other rows still move.
+
+While the folder you typed cannot be used, the rows show only the folder
+names, and the line under the field gives the reason. When it can be used,
+that line is the hint "A folder that does not exist yet is created." When the
+window can tell that the move takes repositories to another drive, a note
+says so ("E: is another drive."), that everything is copied first and the
+original is deleted only after the copy is complete, and that programs with
+files of the repositories open should be closed first.
+
+The main button counts only the rows that move: "Move" for one, "Move 3
+repositories" for three. It is off while none can move. `Enter` in the field
+presses it. Cancel, `Esc` and a click outside close the dialog. The move
+itself is a run with a progress dialog, and its Cancel stops the move safely.
+What was moved before stays moved. A repository that is being copied to
+another drive is left as it was, because its original is deleted only after
+its copy is complete, and what was copied so far is removed again. The
+repositories stay on the list.
+
+### Pushing a repository to another service
+
+**Migrate**, then **Push to another service…**, opens "Push NAME to another
+service" for one repository. Push takes one repository at a time: with
+several chosen, the status line says "Select one repository: each needs an
+address of its own."
+
+Make an empty repository on the other service first, without a README. Then
+type or paste its address in "Address of the new repository":
+
+- `https://gitlab.com/you/name.git`, or another `https://`, `http://`,
+  `ssh://` or `file://` address.
+- `git@codeberg.org:you/name.git`.
+- A local folder, for a bare repository on a disk: give its full path. The
+  folder must exist, and it cannot be the repository itself or a folder inside
+  it. A path that is not a full one is refused.
+
+DevAssist asks for no password. The push signs in with what Git already has
+for that host, a saved login or an SSH key. If Git cannot sign in, push to
+that address once in a terminal so Git can ask and remember.
+
+The box under the field lists what a push does, each line with a check, and
+what it leaves as it is or does not do, each with a cross. The list is the
+same for every repository, except that the fourth line names the remote once
+an address is typed.
+
+- Every branch and tag goes over. A branch goes as origin has it where the one
+  here is behind it or missing, otherwise as it is here.
+- Origin, if there is one, is fetched first. When it cannot be reached, what
+  is saved here goes.
+- Every GitHub pull request, open, merged or closed, goes over as a branch
+  `pull/<number>` (under another name if `pull` is taken here), replaced on
+  every push.
+- The repository here keeps its files and its origin, and keeps the address as
+  a remote named after its host, such as `gitlab`. A remote of that name that
+  it has already is pointed at the new address.
+- With a cross: apart from those pull-request branches, nothing there is
+  overwritten or deleted. A branch there only moves forward, so no commit
+  there is lost.
+- With a cross: when a branch there has commits that the pushed one lacks, or
+  a tag there differs from the pushed one, the push stops with an error part
+  of the way, before the address is kept.
+- With a cross: no pull request is opened there, and no issue, comment or
+  release goes over.
+
+"Push" is off while the address is empty. `Enter` in the field, or "Push",
+pushes. A push cannot be undone on the other service, so only a fresh press
+made inside the dialog pushes: not the `Enter` or the click that opened it,
+and not a held key. When the address is refused, the dialog stays open and
+says why under the field until the text changes. Otherwise it closes and the
+progress dialog shows what Git sends. If you cancel the push, the status line
+says that what was already sent stays on the other service and that the
+address was not kept.
+
+### Migrate in the menu
+
+In the row's menu, **Migrate** (`t`) opens a side menu beside it with two
+lines: **Move to another folder…** (`f`) and **Push to another service…**
+(`s`). `Enter`, `→`, `t` or a click on Migrate opens it. In it `↑` `↓` (or
+`k` `j`) move the highlight and stop at the ends. `Enter`, a line's letter or
+a click runs the line. `←`, `Esc` or `q` close it and leave the menu open; a
+second `Esc` closes the menu. While the side menu is open, the menu's own
+letters do nothing, and the pointer moving over another line of the menu
+closes it.
+
+Migrate acts on the ticked rows when the menu was opened on a ticked row, and
+otherwise on that row alone. Move takes all of them. Push takes one.
+
 ### The demo
 
 `--demo` holds all work. Every menu and dialog opens, but nothing is run,
 opened, copied or written, and the status line says "This is a demo. Nothing is
 run or changed." With `--demo --show NAME` the window opens with one of them
-already open: `progress`, `remove`, `group` or `menu`.
+already open: `progress`, `remove`, `group`, `menu`, `migrate` (the menu with
+its side menu), `add`, `add-folder` (Add with the folder field's suggestions
+showing), `import`, `move` or `push`. The demo reads no folder and runs no
+Git, so its folders are made up and its move changes nothing.
 
 ## Docker
 
