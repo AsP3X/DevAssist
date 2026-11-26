@@ -636,7 +636,7 @@ struct Shot {
 /// "private", the status line, the note), searched so that a tick is hidden ("Also ticked") with the folder refused
 /// (the danger note), and with GitHub failed and a plain word typed (the status line in the danger colour, "Retry",
 /// the row that lists the account).
-const SHOTS: [Shot; 15] = [
+const SHOTS: [Shot; 16] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -700,17 +700,17 @@ const SHOTS: [Shot; 15] = [
         },
     },
     Shot {
-        // The pointer on portal's row: an installed row under the hover's fill (artcraft is highlighted). Searched
-        // for "por" (portal, and artcraft's "exporting"), so portal's row is in view in the smallest window too.
+        // Searched for "p": api (installed, resting), artcraft (highlighted), artcraft-plugins (hovered), so all are
+        // in view in the smallest window too. An ordinary row under the hover's fill.
         name: "add hovered",
-        over: Over::Hovering(1),
-        set_up: |repos| {
-            demo::show(repos, "add").unwrap();
-            repos.set_add_filter("por");
-            let found: Vec<String> = repos.add_list().iter().map(|remote| remote.id()).collect();
-            assert_eq!(found, ["acme/artcraft", "acme/portal"], "the hovered row is not the installed portal");
-            assert_eq!(repos.add_selected.as_deref(), Some("acme/artcraft"), "the hovered row is the highlighted one");
-        },
+        over: Over::Hovering(2),
+        set_up: set_up_pointing,
+    },
+    Shot {
+        // The same, the pointer resting on the installed api: it draws no hover, and its words are measured there.
+        name: "add pointer on installed",
+        over: Over::Hovering(0),
+        set_up: set_up_pointing,
     },
     Shot {
         name: "add searched and refused",
@@ -732,6 +732,16 @@ const SHOTS: [Shot; 15] = [
         },
     },
 ];
+
+/// The demo's Add dialog searched for "p", for the shots that point at its rows: acme/api (installed),
+/// acme/artcraft (highlighted), acme/artcraft-plugins (ordinary), then more.
+fn set_up_pointing(repos: &mut Repos) {
+    demo::show(repos, "add").unwrap();
+    repos.set_add_filter("p");
+    let found: Vec<String> = repos.add_list().iter().map(devassist_core::repos::github::RemoteRepo::id).take(3).collect();
+    assert_eq!(found, ["acme/api", "acme/artcraft", "acme/artcraft-plugins"], "the rows pointed at are not these");
+    assert_eq!(repos.add_selected.as_deref(), Some("acme/artcraft"));
+}
 
 /// The window sizes a shot is drawn at: the design's, and for an overlay also the smallest the window allows, where
 /// a dialog lies over the sidebar as well as the table.
@@ -1088,16 +1098,20 @@ fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Re
     }
 }
 
-/// Checks that the hovered row `index` of the Add list in the frame `last` of the shot `name`, at the window `size`
-/// in `mode`, is whole inside the list and that the frame fills it with the hover's fill: the shot measures a
-/// hovered row, not a resting one.
+/// Checks that the row `index` of the Add list the pointer rests on in the frame `last` of the shot `name`, at the
+/// window `size` in `mode`, is whole inside the list, and that the frame fills it with the hover's fill when it is an
+/// ordinary row and not when it is installed (an installed row shows no hover): the shot measures what it says.
 fn hover_lands(name: &str, last: &Frame, index: usize, size: egui::Vec2, mode: Mode) {
     let found_box = last.found_box.unwrap_or_else(|| panic!("{name}: no Add list"));
-    let (row, _) = last.rows[index];
-    assert!(found_box.contains_rect(row), "{name} at {size:?}: the hovered row {row:?} is not inside the list {found_box:?}");
+    let (row, installed) = last.rows[index];
+    assert!(found_box.contains_rect(row), "{name} at {size:?}: the pointed row {row:?} is not inside the list {found_box:?}");
     let hover = theme::palette(mode).on_glass.gamma_multiply(HOVER_OPACITY);
     let filled = last.shapes.iter().any(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == hover && row.contains_rect(rect.rect)));
-    assert!(filled, "{name} at {size:?}: no hover fill drawn on the hovered row");
+    if installed {
+        assert!(!filled, "{name} at {size:?}: a hover fill drawn on an installed row");
+    } else {
+        assert!(filled, "{name} at {size:?}: no hover fill drawn on the hovered row");
+    }
 }
 
 /// Measures the shot `shot` on `stage`: every text and measured graphic of its overlay, and, on the screen, the

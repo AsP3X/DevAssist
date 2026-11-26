@@ -616,10 +616,10 @@ fn found(
 }
 
 /// Draws the found repository `remote`, the row `index` of `list`, at `row`: on the selection's fill when
-/// `highlighted`, its checkbox (one that takes no click when it is installed), its name over its description, its
-/// note at the right; an installed row set back (its words in the palette's `installed` colours, its checkbox at
-/// [`ADD_INSTALLED_BOX_OPACITY`]). Says whether the row and its checkbox were
-/// clicked.
+/// `highlighted`, else on the hover's fill under the pointer unless it is installed; its checkbox (one that takes no
+/// click when it is installed), its name over its description, its note at the right; an installed row set back
+/// (its words in the palette's `installed` colours, its checkbox at [`ADD_INSTALLED_BOX_OPACITY`]). Says whether
+/// the row and its checkbox were clicked.
 #[expect(clippy::too_many_arguments, reason = "the row, the core and its list, the repository and how it is drawn")]
 fn found_row(
     ui: &mut Ui,
@@ -633,12 +633,14 @@ fn found_row(
 ) -> (bool, bool) {
     let response = ui.interact(row.intersect(ui.clip_rect()), Id::unique(("dialog-add-row", index)), Sense::CLICK);
     let fill = row.shrink2(vec2(ADD_PICK[0], 0.0));
+    let installed = repos.is_installed(remote);
     if highlighted {
         ui.painter().rect_filled(fill, ADD_PICK[1], palette.selection);
-    } else if response.hovered() {
+    } else if response.hovered() && !installed {
+        // An installed row gives no pointer feedback: nothing is done with it by pointing, and a hover over its
+        // set-back words would cost them their contrast (the controller's ruling of 2026-11-26).
         ui.painter().rect_filled(fill, ADD_PICK[1], palette.on_glass.gamma_multiply(HOVER_OPACITY));
     }
-    let installed = repos.is_installed(remote);
     let (ink, quiet) = if installed { (palette.installed, palette.installed_quiet) } else { (palette.on_glass, palette.quiet) };
     let check = Rect::from_min_size(pos2(row.left() + ADD_ROW_PAD, row.top()), vec2(CHECKBOX + ADD_ROW_PAD, row.height()));
     let mut on_box = false;
@@ -1236,5 +1238,33 @@ mod tests {
         window.key(Key::Escape);
         assert!(!window.open());
         assert_eq!(devassist_core::sys::reached(devassist_core::sys::Reach::Network), reached);
+    }
+
+    #[test]
+    fn an_installed_row_shows_no_hover() {
+        let mut window = adding();
+        let hover = crate::theme::palette(crate::theme::Mode::Light).on_glass.gamma_multiply(crate::theme::HOVER_OPACITY);
+        let hovered = |window: &Window, index: usize| {
+            let (centre, _) = row(window, index);
+            let whole = Rect::from_center_size(centre, vec2(parts(window).list.width(), ADD_ROW));
+            window.fills.iter().any(|(rect, fill)| *fill == hover && whole.contains_rect(*rect))
+        };
+        // An ordinary row that is not highlighted shows the hover.
+        let plugins = index_of(&window, "acme/artcraft-plugins");
+        window.frame(vec![Event::PointerMoved(row(&window, plugins).0)]);
+        window.frame(Vec::new());
+        assert!(hovered(&window, plugins), "an ordinary row shows no hover");
+        // An installed row shows none: nothing is done with it by pointing.
+        let api = index_of(&window, "acme/api");
+        window.frame(vec![Event::PointerMoved(row(&window, api).0)]);
+        window.frame(Vec::new());
+        assert!(!hovered(&window, api), "an installed row shows the hover");
+        // A click still highlights it, and the highlight is drawn.
+        window.click(row(&window, api).0);
+        assert_eq!(window.repos().add_selected.as_deref(), Some("acme/api"));
+        let selection = crate::theme::palette(crate::theme::Mode::Light).selection;
+        let (centre, _) = row(&window, api);
+        let whole = Rect::from_center_size(centre, vec2(parts(&window).list.width(), ADD_ROW));
+        assert!(window.fills.iter().any(|(rect, fill)| *fill == selection && whole.contains_rect(*rect)), "the highlight is not drawn");
     }
 }

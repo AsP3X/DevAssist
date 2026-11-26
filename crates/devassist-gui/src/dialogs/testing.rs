@@ -70,6 +70,8 @@ pub(crate) struct Window {
     pub(crate) painted: bool,
     /// The last frame asked for the next one at once.
     pub(crate) repaint: bool,
+    /// The filled rectangles the last frame painted, with their fills.
+    pub(crate) fills: Vec<(Rect, egui::Color32)>,
 }
 
 impl Window {
@@ -84,6 +86,7 @@ impl Window {
             baked: false,
             painted: false,
             repaint: false,
+            fills: Vec::new(),
         }
     }
 
@@ -124,6 +127,14 @@ impl Window {
             painted = ctx.graphics(|layers| layers.get(overlay::layer()).is_some_and(|list| !list.is_empty()));
         });
         self.repaint = output.viewport_output.get(&ViewportId::ROOT).is_some_and(|viewport| viewport.repaint_delay.is_zero());
+        self.fills = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Rect(rect) => Some((rect.rect, rect.fill)),
+                _ => None,
+            })
+            .collect();
         output.drop_without_applying_deltas();
         (self.plan, self.baked, self.painted) = (plan, baked, painted);
     }
