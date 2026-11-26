@@ -1,9 +1,9 @@
 //! The Push dialog ([`super::Which::Push`]), for the core's `Mode::Service`: it pushes a complete copy of one
 //! repository to another Git service, as the design's `15-push` draws it, 600 wide: the header, "Address of the new
 //! repository" over the address field (the link icon, a hint while it is empty), the line under it (that Git signs in,
-//! or the core's reason in the danger colour when it refused the address, wrapped, never cut), "What happens": a box
-//! with the core's facts (`Repos::service_facts`), each with a check (it goes over or is done there) or a cross (it
-//! stays as it is or is not done), and the buttons: Cancel and the main "Push".
+//! or the core's reason in the danger colour when it refused the address, wrapped, never cut), a box with the core's
+//! facts (`Repos::service_facts`), each with a check (it goes over or is done) or a cross (it stays as it is or is not
+//! done), and the buttons: Cancel and the main "Push".
 //!
 //! The field has the focus when the dialog opens. Its text is the core's (`Repos::set_service_input` as it is typed);
 //! when the core changes it, the field follows with the cursor at its end. The facts are asked for when the dialog
@@ -11,7 +11,7 @@
 //! height their wrapped sentences need; in a window too short for that, the box scrolls with the wheel and the buttons
 //! stay in view.
 //!
-//! "Push" is off while the address is empty. Enter in the field and "Push" ask the core to push
+//! "Push" is off while the address is empty. Enter in the field or with nothing focused, and "Push", ask the core to push
 //! (`Repos::accept_service`): when it refuses the address, the dialog stays with the core's reason under the field
 //! until the text changes; else the dialog closes and the push is the core's run, whose progress dialog the bridge
 //! opens. A push to another service cannot be undone there: this dialog is its confirmation, so nothing but a fresh
@@ -225,9 +225,10 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
         ids.push(main_id());
     }
     overlay::walk(ui, &ids);
-    // Enter and Esc are the dialog's, taken before the field sees them: a held key acts once.
+    // Enter and Esc are the dialog's, taken before the field sees them: a held key acts once. Enter in the field or
+    // with nothing focused does what the main button does; on a button, the button takes it.
     let mut done = Done { close: scrim, ..Done::default() };
-    if ui.memory(|memory| memory.has_focus(field_id())) {
+    if ui.memory(|memory| memory.has_focus(field_id()) || memory.focused().is_none()) {
         done.accept |= take_press(ui, Key::Enter, None);
     }
     done.close |= take_press(ui, Key::Escape, None);
@@ -401,7 +402,9 @@ mod tests {
         assert!(window.shows(Which::Push));
         let facts = window.repos().service_facts();
         assert_eq!(state(&window).facts, facts);
-        assert!(facts.last().unwrap().words.ends_with("keeps the address as the remote codeberg."), "{:?}", facts.last());
+        assert_eq!(facts.len(), 7);
+        // The demo's api has only its origin: no remote of that name to point elsewhere.
+        assert_eq!(facts[3].words, "This checkout keeps its files and origin, and keeps the address as the remote codeberg.");
         // Each drawn whole, in the core's order, after its check or cross; the box takes all of them.
         let mut last = 0;
         let mut wrapped = false;
@@ -421,7 +424,7 @@ mod tests {
         // Another address: the core names another remote, and the dialog shows it.
         type_over(&mut window, "https://gitlab.com/acme/api.git");
         assert_eq!(state(&window).facts, window.repos().service_facts());
-        let words = state(&window).facts.last().unwrap().words.clone();
+        let words = state(&window).facts[3].words.clone();
         assert!(words.ends_with("the remote gitlab."), "{words}");
         painted(&window, &words);
     }
@@ -474,6 +477,14 @@ mod tests {
         assert!(window.shows(Which::Push), "the button that is off pushed");
         assert_eq!(error(&window), None);
         assert_ne!(window.repos().status, HELD);
+        // Nor does Enter with nothing focused.
+        window.ctx.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
+        tap(&mut window, Key::Enter, None);
+        assert!(window.shows(Which::Push) && error(&window).is_none(), "Enter without a focus pushed while Push is off");
         // Tab goes from the field to Cancel and back: the button that is off takes no focus.
         let field = parts(&window).field;
         window.click(field.center());
@@ -518,7 +529,7 @@ mod tests {
         window.session.repos_mut().unwrap().set_service_input("https://gitlab.com/acme/api.git");
         window.frame(Vec::new());
         assert_eq!(state(&window).text, "https://gitlab.com/acme/api.git");
-        assert!(state(&window).facts.last().unwrap().words.ends_with("the remote gitlab."));
+        assert!(state(&window).facts[3].words.ends_with("the remote gitlab."));
         tap(&mut window, Key::X, Some("x"));
         assert_eq!(input(&window), "https://gitlab.com/acme/api.gitx", "typing goes on at the end");
     }
@@ -552,9 +563,16 @@ mod tests {
             window.frame(Vec::new());
             assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()), "{modifiers:?}");
         }
-        // A fresh Enter of its own pushes: the held demo refuses the work and says so.
+        // With nothing focused, a fresh Enter of its own pushes: the held demo refuses the work and says so.
+        window.ctx.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
+        window.frame(Vec::new());
+        assert_eq!(window.ctx.memory(Memory::focused), None);
         tap(&mut window, Key::Enter, None);
-        assert!(!window.open());
+        assert!(!window.open(), "Enter without a focus did not push");
         assert_eq!(window.repos().status, HELD);
     }
 

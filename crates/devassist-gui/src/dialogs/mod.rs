@@ -22,7 +22,8 @@
 //! The dialogs: [`progress`], the run the core keeps; [`remove`], which deletes or forgets the chosen
 //! repositories; [`group`], which moves them into a group or renames one; [`add`], which finds repositories on
 //! GitHub and clones the ticked ones into a folder; [`folder`], which asks for a folder whose clones are imported, or
-//! into which the chosen checkouts move (the group, Add and folder dialogs open with the focus in their first field). A dialog with a main button opens with
+//! into which the chosen checkouts move; [`push`], which pushes one repository to another Git service (the group, Add,
+//! folder and Push dialogs open with the focus in their first field). A dialog with a main button opens with
 //! the focus on it, the group dialog with the focus in its name field, the remove dialog (which has no main
 //! button) with no focus at all.
 //!
