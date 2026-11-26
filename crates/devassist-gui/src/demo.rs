@@ -159,7 +159,7 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 8] = [
+pub const SHOWS: [(&str, Opener); 9] = [
     ("progress", show_progress),
     ("remove", show_remove),
     ("group", show_group),
@@ -168,6 +168,7 @@ pub const SHOWS: [(&str, Opener); 8] = [
     (ADD_FOLDER, show_add),
     ("import", show_import),
     ("move", show_move),
+    ("push", show_push),
 ];
 
 /// The name `--show` opens the Add dialog by with the keyboard in its folder field, so a picture shows the folders
@@ -334,6 +335,18 @@ fn show_move(repos: &mut Repos) {
     repos.set_path_input(MOVE_DIR);
 }
 
+/// The made-up address the demo's Push dialog has typed: the drawing's, on Codeberg, for the demo's account.
+pub const PUSH_ADDRESS: &str = "git@codeberg.org:acme/api.git";
+
+/// The drawing's Push dialog for api, opened as the Migrate menu's push line opens it: on the ticked api alone (web's
+/// tick is taken off: each repository goes to an address of its own), with [`PUSH_ADDRESS`] typed. A push asked for
+/// there is refused by the held core, which looks at nothing first: the address names its host.
+fn show_push(repos: &mut Repos) {
+    repos.toggle_mark_of("web");
+    repos.run_migrate(MigrateItem::Service);
+    repos.set_service_input(PUSH_ADDRESS);
+}
+
 #[cfg(test)]
 mod tests {
     use devassist_core::repos::state::Mode;
@@ -367,7 +380,7 @@ mod tests {
         assert!(repos.mode == Mode::Progress && !repos.waiting());
         assert_eq!(
             show(&mut repos, "nothing").unwrap_err(),
-            "--show knows progress, remove, group, menu, add, add-folder, import, move, not nothing"
+            "--show knows progress, remove, group, menu, add, add-folder, import, move, push, not nothing"
         );
     }
 
@@ -411,6 +424,23 @@ mod tests {
             assert_eq!(repos.move_crosses_volumes(), Some(true));
         }
         assert!(repos.work_held());
+    }
+
+    #[test]
+    fn the_demo_opens_push_for_api_with_an_address_typed() {
+        let mut repos = repos();
+        show(&mut repos, "push").unwrap();
+        assert!(repos.mode == Mode::Service);
+        let prompt = repos.service_prompt.as_ref().unwrap();
+        assert_eq!((prompt.repo.as_str(), prompt.input.as_str(), prompt.error.as_ref()), ("api", PUSH_ADDRESS, None));
+        assert_eq!(repos.marked, ["api"]);
+        assert!(repos.work_held());
+        // Pushed: the held core closes it and refuses the work, saying so; the tick stays.
+        repos.accept_service();
+        assert!(repos.mode == Mode::List && repos.service_prompt.is_none());
+        assert_eq!(repos.status, devassist_core::repos::state::HELD);
+        assert!(repos.queue.is_empty() && !repos.busy && repos.job.is_none());
+        assert_eq!(repos.marked, ["api"]);
     }
 
     #[test]
@@ -660,10 +690,10 @@ mod tests {
         }
     }
 
-    /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
-    fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 4]) {
+    /// Each dialog of the walk, as the core opens it on a fresh demo, and its buttons with what each may do.
+    fn walked_dialogs() -> [Dialog; 17] {
         // Forget takes api and web off the list (in memory only); Delete from disk is refused.
-        let dialogs: [Dialog; 14] = [
+        [
             ("add", show_add, &[("Cancel", Expect::Free), ("Clone 2 repositories", Expect::Held)]),
             (
                 "add on one",
@@ -713,6 +743,24 @@ mod tests {
                 },
                 &[("Cancel", Expect::Free), ("Move", Expect::Free)],
             ),
+            // The held core checks the address by its text, then refuses the push: nothing is run or reached.
+            ("push", show_push, &[("Cancel", Expect::Free), ("Push", Expect::Held)]),
+            (
+                "push to an address Git cannot push to",
+                |repos| {
+                    show_push(repos);
+                    repos.set_service_input("my server");
+                },
+                &[("Push", Expect::Free)],
+            ),
+            (
+                "push without an address",
+                |repos| {
+                    show_push(repos);
+                    repos.set_service_input("");
+                },
+                &[("Cancel", Expect::Free), ("Push", Expect::Free)],
+            ),
             ("group", show_group, &[("Cancel", Expect::Free), ("Move", Expect::Free)]),
             (
                 "group into Tools",
@@ -739,7 +787,12 @@ mod tests {
                 },
                 &[("Cancelling…", Expect::Free), ("Hide", Expect::Free)],
             ),
-        ];
+        ]
+    }
+
+    /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
+    fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 4]) {
+        let dialogs = walked_dialogs();
         for (name, open, buttons) in dialogs {
             for (words, expect) in buttons {
                 fresh(window, open);
@@ -757,7 +810,7 @@ mod tests {
             }
         }
         // A click on each dialog's scrim.
-        for open in [show_remove, show_group, show_progress, show_add, show_import, show_move] {
+        for open in [show_remove, show_group, show_progress, show_add, show_import, show_move, show_push] {
             fresh(window, open);
             window.click(pos(30.0, 450.0));
             still_held(window, "a click on the scrim", Expect::Free, before);

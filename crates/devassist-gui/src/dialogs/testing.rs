@@ -13,7 +13,7 @@ use egui::{
     pos2, vec2,
 };
 
-use super::{Dialogs, Parts, Plan, Planned, Which, add, after, before, folder, group, progress, remove, which};
+use super::{Dialogs, Parts, Plan, Planned, Which, add, after, before, folder, group, progress, push, remove, which};
 use crate::baker::Sheet;
 use crate::overlay;
 use crate::repos_screen::{self, Screen};
@@ -72,6 +72,9 @@ pub(crate) struct Window {
     pub(crate) repaint: bool,
     /// The filled rectangles the last frame painted, with their fills.
     pub(crate) fills: Vec<(Rect, egui::Color32)>,
+    /// The texts the last frame painted, in their order: each one's words, where its galley lies, and whether it was
+    /// cut short.
+    pub(crate) texts: Vec<(String, Rect, bool)>,
 }
 
 impl Window {
@@ -87,6 +90,7 @@ impl Window {
             painted: false,
             repaint: false,
             fills: Vec::new(),
+            texts: Vec::new(),
         }
     }
 
@@ -132,6 +136,14 @@ impl Window {
             .iter()
             .filter_map(|clipped| match &clipped.shape {
                 egui::Shape::Rect(rect) => Some((rect.rect, rect.fill)),
+                _ => None,
+            })
+            .collect();
+        self.texts = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.galley.rect.translate(text.pos.to_vec2()), text.galley.elided)),
                 _ => None,
             })
             .collect();
@@ -195,6 +207,7 @@ impl Window {
             // The main button's words are made each frame; a test's copy of them lives as long as the test.
             Parts::Add(places) => (places.buttons, add::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
             Parts::Folder(places) => (places.buttons, folder::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
+            Parts::Push(places) => (places.buttons, push::said(self.repos())),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()

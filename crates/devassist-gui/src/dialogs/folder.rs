@@ -173,8 +173,9 @@ fn under_words(error: Option<&str>, reason: Option<&str>, moving: bool) -> Optio
 }
 
 /// The line under the field, `text`, laid out with `painter`'s faces in `width`: 12-point text at the header's line
-/// height, wrapped to [`UNDER_LINES`] lines at most (a reason is never cut short of that).
-fn under_galley(painter: &Painter, text: &str, width: f32) -> Arc<Galley> {
+/// height, wrapped to [`UNDER_LINES`] lines at most (a reason is never cut short of that). The Push dialog's line under
+/// its field is laid out the same way.
+pub(super) fn under_galley(painter: &Painter, text: &str, width: f32) -> Arc<Galley> {
     let mut job = LayoutJob::simple(text.to_owned(), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, width);
     job.wrap.max_rows = UNDER_LINES;
     for section in &mut job.sections {

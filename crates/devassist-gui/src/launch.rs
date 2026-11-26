@@ -113,7 +113,7 @@ mod tests {
         assert_eq!(args(&["--demo", "--show", "menu"]).unwrap().show.as_deref(), Some("menu"));
         assert_eq!(
             args(&["--demo", "--show", "forks"]).unwrap_err(),
-            "--show knows progress, remove, group, menu, add, add-folder, import, move, not forks"
+            "--show knows progress, remove, group, menu, add, add-folder, import, move, push, not forks"
         );
         assert_eq!(args(&["--demo", "--show"]).unwrap_err(), "--show needs the name of a dialog or menu");
         assert_eq!(args(&["--demo"]).unwrap().show, None);

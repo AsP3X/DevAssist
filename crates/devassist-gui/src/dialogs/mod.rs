@@ -39,6 +39,7 @@ mod add;
 mod folder;
 mod group;
 mod progress;
+mod push;
 mod remove;
 
 use std::sync::Arc;
@@ -72,6 +73,8 @@ pub enum Which {
     /// The folder whose clones are imported, or into which checkouts move (`Mode::Path` for `Purpose::Import` and
     /// `Purpose::Move`).
     Folder,
+    /// The address of another Git service one repository is pushed to (`Mode::Service`).
+    Push,
 }
 
 /// The dialog or the menu `repos`'s mode asks for, if any.
@@ -84,6 +87,7 @@ pub fn which(repos: &Repos) -> Option<Which> {
         CoreMode::Menu if repos.menu.is_some() => Some(Which::Menu),
         CoreMode::Add => Some(Which::Add),
         CoreMode::Path if repos.prompt.as_ref().is_some_and(|prompt| folder::shown(&prompt.purpose)) => Some(Which::Folder),
+        CoreMode::Service if repos.service_prompt.is_some() => Some(Which::Push),
         // The core's own folder question of a clone, which the window never asks for: Add stands for it until
         // `after` closes it, and Add is back.
         CoreMode::Path if repos.prompt.as_ref().is_some_and(|prompt| matches!(prompt.purpose, Purpose::Clone(_))) => Some(Which::Add),
@@ -112,6 +116,9 @@ pub struct Dialogs {
     /// What the folder dialog keeps of its own: the field's text as it last stood, the folders that match it, and a
     /// move's rows. Made when it opens.
     folder: Option<folder::State>,
+    /// What the Push dialog keeps of its own: the field's text as it last stood, and the core's facts for it. Made
+    /// when it opens.
+    push: Option<push::State>,
 }
 
 /// The id of a dialog's main button, the one Enter presses: every dialog's, so that the focus [`sync`] gives it
@@ -143,6 +150,10 @@ pub fn sync(ctx: &Context, repos: Option<&Repos>, dialogs: &mut Dialogs) {
         Some(Which::Folder) => {
             dialogs.folder = repos.map(folder::State::new);
             overlay::open(ctx, Some(folder::field_id()));
+        }
+        Some(Which::Push) => {
+            dialogs.push = repos.map(push::State::new);
+            overlay::open(ctx, Some(push::field_id()));
         }
         None => {}
     }
@@ -285,6 +296,8 @@ enum Parts {
     Add(add::Places),
     /// The folder dialog's.
     Folder(folder::Places),
+    /// The Push dialog's.
+    Push(push::Places),
 }
 
 impl Parts {
@@ -296,6 +309,7 @@ impl Parts {
             Parts::Group(_) => Which::Group,
             Parts::Add(_) => Which::Add,
             Parts::Folder(_) => Which::Folder,
+            Parts::Push(_) => Which::Push,
         }
     }
 
@@ -307,6 +321,7 @@ impl Parts {
             Parts::Group(places) => places.pane,
             Parts::Add(places) => places.pane,
             Parts::Folder(places) => places.pane,
+            Parts::Push(places) => places.pane,
         }
     }
 }
@@ -356,6 +371,7 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Opti
         Which::Group => group::plan(painter, window, repos),
         Which::Add => dialogs.add.as_ref().map(|state| add::plan(painter, window, repos, state)),
         Which::Folder => dialogs.folder.as_ref().and_then(|state| folder::plan(painter, window, repos, state)),
+        Which::Push => dialogs.push.as_ref().and_then(|state| push::plan(painter, window, repos, state)),
         Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(window, anchor)))),
     }
 }
@@ -417,6 +433,7 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
             Planned::Dialog(header, Parts::Group(places)) => group::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Add(places)) => add::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Dialog(header, Parts::Folder(places)) => folder::show(ui, header, *places, repos, palette, dialogs, outside),
+            Planned::Dialog(header, Parts::Push(places)) => push::show(ui, header, *places, repos, palette, dialogs, outside),
             Planned::Menu(places) => menu::show(ui, *places, repos, palette, outside),
         }
     });
@@ -435,12 +452,13 @@ pub(crate) fn add_found_box(plan: &Plan) -> Option<Rect> {
     }
 }
 
-/// The line under the folder dialog's field that `plan` places, while it says why the folder cannot be used (the
-/// core's refusal, or a move's reason while typing) for `repos` with what `dialogs` keep.
+/// The line under the field of the folder or the Push dialog that `plan` places, while it says why the folder or the
+/// address cannot be used (the core's refusal, or a move's reason while typing) for `repos` with what `dialogs` keep.
 #[cfg(test)]
-pub(crate) fn folder_reason_box(plan: &Plan, repos: &Repos, dialogs: &Dialogs) -> Option<Rect> {
+pub(crate) fn reason_box(plan: &Plan, repos: &Repos, dialogs: &Dialogs) -> Option<Rect> {
     match &plan.0 {
         Planned::Dialog(_, Parts::Folder(places)) => folder::reason_box(*places, repos, dialogs.folder.as_ref()?),
+        Planned::Dialog(_, Parts::Push(places)) => push::reason_box(*places, repos),
         _ => None,
     }
 }

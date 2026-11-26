@@ -659,9 +659,11 @@ struct Shot {
 /// where it gives way, and the Import dialog as the demo opens it and with a folder the core refused; the screen with
 /// the pointer on the top row's "Add repository"; the Move dialog as the demo opens it (its rows, the note on another
 /// drive), with rows that are there already and that cannot move, with no usable folder (its quiet targets, the main
-/// button off; why the folder cannot be used, in the place of the hint), and with a folder the core refused; and the
-/// Import dialog refusing a long path, its reason wrapped across the dialog's width.
-const SHOTS: [Shot; 27] = [
+/// button off; why the folder cannot be used, in the place of the hint), and with a folder the core refused; the
+/// Import dialog refusing a long path, its reason wrapped across the dialog's width; and the Push dialog as the demo
+/// opens it (its label, address, note, facts with their checks and crosses, buttons), with no address (the field's
+/// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was).
+const SHOTS: [Shot; 30] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -821,6 +823,24 @@ const SHOTS: [Shot; 27] = [
             demo::show(repos, "move").unwrap();
             // A file: the held core tells the rows by the text, then refuses the folder when Enter moves.
             repos.set_path_input(&std::env::current_exe().unwrap().display().to_string());
+        },
+    },
+    Shot { name: "push", over: Over::Dialog, set_up: |repos| demo::show(repos, "push").unwrap() },
+    Shot {
+        name: "push without an address",
+        over: Over::Dialog,
+        set_up: |repos| {
+            demo::show(repos, "push").unwrap();
+            repos.set_service_input("");
+        },
+    },
+    Shot {
+        name: "push refused",
+        over: Over::Entered,
+        set_up: |repos| {
+            demo::show(repos, "push").unwrap();
+            // Words with a space: the core refuses them when Enter pushes, and looks at nothing to say so.
+            repos.set_service_input("my own server");
         },
     },
 ];
@@ -1108,7 +1128,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             let ctx = ui.ctx().clone();
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
             found = planned.as_ref().and_then(dialogs::add_found_box);
-            reason = planned.as_ref().zip(session.repos()).and_then(|(plan, repos)| dialogs::folder_reason_box(plan, repos, &dialogs));
+            reason = planned.as_ref().zip(session.repos()).and_then(|(plan, repos)| dialogs::reason_box(plan, repos, &dialogs));
             let mut overlay_glass = Vec::new();
             let wanted = if let Over::Folder(_) = shot.over {
                 if frame == 0 {

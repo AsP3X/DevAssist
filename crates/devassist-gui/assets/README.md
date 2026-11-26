@@ -91,6 +91,11 @@ the note on another drive), were read on 2026-11-26 the same way from the bundle
 and its format 4 `cmap`), with a short script of the standard library; nothing was downloaded. The same reading gives
 `folder` as `e0d7`, `folder-git-2` as `e40a` and `plus` as `e13d`, as `src/assets.rs` has them.
 
+The Push dialog's address field icon, `link` (`e102`, the design's `field(…, { iconName: "link" })`), was read on
+2026-11-26 the same way from the bundled `lucide.ttf` (its `post` glyph names and its format 4 `cmap`), with a short
+script of the standard library; nothing was downloaded. The same reading gives `check` as `e06c` and `x` as `e1b2`
+(the font also maps the letter `x`, `0x78`, to it), as `src/assets.rs` has them; the Push dialog's facts use those two.
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

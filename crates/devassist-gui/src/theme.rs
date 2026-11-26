@@ -423,6 +423,13 @@ pub const MOVE_NOTE_WIDTH: f32 = 420.0;
 /// The line height of the Move dialog's note on another drive, as a share of its size (the design's
 /// `lineHeight: 1.4`).
 pub const MOVE_NOTE_LINE_HEIGHT: f32 = 1.4;
+/// The width of the Push dialog (`dialog("Push", 600, …)`).
+pub const PUSH_DIALOG_WIDTH: f32 = 600.0;
+/// The gap between "Address of the new repository", the address field and the line under it (`Address`'s `gap: 8`).
+pub const PUSH_ADDRESS_GAP: f32 = 8.0;
+/// The room above and below a fact's words in the Push dialog's "What happens": a fact of one line is a list row
+/// tall (`Fact`'s `height: 36`), one that wraps grows by its lines.
+pub const PUSH_FACT_PAD: f32 = 8.0;
 /// The size of the spinner on the Add dialog's status line while the core looks something up (the plan's own: a
 /// small icon's, `ICON_SMALL`'s width less the arc's stroke).
 pub const SPINNER: f32 = 12.0;
