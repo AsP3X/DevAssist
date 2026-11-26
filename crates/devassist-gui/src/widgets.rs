@@ -308,6 +308,8 @@ struct FolderRows {
     shown: bool,
     /// The keys the rows took while they are held: their repeats are the rows' too, and reach nothing else.
     held: Vec<Key>,
+    /// The pass the field was last drawn in ([`Context::cumulative_pass_nr`]).
+    pass: u64,
 }
 
 /// The id a folder field `id` keeps its [`FolderRows`] under.
@@ -315,9 +317,14 @@ fn folder_rows_id(id: Id) -> Id {
     id.with("folder-rows")
 }
 
-/// The [`FolderRows`] of the folder field `id`.
+/// The [`FolderRows`] of the folder field `id`. A field that was not drawn in the last pass (its dialog closed, and
+/// is open again) starts afresh: no row lit, its rows not closed, no key held, its rows at the top.
 fn folder_rows(ctx: &Context, id: Id) -> FolderRows {
-    ctx.data(|data| data.get_temp::<FolderRows>(folder_rows_id(id))).unwrap_or_default()
+    let mut rows = ctx.data(|data| data.get_temp::<FolderRows>(folder_rows_id(id))).unwrap_or_default();
+    if rows.pass + 1 < ctx.cumulative_pass_nr() {
+        rows = FolderRows { suggestions: rows.suggestions, text: rows.text, ..FolderRows::default() };
+    }
+    rows
 }
 
 /// `count` as points' worth of rows.
@@ -325,19 +332,28 @@ fn row_count(count: usize) -> f32 {
     f32::from(u16::try_from(count).unwrap_or(u16::MAX))
 }
 
-/// How tall a [`folder_field`] with `suggestions` suggestions is: the field ([`DIALOG_FIELD_HEIGHT`]) and, when
-/// there are any, the [`FOLDER_GAP`] and the box of up to [`FOLDER_ROWS`] rows under it (more scroll).
+/// How tall a [`folder_field`] showing `rows` rows is: the field ([`DIALOG_FIELD_HEIGHT`]) and, when it shows
+/// any, the [`FOLDER_GAP`] and the box of up to [`FOLDER_ROWS`] rows under it (more scroll).
 ///
-/// A dialog sizes itself with this. It passes the number of suggestions it has, whether the rows are shown or not:
-/// the rows close on Esc and while the field has no focus, and the dialog does not jump then; the room they had
-/// stays, empty.
+/// A dialog sizes itself with this, passing [`folder_field_rows`]: it grows when the rows open and shrinks when
+/// they close (on Esc, and while the field has no focus).
 #[must_use]
-pub fn folder_field_height(suggestions: usize) -> f32 {
-    if suggestions == 0 {
+pub fn folder_field_height(rows: usize) -> f32 {
+    if rows == 0 {
         DIALOG_FIELD_HEIGHT
     } else {
-        DIALOG_FIELD_HEIGHT + FOLDER_GAP + 2.0 * FOLDER_INSET_PAD + row_count(suggestions.min(FOLDER_ROWS)) * FOLDER_ROW
+        DIALOG_FIELD_HEIGHT + FOLDER_GAP + 2.0 * FOLDER_INSET_PAD + row_count(rows.min(FOLDER_ROWS)) * FOLDER_ROW
     }
+}
+
+/// How many rows the folder field `id` with `suggestions` suggestions shows in this frame, to pass to
+/// [`folder_field_height`]: none while the field has no focus or Esc has closed its rows, else `suggestions` up to
+/// [`FOLDER_ROWS`]. Asked before the field is drawn, it goes by the field's state after the last frame: a key that
+/// opens or closes the rows in this frame (Esc, or typing after Esc) shows in the room the next frame, and the field
+/// never draws rows outside the room it is given.
+#[must_use]
+pub fn folder_field_rows(ctx: &Context, id: Id, suggestions: usize) -> usize {
+    if suggestions == 0 || folder_rows(ctx, id).closed || !ctx.memory(|memory| memory.has_focus(id)) { 0 } else { suggestions.min(FOLDER_ROWS) }
 }
 
 /// The box of the rows of a folder field at `rect` with `count` suggestions: under the field, as tall as
@@ -383,7 +399,7 @@ fn taken_text(folder: &str) -> String {
 /// view: cut on a path separator (`\` or `/`) where one leaves an end that fits, else by characters; nothing when not
 /// even the "…" fits.
 #[must_use]
-pub fn path_tail(path: &str, font: &FontId, room: f32, ui: &Ui) -> String {
+fn path_tail(path: &str, font: &FontId, room: f32, ui: &Ui) -> String {
     let fits = |candidate: &str| width(ui.painter(), candidate, font) <= room;
     if fits(path) {
         return path.to_owned();
@@ -410,25 +426,29 @@ pub fn path_tail(path: &str, font: &FontId, room: f32, ui: &Ui) -> String {
 /// What a folder field's hint says while it is empty.
 const FOLDER_HINT: &str = "Folder";
 
-/// Draws a folder field at `rect`, [`folder_field_height`] of `suggestions.len()` tall: a dialog's text field (the
+/// Draws a folder field at `rect`, [`folder_field_height`] of [`folder_field_rows`] tall: a dialog's text field (the
 /// field's fill, its outline at [`FIELD_EDGE_OPACITY`], the folder icon, [`FOLDER_HINT`] in the quiet colour while
 /// it is empty), and under it, while it has the focus and `suggestions` are some, a box with the field's fill of up
-/// to [`FOLDER_ROWS`] rows, one a suggestion, which scrolls with the wheel. `suggestions` are the caller's: full
-/// folder paths that match the text (the core's `Repos::path_suggestions`), asked for again only when
-/// [`FolderDid::changed`] says so. `id` names the field, so it can be given the focus.
+/// to [`FOLDER_ROWS`] rows, one a suggestion, which scrolls with the wheel. No row is drawn outside `rect`.
+/// `suggestions` are the caller's: full folder paths that match the text (the core's `Repos::path_suggestions`),
+/// asked for again only when [`FolderDid::changed`] says so. `id` names the field, so it can be given the focus.
 ///
 /// The keyboard, while the rows show: Down moves the light into the rows and down them (it stays on the last), Up
 /// back up and from the first back into the field; the lit row is scrolled into view, and new suggestions light
-/// none. Enter takes the lit row; with none lit it is left to the dialog. A click takes a row
-/// ([`crate::overlay::fresh_click`]); the pointer over a row lights it on the hover's fill and moves no light.
-/// Taking a row makes the text that folder with the platform's separator at its end, the cursor after it, and
-/// the field keeps the focus. Esc closes the rows, which stay closed until the text changes; a second Esc is the
-/// dialog's. A long folder is cut from the left on a separator ([`path_tail`]), so its last folder's name shows;
-/// its hover text is all of it. There is no Tab completion: Tab is [`crate::overlay::walk`]'s.
+/// none. Enter takes the lit row. With none lit, Enter is left to the dialog, and the field keeps the focus (egui's
+/// own would give it up), so a person can type on when the dialog refuses the folder. A click takes a row
+/// ([`crate::overlay::fresh_click`]). One row at most is filled: while one is lit by the keys, the row under the
+/// pointer is not, and the pointer moving over the rows puts the keys' light out and lights the row under it on
+/// the hover's fill; a resting pointer takes nothing. Taking a row makes the text that folder with the platform's
+/// separator at its end, the cursor after it, and the field keeps the focus. Esc closes the rows, which stay
+/// closed until the text changes; a second Esc is the dialog's. A long folder is cut from the left on a separator,
+/// so its last folder's name shows; its hover text is all of it. There is no Tab completion: Tab
+/// is [`crate::overlay::walk`]'s.
 ///
 /// Every key the rows take (Down, Up, Enter with a row lit, Esc) is taken from egui's input, also while it is held
 /// and repeats, so nothing after the field sees it. A dialog with a folder field reads its own Esc and Enter after
-/// drawing the field.
+/// drawing the field. A field not drawn in the last frame (its dialog closed and opened again) starts afresh: no
+/// row lit, its rows open.
 pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[String], palette: Palette, id: Id) -> FolderDid {
     let ctx = ui.ctx().clone();
     let mut rows = folder_rows(&ctx, id);
@@ -447,6 +467,10 @@ pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[S
         input.events.retain(|event| !matches!(event, Event::Key { key, pressed: true, repeat: true, .. } if rows.held.contains(key)));
     });
     let inset = folder_inset(rect, suggestions.len());
+    // The pointer moving over the rows puts out the keys' light: one row at most is ever filled.
+    if rows.shown && ui.input(|input| input.pointer.delta() != Vec2::ZERO && input.pointer.hover_pos().is_some_and(|at| inset.contains(at))) {
+        rows.highlight = None;
+    }
     let focused = ui.memory(|memory| memory.has_focus(id));
     let mut did = FolderDid::default();
     if focused && !rows.closed && !suggestions.is_empty() {
@@ -491,8 +515,13 @@ pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[S
     ui.painter().rect_stroke(field_rect, DIALOG_FIELD_RADIUS, edge, StrokeKind::Inside);
     // Esc stays with the field while the rows take it: while they show, and while the Esc that closed them is held.
     let keeps_escape = (!rows.closed && !suggestions.is_empty()) || rows.held.contains(&Key::Escape);
+    // An Enter the rows did not take is the dialog's; egui's field gives up the focus on it, and it stays.
+    let enter = focused && ui.input(|input| input.key_pressed(Key::Enter));
     let before = text.clone();
     field_keeping(ui, field_rect, text, FOLDER_HINT, Icon::Folder, palette, id, keeps_escape);
+    if enter {
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
     if *text != before {
         rows.closed = false;
         rows.highlight = None;
@@ -508,7 +537,8 @@ pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[S
     if pressed_on_rows {
         ui.memory_mut(|memory| memory.request_focus(id));
     }
-    let show = ui.memory(|memory| memory.has_focus(id)) && !rows.closed && !suggestions.is_empty();
+    // Rows only in the room given: none when `rect` is the bare field.
+    let show = ui.memory(|memory| memory.has_focus(id)) && !rows.closed && !suggestions.is_empty() && inset.height() > 0.0;
     if show {
         let clicked = draw_folder_rows(ui, inset, suggestions, &mut rows, palette, id);
         if let (Some(folder), None) = (clicked, &did.took) {
@@ -519,6 +549,7 @@ pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[S
         }
     }
     rows.shown = show;
+    rows.pass = ctx.cumulative_pass_nr();
     did.changed = *text != rows.text;
     rows.text.clone_from(text);
     ctx.data_mut(|data| data.insert_temp(folder_rows_id(id), rows));
@@ -551,7 +582,7 @@ fn draw_folder_rows(ui: &Ui, inset: Rect, suggestions: &[String], rows: &mut Fol
         let fill = row.shrink2(vec2(FOLDER_PICK[0], 0.0));
         if rows.highlight == Some(index) {
             inset_drawn.painter.rect_filled(fill, FOLDER_PICK[1], palette.selection);
-        } else if response.hovered() {
+        } else if rows.highlight.is_none() && response.hovered() {
             inset_drawn.painter.rect_filled(fill, FOLDER_PICK[1], palette.on_glass.gamma_multiply(HOVER_OPACITY));
         }
         let words = path_tail(folder, &regular, row.width() - indent - FIELD_PAD, ui);
@@ -844,16 +875,17 @@ pub(crate) mod tests {
         Id::unique("test-folder-main")
     }
 
-    /// Where the test dialog and its folder field stand in `window` with `count` suggestions: its pane, its
-    /// header, the field's place ([`folder_field_height`] of `count` tall) and its buttons' room.
-    pub(crate) fn folder_dialog_places(painter: &Painter, window: Rect, count: usize) -> (Rect, crate::dialogs::Header, Rect, Rect) {
+    /// Where the test dialog and its folder field stand in `window` with `rows` rows shown
+    /// ([`folder_field_rows`]): its pane, its header, the field's place ([`folder_field_height`] of `rows` tall) and
+    /// its buttons' room.
+    pub(crate) fn folder_dialog_places(painter: &Painter, window: Rect, rows: usize) -> (Rect, crate::dialogs::Header, Rect, Rect) {
         use crate::theme::{BUTTON_HEIGHT, DIALOG_GAP, DIALOG_PAD, DIALOG_WIDTH};
         let header = crate::dialogs::Header::new(painter, FOLDER_TITLE, FOLDER_LINE, DIALOG_WIDTH - 2.0 * DIALOG_PAD);
-        let height = 2.0 * DIALOG_PAD + header.height() + 2.0 * DIALOG_GAP + folder_field_height(count) + BUTTON_HEIGHT;
+        let height = 2.0 * DIALOG_PAD + header.height() + 2.0 * DIALOG_GAP + folder_field_height(rows) + BUTTON_HEIGHT;
         let pane = crate::overlay::dialog_rect(window, vec2(DIALOG_WIDTH, height));
         let inside = pane.shrink(DIALOG_PAD);
         let field =
-            Rect::from_min_size(pos2(inside.left(), inside.top() + header.height() + DIALOG_GAP), vec2(inside.width(), folder_field_height(count)));
+            Rect::from_min_size(pos2(inside.left(), inside.top() + header.height() + DIALOG_GAP), vec2(inside.width(), folder_field_height(rows)));
         let buttons = Rect::from_min_max(pos2(inside.left(), inside.bottom() - BUTTON_HEIGHT), inside.max);
         (pane, header, field, buttons)
     }
@@ -886,7 +918,8 @@ pub(crate) mod tests {
             let scrim = crate::overlay::shield(ui, window, Id::unique("test-folder-shield"));
             crate::overlay::scrim(ui, window, palette);
             crate::overlay::glass(ui, drawn);
-            let (pane, header, field, buttons) = folder_dialog_places(ui.painter(), window, suggestions.len());
+            let rows = folder_field_rows(ui.ctx(), folder_id(), suggestions.len());
+            let (pane, header, field, buttons) = folder_dialog_places(ui.painter(), window, rows);
             crate::overlay::pane(ui, pane, Id::unique("test-folder-pane"));
             ui.set_clip_rect(pane);
             crate::overlay::walk(ui, &[folder_id(), folder_cancel_id(), folder_main_id()]);
@@ -914,6 +947,8 @@ pub(crate) mod tests {
         opened: bool,
         /// What the dialog did in each frame.
         shown: Vec<FolderShown>,
+        /// The colours of the rectangles the last frame filled.
+        fills: Vec<Color32>,
     }
 
     impl FolderTest {
@@ -926,30 +961,47 @@ pub(crate) mod tests {
                 open: true,
                 opened: false,
                 shown: Vec::new(),
+                fills: Vec::new(),
             };
             dialog.frame(Vec::new());
             dialog.frame(Vec::new());
             dialog
         }
 
+        /// Opens the dialog again, closed for a frame first, its field holding what it held.
+        fn reopen(&mut self) {
+            self.open = false;
+            self.frame(Vec::new());
+            (self.open, self.opened) = (true, false);
+            self.frame(Vec::new());
+            self.frame(Vec::new());
+        }
+
         fn frame(&mut self, events: Vec<egui::Event>) {
             let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), events, ..Default::default() };
             let (text, suggestions, open, opened) = (&mut self.text, &self.suggestions, &mut self.open, &mut self.opened);
             let mut shown = None;
-            self.ctx
-                .run_ui(input, |ui| {
-                    let window = ui.ctx().content_rect();
-                    if !*opened {
-                        crate::overlay::open(ui.ctx(), Some(folder_id()));
-                        *opened = true;
-                    }
-                    if *open {
-                        let said = show_folder_dialog(ui.ctx(), window, text, suggestions, theme::palette(Mode::Light), &[]);
-                        *open = !said.closed;
-                        shown = Some(said);
-                    }
+            let output = self.ctx.run_ui(input, |ui| {
+                let window = ui.ctx().content_rect();
+                if *open && !*opened {
+                    crate::overlay::open(ui.ctx(), Some(folder_id()));
+                    *opened = true;
+                }
+                if *open {
+                    let said = show_folder_dialog(ui.ctx(), window, text, suggestions, theme::palette(Mode::Light), &[]);
+                    *open = !said.closed;
+                    shown = Some(said);
+                }
+            });
+            self.fills = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) => Some(rect.fill),
+                    _ => None,
                 })
-                .drop_without_applying_deltas();
+                .collect();
+            output.drop_without_applying_deltas();
             if let Some(shown) = shown {
                 if shown.did.changed {
                     self.suggestions = matching(&folders(), &self.text);
@@ -1073,15 +1125,17 @@ pub(crate) mod tests {
     #[test]
     fn a_click_takes_a_suggestion() {
         let mut test = FolderTest::new(&path(&["D:", "code", ""]));
-        // The pointer resting on a row lights it, but takes nothing and moves no highlight.
-        test.key(egui::Key::ArrowDown);
+        // The pointer resting on a row takes nothing; Down lights the first row, and the resting pointer leaves it lit.
         let from = test.shown.len();
         let work = test.row(1);
+        test.frame(vec![egui::Event::PointerMoved(work)]);
+        test.key(egui::Key::ArrowDown);
         for _ in 0..5 {
             test.frame(vec![egui::Event::PointerMoved(work)]);
         }
-        assert!(test.took_since(from).is_empty(), "a resting pointer chose something");
-        assert_eq!(test.rows().highlight, Some(0), "the hover moved the highlight");
+        assert_eq!(test.took_since(from), Vec::<String>::new(), "a resting pointer chose something");
+        assert_eq!(test.rows().highlight, Some(0), "a resting pointer moved the highlight");
+        // A click on another row than the lit one takes the row clicked.
         test.click(work);
         assert_eq!(test.took_since(from), [path(&["D:", "code", "work"])]);
         assert_eq!(test.text, path(&["D:", "code", "work", ""]));
@@ -1089,6 +1143,89 @@ pub(crate) mod tests {
         assert_eq!(test.focused(), Some(folder_id()), "the field has the focus back");
         assert!(test.rows().shown, "and shows what is in the folder taken");
         assert_eq!(test.suggestions.len(), 3);
+        // Typing goes on at the end of the text.
+        test.typed(egui::Key::A, "a");
+        assert_eq!(test.text, path(&["D:", "code", "work", "a"]));
+    }
+
+    #[test]
+    fn a_lit_row_is_the_only_one_filled_until_the_pointer_moves_over_the_rows() {
+        let hover = theme::palette(Mode::Light).on_glass.gamma_multiply(HOVER_OPACITY);
+        let mut test = FolderTest::new(&path(&["D:", "code", ""]));
+        let work = test.row(1);
+        test.frame(vec![egui::Event::PointerMoved(work)]);
+        test.frame(Vec::new());
+        assert!(test.fills.contains(&hover), "a row under the pointer is lit on the hover's fill");
+        test.key(egui::Key::ArrowDown);
+        test.frame(Vec::new());
+        assert_eq!(test.rows().highlight, Some(0));
+        assert!(!test.fills.contains(&hover), "the row under the pointer is filled beside the lit one");
+        // The pointer moving over the rows puts the keys' light out; the hover is drawn again.
+        test.frame(vec![egui::Event::PointerMoved(work + vec2(3.0, 1.0))]);
+        test.frame(Vec::new());
+        assert_eq!(test.rows().highlight, None);
+        assert!(test.fills.contains(&hover));
+    }
+
+    #[test]
+    fn a_reopened_dialog_starts_with_no_row_lit_and_its_rows_open() {
+        // Closed with a row lit: opened again, no row is lit, and Enter takes nothing.
+        let mut test = FolderTest::new(&path(&["D:", "code", ""]));
+        test.key(egui::Key::ArrowDown);
+        assert_eq!(test.rows().highlight, Some(0));
+        test.reopen();
+        assert_eq!(test.rows().highlight, None, "the lit row came back");
+        assert!(test.rows().shown);
+        let from = test.shown.len();
+        test.key(egui::Key::Enter);
+        assert_eq!(test.took_since(from), Vec::<String>::new());
+        // Closed with its rows closed by Esc: opened again, they show.
+        let mut test = FolderTest::new(&path(&["D:", "code", ""]));
+        test.key(egui::Key::Escape);
+        assert!(test.open && !test.rows().shown);
+        test.reopen();
+        assert!(test.rows().shown, "the rows Esc closed stayed closed");
+    }
+
+    #[test]
+    fn the_field_takes_the_room_of_the_rows_it_shows() {
+        let mut test = FolderTest::new(&path(&["D:", "code", ""]));
+        let height = |test: &FolderTest| test.shown.last().unwrap().field.height();
+        assert!((height(&test) - folder_field_height(2)).abs() < 1e-3, "{}", height(&test));
+        assert_eq!(folder_field_rows(&test.ctx, folder_id(), 2), 2);
+        // After Esc: the bare field.
+        test.key(egui::Key::Escape);
+        test.frame(Vec::new());
+        assert_eq!(folder_field_rows(&test.ctx, folder_id(), 2), 0);
+        assert!((height(&test) - folder_field_height(0)).abs() < 1e-3, "{}", height(&test));
+        // Typing opens the rows again, and the room follows.
+        test.typed(egui::Key::T, "t");
+        test.frame(Vec::new());
+        assert!(test.rows().shown);
+        assert!((height(&test) - folder_field_height(1)).abs() < 1e-3, "{}", height(&test));
+        // Without the focus: the bare field, and no row is drawn.
+        test.key(egui::Key::Tab);
+        test.frame(Vec::new());
+        assert_eq!(folder_field_rows(&test.ctx, folder_id(), 1), 0);
+        assert!(!test.rows().shown);
+        assert!((height(&test) - folder_field_height(0)).abs() < 1e-3, "{}", height(&test));
+    }
+
+    #[test]
+    fn keys_on_a_button_are_the_dialogs() {
+        let mut test = FolderTest::new(&path(&["D:", "code", ""]));
+        test.key(egui::Key::Tab);
+        test.key(egui::Key::Tab);
+        assert_eq!(test.focused(), Some(folder_main_id()));
+        let from = test.shown.len();
+        test.key(egui::Key::ArrowDown);
+        assert_eq!(test.rows().highlight, None, "Down on a button lit a row");
+        test.key(egui::Key::Enter);
+        assert!(test.shown[from..].iter().any(|shown| shown.accepted), "Enter did not reach the dialog");
+        assert_eq!(test.took_since(from), Vec::<String>::new());
+        test.key(egui::Key::Escape);
+        assert!(!test.open, "Esc did not reach the dialog");
+        assert_eq!(test.text, path(&["D:", "code", ""]));
     }
 
     #[test]
@@ -1126,7 +1263,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn enter_with_no_suggestion_highlighted_is_left_to_the_dialog() {
+    fn enter_with_no_row_lit_keeps_the_focus_and_reaches_the_dialog() {
         let mut test = FolderTest::new(&path(&["D:", "code", ""]));
         assert!(test.rows().shown && test.rows().highlight.is_none());
         let from = test.shown.len();
@@ -1134,6 +1271,10 @@ pub(crate) mod tests {
         assert_eq!(test.took_since(from), Vec::<String>::new());
         assert!(test.shown[from..].iter().any(|shown| shown.accepted), "the dialog did not see the Enter");
         assert_eq!(test.text, path(&["D:", "code", ""]));
+        // The dialog refused it, say: the person types on.
+        assert_eq!(test.focused(), Some(folder_id()), "Enter took the focus from the field");
+        test.typed(egui::Key::W, "w");
+        assert_eq!(test.text, path(&["D:", "code", "w"]));
     }
 
     #[test]
@@ -1210,17 +1351,17 @@ pub(crate) mod tests {
         assert_eq!(test.focused(), Some(folder_id()));
     }
 
-    /// Where the pointer rests in a picture of the test dialog in `window` with `count` suggestions: on the second row.
-    pub(crate) fn folder_shot_pointer(painter: &Painter, window: Rect, count: usize) -> Pos2 {
-        let (_, _, field, _) = folder_dialog_places(painter, window, count);
-        folder_row(folder_inset(field, count), 1, 0.0).center()
+    /// Where the pointer rests in a picture of the test dialog in `window` showing `rows` rows: on the second row.
+    pub(crate) fn folder_shot_pointer(painter: &Painter, window: Rect, rows: usize) -> Pos2 {
+        let (_, _, field, _) = folder_dialog_places(painter, window, rows);
+        folder_row(folder_inset(field, rows), 1, 0.0).center()
     }
 
-    /// The events of frame `frame` of a picture of the test dialog: the pointer at `pointer` all along, and Down in
-    /// the second frame, which lights the first row.
-    pub(crate) fn folder_shot_events(frame: usize, pointer: Pos2) -> Vec<egui::Event> {
+    /// The events of frame `frame` of a picture of the test dialog: the pointer resting at `pointer` all along, and,
+    /// when `lit`, Down in the third frame (the pointer has stopped by then), which lights the first row.
+    pub(crate) fn folder_shot_events(frame: usize, pointer: Pos2, lit: bool) -> Vec<egui::Event> {
         let mut events = vec![egui::Event::PointerMoved(pointer)];
-        if frame == 1 {
+        if lit && frame == 2 {
             events.push(egui::Event::Key {
                 key: egui::Key::ArrowDown,
                 physical_key: None,
@@ -1233,7 +1374,8 @@ pub(crate) mod tests {
     }
 
     /// A picture of the test dialog over the lake in `mode`, its field holding `D:\code\work\` with its three
-    /// folders under it: the first lit by Down, the second under the pointer, the third too long and cut.
+    /// folders under it: the first lit by Down, the pointer resting on the second (which is not filled), the third
+    /// too long and cut.
     #[expect(clippy::cast_precision_loss, reason = "picture sizes of a few thousand pixels")]
     fn folder_picture(mode: Mode) -> devassist_glass::raster::Bitmap {
         use std::collections::HashMap;
@@ -1261,7 +1403,7 @@ pub(crate) mod tests {
         let mut shapes = Vec::new();
         let mut taken = FolderDid::default();
         for frame in 0..4 {
-            let events = folder_shot_events(frame, pointer);
+            let events = folder_shot_events(frame, pointer, true);
             let mut output = ctx.run_ui(RawInput { screen_rect: Some(window), events, ..Default::default() }, |ui| {
                 if frame == 0 {
                     crate::overlay::open(ui.ctx(), Some(folder_id()));

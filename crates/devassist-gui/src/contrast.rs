@@ -590,10 +590,20 @@ enum Over {
     Dialog,
     /// The row's menu, without a scrim.
     Menu,
-    /// The test dialog with a folder field (`widgets::tests::show_folder_dialog`), on its scrim: with its rows
-    /// (`true`: `D:\code\work\` and its three folders, the first lit by Down, the second under the pointer, the third
-    /// resting), or empty, showing its hint.
-    Folder(bool),
+    /// The test dialog with a folder field (`widgets::tests::show_folder_dialog`), on its scrim.
+    Folder(FolderShot),
+}
+
+/// What the folder field of a shot shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FolderShot {
+    /// `D:\code\work\` and its three folders: the first lit by Down, the pointer resting on the second (not filled),
+    /// the third resting.
+    Lit,
+    /// The same, with no row lit: the second on the hover's fill.
+    Hovered,
+    /// Empty, showing its hint.
+    Empty,
 }
 
 impl Over {
@@ -617,7 +627,7 @@ struct Shot {
 /// moving api and web with its name, and renaming home with none (its hint, and the danger note the core gives when the rename is pressed then); the menu
 /// on the ticked api, its first line highlighted and its last (Remove, in the danger colour); the folder field in a
 /// test dialog, with its rows (resting, under the pointer, lit) and empty with its hint.
-const SHOTS: [Shot; 10] = [
+const SHOTS: [Shot; 11] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -669,8 +679,9 @@ const SHOTS: [Shot; 10] = [
             repos.highlight_menu(MenuItem::Remove);
         },
     },
-    Shot { name: "folder field", over: Over::Folder(true), set_up: |_| {} },
-    Shot { name: "folder field empty", over: Over::Folder(false), set_up: |_| {} },
+    Shot { name: "folder field", over: Over::Folder(FolderShot::Lit), set_up: |_| {} },
+    Shot { name: "folder field hovered", over: Over::Folder(FolderShot::Hovered), set_up: |_| {} },
+    Shot { name: "folder field empty", over: Over::Folder(FolderShot::Empty), set_up: |_| {} },
 ];
 
 /// The window sizes a shot is drawn at: the design's, and for an overlay also the smallest the window allows, where
@@ -916,7 +927,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let mut last = None;
     // The test dialog's folder field: its text and the folders it suggests, and where the pointer rests on it.
     let (mut folder_text, folder_suggestions) = match shot.over {
-        Over::Folder(true) => {
+        Over::Folder(FolderShot::Lit | FolderShot::Hovered) => {
             let text = widgets::tests::path(&["D:", "code", "work", ""]);
             let suggestions = widgets::tests::matching(&widgets::tests::folders(), &text);
             (text, suggestions)
@@ -927,7 +938,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     for frame in 0..=SETTLE {
         let mut drew = None;
         let events = match (shot.over, pointer) {
-            (Over::Folder(true), Some(at)) => widgets::tests::folder_shot_events(frame, at),
+            (Over::Folder(kind), Some(at)) if kind != FolderShot::Empty => widgets::tests::folder_shot_events(frame, at, kind == FolderShot::Lit),
             _ => Vec::new(),
         };
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
@@ -939,8 +950,9 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
                 if frame == 0 {
                     overlay::open(&ctx, Some(widgets::tests::folder_id()));
                 }
-                pointer = Some(widgets::tests::folder_shot_pointer(ui.painter(), window, folder_suggestions.len()));
-                Some(overlay::want_dialog(widgets::tests::folder_dialog_places(ui.painter(), window, folder_suggestions.len()).0))
+                let rows = widgets::folder_field_rows(&ctx, widgets::tests::folder_id(), folder_suggestions.len());
+                pointer = Some(widgets::tests::folder_shot_pointer(ui.painter(), window, rows));
+                Some(overlay::want_dialog(widgets::tests::folder_dialog_places(ui.painter(), window, rows).0))
             } else {
                 planned.as_ref().map(dialogs::Plan::want)
             };
