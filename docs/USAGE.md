@@ -432,8 +432,9 @@ still happens with what is saved in the checkout, and the last line says so.
 
 The repository itself does not change: it keeps GitHub as its origin and stays
 on the list as before. The address is kept as one more remote, named after the
-host (`gitlab`, `codeberg`), so doing it again later brings the copy up to
-date, and `git push gitlab` works in a terminal.
+host (`gitlab`, `codeberg`; `mirror` for a local folder or an address without
+a host), so doing it again later brings the copy up to date, and
+`git push gitlab` works in a terminal.
 
 A local folder works as an address too, for a bare repository on a disk: it
 must be given by its full path, and it cannot be the repository itself or a
@@ -674,8 +675,9 @@ button counts them.
 When the folder cannot be used, the dialog stays open and says why under the
 field. Otherwise it closes and the progress dialog shows the clones. Each
 repository goes into a folder of its own, named after it, inside the one you
-chose; one that is there already as a clone of the same repository is put on
-the list instead. `Esc`, Cancel and a click outside the dialog close it.
+chose. If that name is taken by a different repository, the folder is named
+`owner-name` instead; a clone of the same repository that is there already is
+put on the list instead of being cloned again. `Esc`, Cancel and a click outside the dialog close it.
 
 ### Importing clones
 
@@ -728,18 +730,23 @@ While the folder you typed cannot be used, the rows show only the folder
 names, and the line under the field gives the reason. When it can be used,
 that line is the hint "A folder that does not exist yet is created." When the
 window can tell that the move takes repositories to another drive, a note
-says so ("E: is another drive."), that everything is copied first and the
+says so ("E: is another drive."; only on Windows is the drive named, elsewhere
+it reads "That folder is on another drive."), that everything is copied first and the
 original is deleted only after the copy is complete, and that programs with
 files of the repositories open should be closed first.
 
 The main button counts only the rows that move: "Move" for one, "Move 3
 repositories" for three. It is off while none can move. `Enter` in the field
 presses it. Cancel, `Esc` and a click outside close the dialog. The move
-itself is a run with a progress dialog, and its Cancel stops the move safely.
-What was moved before stays moved. A repository that is being copied to
-another drive is left as it was, because its original is deleted only after
-its copy is complete, and what was copied so far is removed again. The
-repositories stay on the list.
+itself is a run with a progress dialog. Its Cancel is looked at between
+repositories and between the files of a copy, so the file being copied is
+finished first. What was moved before stays moved. The original of a
+repository is not touched until its copy is complete, so it is never lost;
+a copy that was cancelled is removed again. If that removal fails, for
+instance because a file is held open, the partial copy stays at the target
+without a message, and a later move there says "is there already": look at
+the target folder then. Once a copy is complete, deleting the original is not
+interrupted. The repositories stay on the list.
 
 ### Pushing a repository to another service
 
@@ -765,7 +772,9 @@ that address once in a terminal so Git can ask and remember.
 The box under the field lists what a push does, each line with a check, and
 what it leaves as it is or does not do, each with a cross. The list is the
 same for every repository, except that the fourth line names the remote once
-an address is typed.
+an address is typed, and that its sentence about a remote of that name being
+pointed at the new address shows only when this repository already has such a
+remote with another address.
 
 - Every branch and tag goes over. A branch goes as origin has it where the one
   here is behind it or missing, otherwise as it is here.
@@ -775,8 +784,9 @@ an address is typed.
   `pull/<number>` (under another name if `pull` is taken here), replaced on
   every push.
 - The repository here keeps its files and its origin, and keeps the address as
-  a remote named after its host, such as `gitlab`. A remote of that name that
-  it has already is pointed at the new address.
+  a remote named after its host, such as `gitlab`; for a local folder, or an
+  address without a host, the remote is named `mirror`. A remote of that name
+  that it has already is pointed at the new address.
 - With a cross: apart from those pull-request branches, nothing there is
   overwritten or deleted. A branch there only moves forward, so no commit
   there is lost.
