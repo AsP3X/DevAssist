@@ -40,9 +40,9 @@ use crate::repos_view::{self, Line};
 use crate::session::Session;
 use crate::shell::{Page, Shown as ShellShown};
 use crate::theme::{
-    self, ADD_INSTALLED_OPACITY, BUTTON_OFF_OPACITY, CHECK_MARK, FOCUS_RING, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT,
-    HOVER_OPACITY, MIN_WINDOW, Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING,
-    RULE_LABEL_GAP, RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
+    self, ADD_ROW, BUTTON_OFF_OPACITY, CHECK_MARK, FOCUS_RING, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY,
+    MIN_WINDOW, Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING, RULE_LABEL_GAP,
+    RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
 };
 use crate::{demo, frost, overlay, shell, table, widgets};
 
@@ -591,6 +591,8 @@ enum Over {
     /// A dialog, on its scrim, with Enter pressed once it is open: the Add dialog then says, under its folder field,
     /// why the core refused the folder.
     Entered,
+    /// The Add dialog, on its scrim, with the pointer resting on its found row of this index.
+    Hovering(usize),
     /// The row's menu, without a scrim.
     Menu,
     /// The test dialog with a folder field (`widgets::tests::show_folder_dialog`), on its scrim.
@@ -612,7 +614,7 @@ enum FolderShot {
 impl Over {
     /// A dialog is over the screen: one the core's mode asks for, or the test dialog with a folder field.
     fn is_dialog(self) -> bool {
-        matches!(self, Over::Dialog | Over::Entered | Over::Folder(_))
+        matches!(self, Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_))
     }
 }
 
@@ -634,7 +636,7 @@ struct Shot {
 /// "private", the status line, the note), searched so that a tick is hidden ("Also ticked") with the folder refused
 /// (the danger note), and with GitHub failed and a plain word typed (the status line in the danger colour, "Retry",
 /// the row that lists the account).
-const SHOTS: [Shot; 14] = [
+const SHOTS: [Shot; 15] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -695,6 +697,15 @@ const SHOTS: [Shot; 14] = [
         set_up: |repos| {
             demo::show(repos, "add").unwrap();
             repos.pick_add("acme/api");
+        },
+    },
+    Shot {
+        // The pointer on portal's row: an installed row under the hover's fill (artcraft is highlighted).
+        name: "add hovered",
+        over: Over::Hovering(6),
+        set_up: |repos| {
+            demo::show(repos, "add").unwrap();
+            assert_eq!(repos.add_list()[6].id(), "acme/portal", "the hovered row is not the installed portal");
         },
     },
     Shot {
@@ -759,8 +770,8 @@ fn colour_name(colour: Color32, mode: Mode) -> String {
         (p.danger_tint, "danger tint"),
         (p.selection.gamma_multiply(BUTTON_OFF_OPACITY), "off fill"),
         (p.on_glass.gamma_multiply(BUTTON_OFF_OPACITY), "off"),
-        // The quiet words of an installed row of the Add dialog, which cannot be ticked.
-        (p.quiet.gamma_multiply(ADD_INSTALLED_OPACITY), "off quiet"),
+        (p.installed, "installed"),
+        (p.installed_quiet, "installed quiet"),
         (theme::selected_fill(mode), "ticked"),
         (p.on_glass.gamma_multiply(GROUP_FILL_OPACITY), "group"),
         (p.on_glass.gamma_multiply(HEAD_FILL_OPACITY), "head"),
@@ -819,11 +830,11 @@ fn text_of(text: &TextShape, clip: Rect) -> Option<(String, Rect, Color32, FontI
 }
 
 /// The contrast a text in `font` whose ink is named `ink` needs: a graphic's for an icon, and for the words of a
-/// button that cannot be pressed ("Cancelling…") or of an installed row of the Add dialog, which cannot be ticked
-/// (WCAG 1.4.3 leaves disabled controls out of the text rule, so they are held to the graphics' 3.0 to stay seen);
-/// 6.0 for 12-point text; 4.5 for the rest.
+/// button that cannot be pressed ("Cancelling…": WCAG 1.4.3 leaves disabled controls out of the text rule, so they
+/// are held to the graphics' 3.0 to stay seen); 6.0 for 12-point text; 4.5 for the rest. (The words in the Add
+/// dialog's found repositories are held to 4.5 by their place, whatever their ink: see `measure_shot`.)
 fn least_for(font: &FontId, ink: &str) -> f64 {
-    if font.family == assets::icons_family() || ink == "off" || ink == "off quiet" {
+    if font.family == assets::icons_family() || ink == "off" {
         LEAST_GRAPHIC
     } else if font.size <= TEXT_SMALL {
         LEAST_QUIET
@@ -946,6 +957,8 @@ struct Frame {
     overlay: usize,
     wants: Vec<Want>,
     layout: shell::Layout,
+    /// The box of the Add dialog's found repositories, when the Add dialog is drawn.
+    found_box: Option<Rect>,
 }
 
 /// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
@@ -972,9 +985,14 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         _ => (String::new(), Vec::new()),
     };
     let mut pointer = None;
+    let mut found = None;
     for frame in 0..=SETTLE {
         let mut drew = None;
         let events = match (shot.over, pointer) {
+            (Over::Hovering(index), _) if frame >= 1 => found.map_or_default(|found: Rect| {
+                let row = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
+                vec![egui::Event::PointerMoved(pos2(found.center().x, found.top() + (row + 0.5) * ADD_ROW))]
+            }),
             (Over::Folder(kind), Some(at)) if kind != FolderShot::Empty => widgets::tests::folder_shot_events(frame, at, kind == FolderShot::Lit),
             (Over::Entered, _) if frame == 2 => {
                 vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]
@@ -985,6 +1003,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
+            found = planned.as_ref().and_then(dialogs::add_found_box);
             let mut overlay_glass = Vec::new();
             let wanted = if let Over::Folder(_) = shot.over {
                 if frame == 0 {
@@ -1032,7 +1051,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             textures.insert(GLASS_TEXTURE, picture.image());
         }
         let (overlay, wants, layout) = drew.unwrap();
-        last = Some(Frame { ctx: ctx.clone(), shapes: std::mem::take(&mut output.shapes), overlay, wants, layout });
+        last = Some(Frame { ctx: ctx.clone(), shapes: std::mem::take(&mut output.shapes), overlay, wants, layout, found_box: found });
     }
     if shot.over != Over::Nothing {
         assert!(overlay::is_open(&ctx) && glass.is_some(), "{}: its overlay is not drawn", shot.name);
@@ -1080,7 +1099,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                 if let Some((words, rect, ink, font)) = text_of(text, clipped.clip_rect) {
                     let wanted = match shot.over {
                         Over::Nothing => words == dots || controls.iter().any(|(_, control)| control.contains(rect.center())),
-                        Over::Dialog | Over::Entered | Over::Folder(_) => on_overlay,
+                        Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_) => on_overlay,
                         Over::Menu => on_overlay || words == dots,
                     };
                     if wanted {
@@ -1095,7 +1114,12 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                         let on_inset =
                             shot.over.is_dialog() && fills.iter().any(|(fill, name, overlaid)| *overlaid && name == "field" && fill.contains(centre));
                         let danger_status = shot.over == Over::Nothing && region(centre) == "status" && ink_name == "danger";
+                        // The words of the Add dialog's found repositories are information in every row, an installed
+                        // one too (it can be highlighted): 4.5, whatever their ink or size (the controller's ruling of
+                        // 2026-11-26).
+                        let in_found = on_overlay && frame.found_box.is_some_and(|found_box| found_box.contains(centre));
                         let least = match least_for(&font, &ink_name) {
+                            _ if in_found => LEAST_TEXT,
                             least if least == LEAST_QUIET && (on_inset || danger_status) => LEAST_TEXT,
                             least => least,
                         };

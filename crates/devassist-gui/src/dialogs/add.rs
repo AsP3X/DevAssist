@@ -27,10 +27,10 @@ use super::{Dialogs, Header, Parts, Plan, inset, main_id, rows};
 use crate::assets::{self, Icon};
 use crate::overlay::{self, Kind};
 use crate::theme::{
-    ADD_FOLDER_GAP, ADD_INSTALLED_OPACITY, ADD_LEAST_ROWS, ADD_PICK, ADD_ROW, ADD_ROW_PAD, ADD_STATUS_GAP, ADD_STATUS_ROW, ADD_TEXT_GAP, ADD_WIDTH,
-    BUTTON_HEIGHT, BUTTON_PAD, CHECKBOX, CHECKBOX_STROKE_OPACITY, DIALOG_FIELD_HEIGHT, DIALOG_FIELD_RADIUS, DIALOG_GAP, DIALOG_MARGIN, DIALOG_PAD,
-    FIELD_EDGE_OPACITY, HAIRLINE, HEADER_LINE_HEIGHT, HOVER_OPACITY, LINE_OPACITY, Palette, RADIUS_SMALL, SPINNER, SPINNER_GAP, SPINNER_STEPS,
-    SPINNER_STROKE, SPINNER_SWEEP, SPINNER_TURN, TEXT, TEXT_SMALL,
+    ADD_FOLDER_GAP, ADD_INSTALLED_BOX_OPACITY, ADD_LEAST_ROWS, ADD_PICK, ADD_ROW, ADD_ROW_PAD, ADD_STATUS_GAP, ADD_STATUS_ROW, ADD_TEXT_GAP,
+    ADD_WIDTH, BUTTON_HEIGHT, BUTTON_PAD, CHECKBOX, CHECKBOX_STROKE_OPACITY, DIALOG_FIELD_HEIGHT, DIALOG_FIELD_RADIUS, DIALOG_GAP, DIALOG_MARGIN,
+    DIALOG_PAD, FIELD_EDGE_OPACITY, HAIRLINE, HEADER_LINE_HEIGHT, HOVER_OPACITY, LINE_OPACITY, Palette, RADIUS_SMALL, SPINNER, SPINNER_FRAME,
+    SPINNER_GAP, SPINNER_STEPS, SPINNER_STROKE, SPINNER_SWEEP, SPINNER_TURN, TEXT, TEXT_SMALL,
 };
 use crate::widgets::{self, FolderDid, Tick, font};
 
@@ -65,7 +65,7 @@ pub(super) fn search_id() -> Id {
 }
 
 /// The id of the folder field.
-fn folder_id() -> Id {
+pub(super) fn folder_id() -> Id {
     Id::unique("dialog-add-folder")
 }
 
@@ -88,8 +88,12 @@ pub(super) struct State {
     suggestions: Vec<String>,
     /// Why the core refused to clone into it, said under the field until the text changes.
     refused: Option<String>,
-    /// The row the list showed highlighted last, so the list follows the highlight.
-    shown: Option<String>,
+    /// The row the list showed highlighted last and where it stood, so the list follows the highlight when it
+    /// moves to another row or its row moves.
+    shown: Option<(String, usize)>,
+    /// The search as the field held it last: when the core's differs (it listed an account, making "word" into
+    /// "word/"), the field's cursor goes to its end.
+    search: String,
 }
 
 impl State {
@@ -98,9 +102,39 @@ impl State {
     /// says it changed).
     pub(super) fn new(repos: &Repos) -> State {
         let folder = repos.clone_dir.display().to_string();
-        let suggestions = prompt::suggest(&folder);
-        State { folder, suggestions, refused: None, shown: None }
+        let suggestions = folder_suggestions(repos, &folder);
+        State { folder, suggestions, refused: None, shown: None, search: repos.add_filter.clone() }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How often this thread's Add dialogs asked the disk for folders.
+    static DISK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How often this thread's Add dialogs asked the disk for folders so far.
+#[cfg(test)]
+fn disk_reads() -> usize {
+    DISK_READS.with(std::cell::Cell::get)
+}
+
+/// The folders that match `text`, for the folder field: on disk (`prompt::suggest`) for a live session; the
+/// demo's made-up ones ([`crate::demo::folders_matching`]) while the core holds all work, so a demo or a picture
+/// never asks the disk.
+fn folder_suggestions(repos: &Repos, text: &str) -> Vec<String> {
+    if repos.work_held() {
+        return crate::demo::folders_matching(text);
+    }
+    #[cfg(test)]
+    DISK_READS.with(|reads| reads.set(reads.get() + 1));
+    prompt::suggest(text)
+}
+
+/// The core's status line, as the dialog shows it: without the terminal app's hint at Tab, which in the window
+/// moves the focus (`Repos::add_status_plain`).
+fn status_of(repos: &Repos) -> AddStatus {
+    repos.add_status_plain()
 }
 
 /// The name a found repository shows: its name alone while every row of `list` is of one owner, else
@@ -284,7 +318,7 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, state: &State
     let header = Header::new(painter, TITLE, LINE, ADD_WIDTH - 2.0 * DIALOG_PAD);
     let list = repos.add_list();
     let folder_rows = widgets::folder_field_rows(painter.ctx(), folder_id(), state.suggestions.len());
-    let retry = repos.add_status().error.then(|| small_button_width(painter, RETRY));
+    let retry = status_of(repos).error.then(|| small_button_width(painter, RETRY));
     let also = !hidden_ticks(repos, &list).is_empty();
     let places = add_places(window, header.height(), list.len(), folder_rows, retry, also);
     Plan::dialog(header, Parts::Add(places))
@@ -329,7 +363,7 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     // As the terminal app does at every draw: a highlight on a row that is there, the preferred one when none is.
     repos.ensure_selection();
     let mut done = Done { close: scrim, ..Done::default() };
-    let status = repos.add_status();
+    let status = status_of(repos);
     let (_, main_on) = main_words(repos, &repos.add_list());
     let mut ids = vec![search_id()];
     if places.retry.is_some() {
@@ -365,7 +399,7 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     let folder_focused = ui.memory(|memory| memory.has_focus(folder_id()));
     let did = folder(ui, places, &mut state, palette);
     if did.changed {
-        state.suggestions = prompt::suggest(&state.folder);
+        state.suggestions = folder_suggestions(repos, &state.folder);
         state.refused = None;
     }
     if folder_focused {
@@ -374,11 +408,19 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     done.close |= take_press(ui, Key::Escape, None);
 
     let mut search = repos.add_filter.clone();
+    if search != state.search {
+        // The core changed the search: typing goes on at its end, and the list starts at its top.
+        widgets::put_cursor_at_end(ui.ctx(), search_id(), &search);
+        dialogs.list_scroll = 0.0;
+    }
     field_frame(ui, places.search, palette);
     widgets::field(ui, places.search, &mut search, HINT, Icon::Search, palette, search_id());
     if search != repos.add_filter {
-        done.search = Some(search);
+        // A new search starts at the top of what it finds.
+        dialogs.list_scroll = 0.0;
+        done.search = Some(search.clone());
     }
+    state.search = search;
     done.retry = status_line(ui, places, &status, palette);
     done.clicked = found(ui, places.list, repos, &list, word.as_deref(), palette, dialogs, &mut state);
     if let Some(rect) = places.also
@@ -448,7 +490,7 @@ fn status_line(ui: &mut Ui, places: Places, status: &AddStatus, palette: Palette
     if status.busy {
         spinner(ui, pos2(left + SPINNER / 2.0, rect.center().y), palette);
         left += SPINNER + SPINNER_GAP;
-        ui.ctx().request_repaint();
+        ui.ctx().request_repaint_after(SPINNER_FRAME);
     }
     let right = places.retry.map_or(rect.right(), |retry| retry.left() - ADD_ROW_PAD);
     let regular = font(TEXT, FontFamily::Proportional);
@@ -541,8 +583,9 @@ fn found(
         return clicked;
     }
     let highlighted = repos.add_selected.as_deref().and_then(|id| list.iter().position(|remote| remote.id().eq_ignore_ascii_case(id)));
-    if repos.add_selected != state.shown {
-        state.shown.clone_from(&repos.add_selected);
+    let now = repos.add_selected.clone().zip(highlighted);
+    if now != state.shown {
+        state.shown = now;
         if let Some(index) = highlighted {
             dialogs.list_scroll = follow(index, dialogs.list_scroll, rect.height());
         }
@@ -574,7 +617,8 @@ fn found(
 
 /// Draws the found repository `remote`, the row `index` of `list`, at `row`: on the selection's fill when
 /// `highlighted`, its checkbox (one that takes no click when it is installed), its name over its description, its
-/// note at the right; an installed row at [`ADD_INSTALLED_OPACITY`]. Says whether the row and its checkbox were
+/// note at the right; an installed row set back (its words in the palette's `installed` colours, its checkbox at
+/// [`ADD_INSTALLED_BOX_OPACITY`]). Says whether the row and its checkbox were
 /// clicked.
 #[expect(clippy::too_many_arguments, reason = "the row, the core and its list, the repository and how it is drawn")]
 fn found_row(
@@ -595,13 +639,12 @@ fn found_row(
         ui.painter().rect_filled(fill, ADD_PICK[1], palette.on_glass.gamma_multiply(HOVER_OPACITY));
     }
     let installed = repos.is_installed(remote);
-    let strength = if installed { ADD_INSTALLED_OPACITY } else { 1.0 };
-    let (ink, quiet) = (palette.on_glass.gamma_multiply(strength), palette.quiet.gamma_multiply(strength));
+    let (ink, quiet) = if installed { (palette.installed, palette.installed_quiet) } else { (palette.on_glass, palette.quiet) };
     let check = Rect::from_min_size(pos2(row.left() + ADD_ROW_PAD, row.top()), vec2(CHECKBOX + ADD_ROW_PAD, row.height()));
     let mut on_box = false;
     if installed {
         let shape = widgets::box_rect(check);
-        let stroke = Stroke::new(HAIRLINE, palette.on_glass.gamma_multiply(CHECKBOX_STROKE_OPACITY * strength));
+        let stroke = Stroke::new(HAIRLINE, palette.on_glass.gamma_multiply(CHECKBOX_STROKE_OPACITY * ADD_INSTALLED_BOX_OPACITY));
         ui.painter().rect_stroke(shape, RADIUS_SMALL, stroke, StrokeKind::Inside);
     } else {
         let tick = if repos.is_marked(remote) { Tick::On } else { Tick::Off };
@@ -1025,17 +1068,14 @@ mod tests {
         let top = rows_f(11) * ADD_ROW - window.dialogs.list_scroll;
         assert!(top >= -1e-3 && top + ADD_ROW <= list.height() + 1e-3, "row 10 at {top} in {}", list.height());
 
-        // The folder field's rows open too: the buttons stay in view, the rows show one row at least.
-        let folders = Temp(std::env::temp_dir().join(format!("devassist-gui-add-folders-{}", std::process::id())));
-        for index in 0..8 {
-            std::fs::create_dir_all(folders.0.join(format!("project-{index}"))).unwrap();
-        }
+        // The folder field's rows open too (the demo's four made-up folders): the buttons stay in view, the rows
+        // show one row at least.
         window.key(Key::Tab);
         assert_eq!(window.ctx.memory(Memory::focused), Some(folder_id()));
         select_all(&mut window);
-        window.frame(vec![Event::Text(folders.0.join("project").display().to_string())]);
+        window.frame(vec![Event::Text(format!("{}{}", crate::demo::CODE_DIR, std::path::MAIN_SEPARATOR))]);
         window.frame(Vec::new());
-        assert_eq!(state(&window).suggestions.len(), 8);
+        assert_eq!(state(&window).suggestions.len(), 4);
         let places = parts(&window);
         assert!(places.folder.height() >= widgets::folder_field_height(1) - 1e-3, "{places:?}");
         assert!(in_view(&window), "{places:?}");
@@ -1106,5 +1146,95 @@ mod tests {
         assert_eq!(window.repos().add_filter, "zzzz/", "the account is listed");
         assert!(window.shows(Which::Add));
         assert_eq!(window.ctx.memory(Memory::focused), Some(search_id()));
+    }
+
+    #[test]
+    fn the_demo_suggests_its_own_folders_and_never_asks_the_disk() {
+        let before = disk_reads();
+        let mut window = adding();
+        let sep = std::path::MAIN_SEPARATOR;
+        let code = crate::demo::CODE_DIR;
+        assert_eq!(state(&window).suggestions, [format!("{code}{sep}work"), format!("{code}{sep}work-archive")]);
+        window.key(Key::Tab);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(folder_id()));
+        select_all(&mut window);
+        window.frame(vec![Event::Text(format!("{code}{sep}"))]);
+        assert_eq!(state(&window).suggestions.len(), 4, "{:?}", state(&window).suggestions);
+        window.frame(vec![Event::Text("P".to_owned())]);
+        assert_eq!(state(&window).suggestions, [format!("{code}{sep}play")], "matched as Tab matches, ignoring case");
+        assert_eq!(disk_reads(), before, "the held demo read the disk for folders");
+        // A live session asks the disk.
+        let mut repos = Repos::offline(test_settings());
+        repos.run(Action::Add);
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        window.frame(Vec::new());
+        assert_eq!(disk_reads(), before + 1);
+    }
+
+    #[test]
+    fn no_status_in_add_names_tab() {
+        let mut window = adding();
+        for typed in ["", "artcraft", "zzzz", "acme/", "someone/"] {
+            window.session.repos_mut().unwrap().set_add_filter(typed);
+            window.frame(Vec::new());
+            let text = status_of(window.repos()).text;
+            assert!(!text.to_lowercase().contains("tab"), "{typed:?}: {text}");
+        }
+        window.session.repos_mut().unwrap().set_add_filter("artcraft");
+        assert!(window.repos().add_status().text.contains("tab lists"), "the terminal app's words changed");
+        assert_eq!(status_of(window.repos()).text, "8 repositories · 2 cloned");
+    }
+
+    #[test]
+    fn typing_goes_on_after_the_slash_when_an_account_was_listed() {
+        let mut window = adding();
+        // Nothing ticked: with ticks, Enter clones them.
+        window.session.repos_mut().unwrap().toggle_add_mark_of("acme/artcraft");
+        window.session.repos_mut().unwrap().toggle_add_mark_of("acme/artcraft-docs");
+        window.frame(vec![Event::Text("zzzz".to_owned())]);
+        assert!(window.repos().add_list().is_empty());
+        window.dialogs.list_scroll = 30.0;
+        // Enter lists the plain word as an account: the core makes it "zzzz/".
+        tap(&mut window, Key::Enter, None);
+        assert_eq!(window.repos().add_filter, "zzzz/");
+        assert!(window.shows(Which::Add));
+        assert_eq!(window.ctx.memory(Memory::focused), Some(search_id()));
+        assert!(window.dialogs.list_scroll.abs() < 1e-3, "the list kept its scroll for a new search");
+        tap(&mut window, Key::X, Some("x"));
+        assert_eq!(window.repos().add_filter, "zzzz/x", "the letter did not land after the slash");
+    }
+
+    #[test]
+    fn space_on_an_installed_highlight_ticks_nothing() {
+        let mut window = adding();
+        window.session.repos_mut().unwrap().pick_add("acme/portal");
+        window.frame(Vec::new());
+        let before: Vec<String> = window.repos().add_marked.iter().map(RemoteRepo::id).collect();
+        tap(&mut window, Key::Space, Some(" "));
+        let after: Vec<String> = window.repos().add_marked.iter().map(RemoteRepo::id).collect();
+        assert_eq!(after, before);
+        assert_eq!(window.repos().add_filter, "", "Space was typed");
+        assert!(window.shows(Which::Add));
+    }
+
+    #[test]
+    fn enter_while_a_lookup_runs_with_nothing_to_clone_does_nothing() {
+        let reached = devassist_core::sys::reached(devassist_core::sys::Reach::Network);
+        let mut repos = Repos::offline(test_settings());
+        repos.remotes = vec![remote("storytold", "alpha")];
+        repos.run(Action::Add);
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        window.frame(Vec::new());
+        window.frame(vec![Event::Text("someone/".to_owned())]);
+        assert!(window.repos().add_status().busy, "{}", window.repos().add_status().text);
+        assert_eq!(window.said(), ["Cancel", "Clone"]);
+        tap(&mut window, Key::Enter, None);
+        assert!(window.shows(Which::Add));
+        assert_eq!(window.repos().add_filter, "someone/");
+        assert_eq!(state(&window).refused, None);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(search_id()), "the search lost the focus");
+        window.key(Key::Escape);
+        assert!(!window.open());
+        assert_eq!(devassist_core::sys::reached(devassist_core::sys::Reach::Network), reached);
     }
 }

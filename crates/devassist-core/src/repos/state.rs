@@ -1051,6 +1051,19 @@ impl Repos {
     }
 
     pub fn add_status(&self) -> AddStatus {
+        self.add_status_with(true)
+    }
+
+    /// `add_status` without its hint at a key: where Tab lists the
+    /// typed word as an account, that part is left out. For a window,
+    /// where Tab moves the focus.
+    pub fn add_status_plain(&self) -> AddStatus {
+        self.add_status_with(false)
+    }
+
+    /// Add's status line, with or without the hint that Tab lists the
+    /// typed word.
+    fn add_status_with(&self, tab_hint: bool) -> AddStatus {
         let plain = |text: String| AddStatus {
             text,
             error: false,
@@ -1095,11 +1108,13 @@ impl Repos {
             RemoteState::Failed(err) => failed(err.clone()),
             RemoteState::Ready => {
                 let other = match self.add_word() {
-                    Some(word) => format!("tab lists github.com/{word}"),
-                    None => "type owner/ or paste a link to list any account".to_string(),
+                    Some(word) if tab_hint => Some(format!("tab lists github.com/{word}")),
+                    Some(_) => None,
+                    None => Some("type owner/ or paste a link to list any account".to_string()),
                 };
+                let other = other.map(|other| format!(" · {other}")).unwrap_or_default();
                 if self.owners.is_empty() && self.pinned.is_empty() {
-                    return plain(format!("No default account · {other}"));
+                    return plain(format!("No default account{other}"));
                 }
                 let cloned = self
                     .remotes
@@ -1107,7 +1122,7 @@ impl Repos {
                     .filter(|repo| self.is_installed(repo))
                     .count();
                 plain(format!(
-                    "{} · {cloned} cloned · {other}",
+                    "{} · {cloned} cloned{other}",
                     count_label(self.remotes.len())
                 ))
             }
@@ -4725,6 +4740,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn the_plain_add_status_names_no_tab() {
+        let mut app = Repos::empty(test_settings());
+        app.remotes_state = RemoteState::Ready;
+        app.remotes = vec![remote("storytold", "alpha"), remote("storytold", "beta")];
+        app.mode = Mode::Add;
+        // The terminal app's words are as they were.
+        assert_eq!(
+            app.add_status().text,
+            "2 repositories · 0 cloned · type owner/ or paste a link to list any account"
+        );
+        assert_eq!(app.add_status_plain().text, app.add_status().text);
+        app.add_filter = "someone".into();
+        assert_eq!(
+            app.add_status().text,
+            "2 repositories · 0 cloned · tab lists github.com/someone"
+        );
+        assert_eq!(app.add_status_plain().text, "2 repositories · 0 cloned");
+        app.owners.clear();
+        assert_eq!(
+            app.add_status().text,
+            "No default account · tab lists github.com/someone"
+        );
+        assert_eq!(app.add_status_plain().text, "No default account");
+        app.add_filter.clear();
+        assert_eq!(
+            app.add_status_plain().text,
+            "No default account · type owner/ or paste a link to list any account"
+        );
     }
 
     #[test]

@@ -111,6 +111,9 @@ pub struct App {
     /// The settings warning, said in the status bar for the first [`NOTICE_TIME`]: a window started without a
     /// console has nowhere else to say it.
     notice: Option<String>,
+    /// A picture of the demo's Add dialog with the keyboard in its folder field (`--show add-folder`): the focus
+    /// goes there once the dialog is open.
+    folder_focus: bool,
 }
 
 impl App {
@@ -135,6 +138,7 @@ impl App {
             screen: Screen::default(),
             dialogs: Dialogs::default(),
             notice,
+            folder_focus: launch.demo && launch.show.as_deref() == Some(demo::ADD_FOLDER),
         }
     }
 }
@@ -224,6 +228,9 @@ impl eframe::App for App {
         });
         // Over everything but the window's own top row: the dialog, also one the screen asked for in this frame.
         dialogs::after(&ctx, dialog, self.session.repos_mut(), &drawn, mode, &mut self.dialogs);
+        if self.folder_focus && dialogs::focus_add_folder(&ctx, self.session.repos()) {
+            self.folder_focus = false;
+        }
     }
 }
 

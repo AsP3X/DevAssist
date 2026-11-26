@@ -159,8 +159,12 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 5] =
-    [("progress", show_progress), ("remove", show_remove), ("group", show_group), ("menu", show_menu), ("add", show_add)];
+pub const SHOWS: [(&str, Opener); 6] =
+    [("progress", show_progress), ("remove", show_remove), ("group", show_group), ("menu", show_menu), ("add", show_add), (ADD_FOLDER, show_add)];
+
+/// The name `--show` opens the Add dialog by with the keyboard in its folder field, so a picture shows the folders
+/// it suggests (the window gives the field the focus once the dialog is open).
+pub const ADD_FOLDER: &str = "add-folder";
 
 /// What sets an overlay up in the demo's repositories.
 pub type Opener = fn(&mut Repos);
@@ -232,9 +236,32 @@ fn show_menu(repos: &mut Repos) {
     repos.enter_row();
 }
 
-/// The folder the demo's Add dialog offers for a clone: the drawing's `D:\code\work` (a full path elsewhere too,
-/// one that is nowhere, so its folder field suggests nothing).
+/// The folder the demo's made-up folders are in: the drawing's `D:\code` (`/srv/code` on other systems).
+pub const CODE_DIR: &str = if cfg!(windows) { r"D:\code" } else { "/srv/code" };
+
+/// The folder the demo's Add dialog offers for a clone: the drawing's `D:\code\work`, one of [`FOLDERS`].
 pub const CLONE_DIR: &str = if cfg!(windows) { r"D:\code\work" } else { "/srv/code/work" };
+
+/// The made-up folders in [`CODE_DIR`] the demo's folder fields suggest. The demo never asks the disk for folders:
+/// what it suggests is only these ([`folders_matching`]).
+const FOLDERS: [&str; 4] = ["forks", "play", "work", "work-archive"];
+
+/// The demo's made-up folders that match `text` as the core's `prompt::suggest` matches folders on disk: those in
+/// the folder `text` names up to its last separator, whose names start with what follows it, ignoring case; full
+/// paths, sorted. Quotes and spaces around `text` are dropped. Reads nothing.
+#[must_use]
+pub fn folders_matching(text: &str) -> Vec<String> {
+    let same = |path: &str| path.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR).to_lowercase();
+    let text = text.trim().trim_matches('"').trim();
+    let Some(cut) = text.rfind(['/', '\\']) else { return Vec::new() };
+    let (head, typed) = text.split_at(cut + 1);
+    let parent = format!("{CODE_DIR}{}", std::path::MAIN_SEPARATOR);
+    if same(head) != same(&parent) {
+        return Vec::new();
+    }
+    let typed = typed.to_lowercase();
+    FOLDERS.iter().filter(|name| name.to_lowercase().starts_with(&typed)).map(|name| format!("{parent}{name}")).collect()
+}
 
 /// What the demo's GitHub knows: a made-up list of eight, by owner, name, description, archived and private.
 /// Two of them are installed (acme's api and portal); one is of another owner, so every row names its owner.
@@ -310,7 +337,7 @@ mod tests {
             repos.drain();
         }
         assert!(repos.mode == Mode::Progress && !repos.waiting());
-        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, add, not nothing");
+        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, add, add-folder, not nothing");
     }
 
     #[test]

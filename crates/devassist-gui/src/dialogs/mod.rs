@@ -366,6 +366,25 @@ pub fn show(ctx: &Context, plan: &Plan, repos: &mut Repos, drawn: &[Drawn], mode
     }
 }
 
+/// The box of the found repositories of the Add dialog `plan` places, if it is the Add dialog's.
+#[cfg(test)]
+pub(crate) fn add_found_box(plan: &Plan) -> Option<Rect> {
+    match &plan.0 {
+        Planned::Dialog(_, Parts::Add(places)) => Some(places.list),
+        _ => None,
+    }
+}
+
+/// Gives the keyboard's focus to the Add dialog's folder field, when the Add dialog is open on `repos`; says
+/// whether it did. For a picture of its suggestions (`--show add-folder`).
+pub fn focus_add_folder(ctx: &Context, repos: Option<&Repos>) -> bool {
+    let open = repos.and_then(which) == Some(Which::Add) && overlay::is_open(ctx);
+    if open {
+        ctx.memory_mut(|memory| memory.request_focus(add::folder_id()));
+    }
+    open
+}
+
 /// The id of the shield under every dialog.
 fn shield_id() -> Id {
     Id::unique("dialog-shield")

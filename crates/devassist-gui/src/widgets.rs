@@ -556,8 +556,8 @@ pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[S
     did
 }
 
-/// Puts the cursor of the text field `id` at the end of `text`.
-fn put_cursor_at_end(ctx: &Context, id: Id, text: &str) {
+/// Puts the cursor of the text field `id` at the end of `text`: for a field whose text was set from outside it.
+pub fn put_cursor_at_end(ctx: &Context, id: Id, text: &str) {
     let mut state = TextEditState::load(ctx, id).unwrap_or_default();
     state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(text.chars().count()))));
     state.store(ctx, id);

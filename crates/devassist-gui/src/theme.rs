@@ -376,8 +376,18 @@ pub const ADD_ROW: f32 = 52.0;
 pub const ADD_ROW_PAD: f32 = 12.0;
 /// The gap between a found repository's name and its description (`Text`'s `gap: 2`).
 pub const ADD_TEXT_GAP: f32 = 2.0;
-/// How strong an installed row of the found repositories is drawn (`opacity: 0.5`).
-pub const ADD_INSTALLED_OPACITY: f32 = 0.5;
+/// How strong the checkbox of an installed row of the found repositories is drawn, which takes no click
+/// (`opacity: 0.5`).
+pub const ADD_INSTALLED_BOX_OPACITY: f32 = 0.5;
+/// How strong the name and the "Installed" of an installed row are, of the text colour, in the light mode. The
+/// design's `opacity: 0.5`, raised to the least that holds 4.5 everywhere (the controller's ruling of 2026-11-26).
+pub const ADD_INSTALLED_INK_LIGHT: f32 = 0.57;
+/// How strong the description of an installed row is, of the quiet colour, in the light mode.
+pub const ADD_INSTALLED_QUIET_LIGHT: f32 = 0.77;
+/// How strong the name and the "Installed" of an installed row are, of the text colour, in the dark mode.
+pub const ADD_INSTALLED_INK_DARK: f32 = 0.86;
+/// How strong the description of an installed row is, of the quiet colour, in the dark mode.
+pub const ADD_INSTALLED_QUIET_DARK: f32 = 0.86;
 /// The fewest rows of the found repositories the Add dialog keeps in view while its folder field shows no rows (the
 /// plan's own: the design draws five).
 pub const ADD_LEAST_ROWS: usize = 3;
@@ -404,6 +414,8 @@ pub const SPINNER_SWEEP: f32 = 0.75;
 pub const SPINNER_STEPS: u16 = 24;
 /// How long the spinner takes for one turn, in seconds.
 pub const SPINNER_TURN: f64 = 1.0;
+/// How often the spinner is drawn again while it turns.
+pub const SPINNER_FRAME: Duration = Duration::from_millis(33);
 /// The gap between the spinner and the status line's words.
 pub const SPINNER_GAP: f32 = 8.0;
 /// The width of the ring around the control of an overlay that Enter and Space act on (not the design's: it has
@@ -501,6 +513,10 @@ pub struct Palette {
     pub ok: Color32,
     /// The colour of the veil laid over the backdrop.
     pub veil: Color32,
+    /// The name and the "Installed" of an installed row of the Add dialog: set back, still readable.
+    pub installed: Color32,
+    /// The description of an installed row of the Add dialog.
+    pub installed_quiet: Color32,
 }
 
 /// The window's colours in `mode`.
@@ -526,6 +542,8 @@ pub fn palette(mode: Mode) -> Palette {
             danger_tint: rgba(0xb3, 0x26, 0x1e, 0x1a),
             ok: rgb(0x1c, 0x6b, 0x3a),
             veil: rgb(0xff, 0xff, 0xff),
+            installed: rgb(0x00, 0x00, 0x00).gamma_multiply(ADD_INSTALLED_INK_LIGHT),
+            installed_quiet: rgb(0x00, 0x00, 0x00).gamma_multiply(quiet_opacity(mode) * ADD_INSTALLED_QUIET_LIGHT),
         },
         Mode::Dark => Palette {
             on_glass: rgb(0xff, 0xff, 0xff),
@@ -542,6 +560,8 @@ pub fn palette(mode: Mode) -> Palette {
             danger_tint: rgba(0x6b, 0x1d, 0x18, 0xcc),
             ok: rgb(0x77, 0xdb, 0xa0),
             veil: rgb(0x06, 0x0d, 0x18),
+            installed: rgb(0xff, 0xff, 0xff).gamma_multiply(ADD_INSTALLED_INK_DARK),
+            installed_quiet: rgb(0xff, 0xff, 0xff).gamma_multiply(quiet_opacity(mode) * ADD_INSTALLED_QUIET_DARK),
         },
     }
 }
