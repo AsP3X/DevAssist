@@ -700,12 +700,16 @@ const SHOTS: [Shot; 15] = [
         },
     },
     Shot {
-        // The pointer on portal's row: an installed row under the hover's fill (artcraft is highlighted).
+        // The pointer on portal's row: an installed row under the hover's fill (artcraft is highlighted). Searched
+        // for "por" (portal, and artcraft's "exporting"), so portal's row is in view in the smallest window too.
         name: "add hovered",
-        over: Over::Hovering(6),
+        over: Over::Hovering(1),
         set_up: |repos| {
             demo::show(repos, "add").unwrap();
-            assert_eq!(repos.add_list()[6].id(), "acme/portal", "the hovered row is not the installed portal");
+            repos.set_add_filter("por");
+            let found: Vec<String> = repos.add_list().iter().map(|remote| remote.id()).collect();
+            assert_eq!(found, ["acme/artcraft", "acme/portal"], "the hovered row is not the installed portal");
+            assert_eq!(repos.add_selected.as_deref(), Some("acme/artcraft"), "the hovered row is the highlighted one");
         },
     },
     Shot {
@@ -959,6 +963,8 @@ struct Frame {
     layout: shell::Layout,
     /// The box of the Add dialog's found repositories, when the Add dialog is drawn.
     found_box: Option<Rect>,
+    /// The rows of the Add dialog's found repositories, each with whether it is installed.
+    rows: Vec<(Rect, bool)>,
 }
 
 /// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
@@ -986,19 +992,10 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     };
     let mut pointer = None;
     let mut found = None;
+    let mut rows: Vec<(Rect, bool)> = Vec::new();
     for frame in 0..=SETTLE {
         let mut drew = None;
-        let events = match (shot.over, pointer) {
-            (Over::Hovering(index), _) if frame >= 1 => found.map_or_default(|found: Rect| {
-                let row = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
-                vec![egui::Event::PointerMoved(pos2(found.center().x, found.top() + (row + 0.5) * ADD_ROW))]
-            }),
-            (Over::Folder(kind), Some(at)) if kind != FolderShot::Empty => widgets::tests::folder_shot_events(frame, at, kind == FolderShot::Lit),
-            (Over::Entered, _) if frame == 2 => {
-                vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]
-            }
-            _ => Vec::new(),
-        };
+        let events = shot_events(shot.over, frame, pointer, found);
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
@@ -1044,6 +1041,10 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
                 dialogs::after(&ctx, planned, session.repos_mut(), &overlay_glass, mode, &mut dialogs);
             }
             let count = ctx.graphics(|layers| layers.get(overlay::layer()).map_or(0, |list| list.next_idx().0));
+            rows = match (found, session.repos()) {
+                (Some(found), Some(repos)) => dialogs::add_rows(found, repos, &dialogs),
+                _ => Vec::new(),
+            };
             drew = Some((count, wants.as_slice().to_vec(), layout));
         });
         picture::take_textures(std::mem::take(&mut output.textures_delta), textures);
@@ -1051,12 +1052,52 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             textures.insert(GLASS_TEXTURE, picture.image());
         }
         let (overlay, wants, layout) = drew.unwrap();
-        last = Some(Frame { ctx: ctx.clone(), shapes: std::mem::take(&mut output.shapes), overlay, wants, layout, found_box: found });
+        last = Some(Frame {
+            ctx: ctx.clone(),
+            shapes: std::mem::take(&mut output.shapes),
+            overlay,
+            wants,
+            layout,
+            found_box: found,
+            rows: rows.clone(),
+        });
     }
     if shot.over != Over::Nothing {
         assert!(overlay::is_open(&ctx) && glass.is_some(), "{}: its overlay is not drawn", shot.name);
     }
-    last.unwrap()
+    let last = last.unwrap();
+    if let Over::Hovering(index) = shot.over {
+        hover_lands(shot.name, &last, index, size, mode);
+    }
+    last
+}
+
+/// What a person does in the frame `frame` of a shot over `over`: the folder field's keys and pointer at `pointer`,
+/// Enter once the dialog is open, or the pointer on a row of the Add list `found` (from the last frame).
+fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Rect>) -> Vec<egui::Event> {
+    match (over, pointer) {
+        (Over::Hovering(index), _) if frame >= 1 => found.map_or_default(|found: Rect| {
+            let row = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
+            vec![egui::Event::PointerMoved(pos2(found.center().x, found.top() + (row + 0.5) * ADD_ROW))]
+        }),
+        (Over::Folder(kind), Some(at)) if kind != FolderShot::Empty => widgets::tests::folder_shot_events(frame, at, kind == FolderShot::Lit),
+        (Over::Entered, _) if frame == 2 => {
+            vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Checks that the hovered row `index` of the Add list in the frame `last` of the shot `name`, at the window `size`
+/// in `mode`, is whole inside the list and that the frame fills it with the hover's fill: the shot measures a
+/// hovered row, not a resting one.
+fn hover_lands(name: &str, last: &Frame, index: usize, size: egui::Vec2, mode: Mode) {
+    let found_box = last.found_box.unwrap_or_else(|| panic!("{name}: no Add list"));
+    let (row, _) = last.rows[index];
+    assert!(found_box.contains_rect(row), "{name} at {size:?}: the hovered row {row:?} is not inside the list {found_box:?}");
+    let hover = theme::palette(mode).on_glass.gamma_multiply(HOVER_OPACITY);
+    let filled = last.shapes.iter().any(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == hover && row.contains_rect(rect.rect)));
+    assert!(filled, "{name} at {size:?}: no hover fill drawn on the hovered row");
 }
 
 /// Measures the shot `shot` on `stage`: every text and measured graphic of its overlay, and, on the screen, the
@@ -1114,12 +1155,14 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                         let on_inset =
                             shot.over.is_dialog() && fills.iter().any(|(fill, name, overlaid)| *overlaid && name == "field" && fill.contains(centre));
                         let danger_status = shot.over == Over::Nothing && region(centre) == "status" && ink_name == "danger";
-                        // The words of the Add dialog's found repositories are information in every row, an installed
-                        // one too (it can be highlighted): 4.5, whatever their ink or size (the controller's ruling of
-                        // 2026-11-26).
-                        let in_found = on_overlay && frame.found_box.is_some_and(|found_box| found_box.contains(centre));
+                        // The words of an installed row of the Add list (its name, description and "Installed") are
+                        // set back yet still information (the row can be highlighted): held to 4.5, whatever their
+                        // size, by their place (the controller's ruling of 2026-11-26). Every other text keeps its bar.
+                        let in_installed = on_overlay
+                            && frame.found_box.is_some_and(|found_box| found_box.contains(centre))
+                            && frame.rows.iter().any(|(row, installed)| *installed && row.contains(centre));
                         let least = match least_for(&font, &ink_name) {
-                            _ if in_found => LEAST_TEXT,
+                            _ if in_installed => LEAST_TEXT,
                             least if least == LEAST_QUIET && (on_inset || danger_status) => LEAST_TEXT,
                             least => least,
                         };

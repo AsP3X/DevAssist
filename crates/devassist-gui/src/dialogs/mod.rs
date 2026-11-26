@@ -385,6 +385,22 @@ pub fn focus_add_folder(ctx: &Context, repos: Option<&Repos>) -> bool {
     open
 }
 
+/// The rows of the Add dialog's found repositories in the box `found` (from [`add_found_box`]), as the dialog lays
+/// them out for `repos` with the scroll `dialogs` keep: each row's whole rectangle (it may lie partly outside the
+/// box) and whether its repository is installed.
+#[cfg(test)]
+pub(crate) fn add_rows(found: Rect, repos: &Repos, dialogs: &Dialogs) -> Vec<(Rect, bool)> {
+    repos
+        .add_list()
+        .iter()
+        .enumerate()
+        .map(|(index, remote)| {
+            let top = found.top() + rows(index) * crate::theme::ADD_ROW - dialogs.list_scroll;
+            (Rect::from_min_size(pos2(found.left(), top), egui::vec2(found.width(), crate::theme::ADD_ROW)), repos.is_installed(remote))
+        })
+        .collect()
+}
+
 /// The id of the shield under every dialog.
 fn shield_id() -> Id {
     Id::unique("dialog-shield")
