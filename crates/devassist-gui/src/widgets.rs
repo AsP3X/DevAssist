@@ -1423,6 +1423,12 @@ pub(crate) mod tests {
         folder_row(folder_inset(field, rows), 1, 0.0).center()
     }
 
+    /// The middle of the row of the suggestion `index` under a folder field at `field` (with the room its rows take),
+    /// its rows unscrolled.
+    pub(crate) fn folder_row_centre(field: Rect, index: usize) -> Pos2 {
+        folder_row(folder_inset(field, index + 1), index, 0.0).center()
+    }
+
     /// The events of frame `frame` of a picture of the test dialog: the pointer resting at `pointer` all along, and,
     /// when `lit`, Down in the third frame (the pointer has stopped by then), which lights the first row.
     pub(crate) fn folder_shot_events(frame: usize, pointer: Pos2, lit: bool) -> Vec<egui::Event> {

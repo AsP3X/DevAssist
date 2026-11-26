@@ -169,7 +169,7 @@ thread_local! {
 
 /// How often this thread's dialogs asked the disk for folders so far.
 #[cfg(test)]
-fn disk_reads() -> usize {
+pub(crate) fn disk_reads() -> usize {
     DISK_READS.with(std::cell::Cell::get)
 }
 
@@ -461,6 +461,25 @@ pub(crate) fn add_found_box(plan: &Plan) -> Option<Rect> {
     match &plan.0 {
         Planned::Dialog(_, Parts::Add(places)) => Some(places.list),
         _ => None,
+    }
+}
+
+/// The folder field, with the room its rows take, of the Add or the folder dialog that `plan` places.
+#[cfg(test)]
+pub(crate) fn folder_field_box(plan: &Plan) -> Option<Rect> {
+    match &plan.0 {
+        Planned::Dialog(_, Parts::Add(places)) => Some(places.folder),
+        Planned::Dialog(_, Parts::Folder(places)) => Some(places.field),
+        _ => None,
+    }
+}
+
+/// The menu's pane and its side menu's, when `plan` places the menu.
+#[cfg(test)]
+pub(crate) fn menu_panes(plan: &Plan) -> Option<(Rect, Option<Rect>)> {
+    match &plan.0 {
+        Planned::Menu(places) => Some((places.pane, places.side)),
+        Planned::Dialog(..) => None,
     }
 }
 

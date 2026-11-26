@@ -516,12 +516,16 @@ mod tests {
         Free,
         /// Forget, which takes these off the list in memory; their folders are nowhere.
         Forgot(&'static [&'static str]),
+        /// On a demo emptied on purpose (no repositories), nothing asked for work, as [`Expect::Free`].
+        Empty,
     }
 
-    /// How often the process has reached out so far: programs, the clipboard, the network, folders deleted.
-    fn reached_now() -> [usize; 4] {
+    /// How often the process has reached out so far: programs, the clipboard, the network, folders deleted; and how
+    /// often this thread's dialogs asked the disk for folders.
+    fn reached_now() -> [usize; 5] {
         use devassist_core::sys::{Reach, reached};
-        [Reach::Program, Reach::Clipboard, Reach::Network, Reach::Disk].map(reached)
+        let [program, clipboard, network, disk] = [Reach::Program, Reach::Clipboard, Reach::Network, Reach::Disk].map(reached);
+        [program, clipboard, network, disk, crate::dialogs::disk_reads()]
     }
 
     /// The walk's window, on a fresh demo with `start` done to it first.
@@ -532,21 +536,37 @@ mod tests {
     }
 
     /// Checks, after the press `what`, that the demo ran and wrote nothing and reached nothing since `before`.
-    fn still_held(window: &Window, what: &str, expect: Expect, before: [usize; 4]) {
+    fn still_held(window: &Window, what: &str, expect: Expect, before: [usize; 5]) {
         let repos = window.repos();
         assert!(repos.work_held(), "{what}: the demo's work is no longer held");
         assert!(!repos.busy && !repos.fetching && !repos.waiting(), "{what}: the core is busy");
         assert!(repos.queue.is_empty(), "{what}: work was queued: {}", repos.queue.len());
         let paths: Vec<PathBuf> = repos.installed.iter().map(|repo| repo.path.clone()).collect();
         let gone: &[&str] = if let Expect::Forgot(gone) = expect { gone } else { &[] };
-        let kept: Vec<PathBuf> = ENTRIES.iter().filter(|entry| !gone.contains(&entry.name)).map(|entry| PathBuf::from(entry.path)).collect();
+        let kept: Vec<PathBuf> = ENTRIES
+            .iter()
+            .filter(|entry| !gone.contains(&entry.name) && !matches!(expect, Expect::Empty))
+            .map(|entry| PathBuf::from(entry.path))
+            .collect();
         assert_eq!(paths, kept, "{what}: the demo's rows changed");
         if matches!(expect, Expect::Held) {
             assert_eq!(repos.status, devassist_core::repos::state::HELD, "{what}: refused without saying so");
         }
         // The held core saves nothing (`save_config` returns before the write): the demo's settings file is never made.
         assert!(!repos.config_path.exists(), "{what}: the demo wrote its settings");
-        assert_eq!(reached_now(), before, "{what}: a program ran, the clipboard was written, the network asked or a folder deleted");
+        assert_eq!(
+            reached_now(),
+            before,
+            "{what}: a program ran, the clipboard was written, the network asked, a folder deleted or the disk asked for folders"
+        );
+    }
+
+    /// Checks, after the press `what`, that the status line says what the demo says, or that the held core refused
+    /// what was asked (`HELD`), or that the core refused it for a reason of its own (an error, as a push for two).
+    fn says_held_or_nothing(window: &Window, what: &str) {
+        let repos = window.repos();
+        let said = repos.status == STATUS || repos.status == devassist_core::repos::state::HELD || repos.status_error;
+        assert!(said, "{what}: the status line says {:?}", repos.status);
     }
 
     /// A key pressed with `modifiers`.
@@ -568,10 +588,84 @@ mod tests {
         let mut window = Window::new(crate::session::Session::demo(repos()));
         press_every_key(&mut window, before);
         press_every_key_in_each_overlay(&mut window, before);
-        press_every_control(&mut window, before);
+        for size in [crate::theme::WINDOW, crate::theme::MIN_WINDOW, NARROW, NARROWEST] {
+            press_every_control(&mut window, before, size, false);
+        }
+        press_every_control(&mut window, before, crate::theme::WINDOW, true);
+        press_the_keys_of_the_empty_demo(&mut window, before);
         run_every_line_of_the_menu(&mut window, before);
         run_every_line_of_the_side_menu(&mut window, before);
         press_every_button_of_the_dialogs(&mut window, before);
+        click_everything_in_each_overlay(&mut window, before);
+        type_into_every_field(&mut window, before);
+        press_retry_in_add(&mut window, before);
+    }
+
+    /// Windows narrower than the app allows, where the top row gives way: its capsule's icons only, then the main
+    /// button's icon too. Their controls are the same.
+    const NARROW: [f32; 2] = [900.0, 600.0];
+    /// The narrower of the two.
+    const NARROWEST: [f32; 2] = [780.0, 600.0];
+
+    /// The demo with no repositories: its panel's two lines, the top row's Import and Add repository.
+    fn emptied(repos: &mut Repos) {
+        repos.installed.clear();
+        repos.marked.clear();
+        repos.selected = None;
+    }
+
+    /// The Add dialog with GitHub failed (the test's seam: the catalog's failed state) and a plain word typed, so its
+    /// status line has Retry and its box the row that lists that account.
+    fn show_add_failed(repos: &mut Repos) {
+        show_add(repos);
+        repos.remotes_state = devassist_core::repos::state::RemoteState::Failed("GitHub answered 502".to_owned());
+        repos.set_add_filter("zzzz");
+    }
+
+    /// The Add dialog searched for "docs": a ticked repository is hidden, and the line above the buttons names it.
+    fn show_add_searched(repos: &mut Repos) {
+        show_add(repos);
+        repos.set_add_filter("docs");
+    }
+
+    /// What is done to the walk's window once its overlay is open: nothing, or the keyboard given to the Add dialog's
+    /// folder field, whose rows of folders then show (as `--show add-folder` does).
+    type Prepare = fn(&mut Window);
+
+    /// Leaves the overlay as it opens.
+    fn as_opened(_: &mut Window) {}
+
+    /// Gives the Add dialog's folder field the keyboard inside a frame, as the window does for `--show add-folder`; its
+    /// rows show.
+    fn into_the_folder_field(window: &mut Window) {
+        let ctx = window.ctx.clone();
+        window.between =
+            Some(Box::new(move |session| assert!(crate::dialogs::focus_add_folder(&ctx, session.repos()), "the Add dialog is not open")));
+        window.frame(Vec::new());
+        window.frame(Vec::new());
+        assert!(
+            window.add_folder_rows_open(),
+            "the folder field's rows did not open: {:?} {:?}",
+            window.ctx.memory(egui::Memory::focused),
+            window.overlay_rect()
+        );
+    }
+
+    /// The overlays the walk opens, by name, each with what opens it on a fresh demo and what is done once it is open:
+    /// every overlay `--show` opens, and the Add dialog with GitHub failed (Retry) and searched (a hidden tick).
+    fn walked_overlays() -> Vec<(&'static str, Opener, Prepare)> {
+        let mut overlays: Vec<(&'static str, Opener, Prepare)> =
+            SHOWS.iter().map(|&(name, open)| (name, open, if name == ADD_FOLDER { into_the_folder_field as Prepare } else { as_opened })).collect();
+        overlays.push(("add failed", show_add_failed, as_opened));
+        overlays.push(("add searched", show_add_searched, as_opened));
+        overlays
+    }
+
+    /// The walk's window on a fresh demo with the overlay `open` opened and `prepare` done.
+    fn fresh_overlay(window: &mut Window, name: &str, open: Opener, prepare: Prepare) {
+        fresh(window, open);
+        assert!(window.open(), "the {name} overlay did not open");
+        prepare(window);
     }
 
     /// Every key there is, alone and with Shift, Ctrl or Alt, and every letter, figure and sign typed, each with
@@ -586,7 +680,7 @@ mod tests {
     }
 
     /// Every key there is, and every letter, figure and sign typed, each on a fresh demo.
-    fn press_every_key(window: &mut Window, before: [usize; 4]) {
+    fn press_every_key(window: &mut Window, before: [usize; 5]) {
         let on_api: fn(&mut Repos) = |repos| repos.pick("api");
         // Every input, on a demo whose highlight is on a group's header and on a ticked row: whatever the screen's
         // keys are now or later, each is pressed. Each starts from a fresh demo, and is let go after.
@@ -613,48 +707,89 @@ mod tests {
         assert!(missed.is_empty(), "the walk pressed no key for the commands {missed:?}");
     }
 
-    /// Every input of [`every_input`] in each overlay `--show` opens (the progress, remove and group dialogs and the
-    /// menu), each on a fresh demo with that overlay open: whatever a key does there (a line of the menu, a button
-    /// with the focus, the field), nothing runs, is written or reaches out.
-    fn press_every_key_in_each_overlay(window: &mut Window, before: [usize; 4]) {
+    /// Every input of [`every_input`] in each overlay of [`walked_overlays`] (the progress, remove and group dialogs,
+    /// the menu and its side menu, Add with its search and with its folder field, Import, Move and Push), each on a
+    /// fresh demo with that overlay open: whatever a key does there (a line of the menu, a button with the focus, a
+    /// field), nothing runs, is written or reaches out. Enter in the Add dialog's search and in the Push dialog's field
+    /// asks for the clone and the push, which the held core refuses, saying so.
+    fn press_every_key_in_each_overlay(window: &mut Window, before: [usize; 5]) {
         let inputs = every_input();
-        for (name, open) in SHOWS {
+        let enter = vec![key_event(Key::Enter, Modifiers::NONE, true)];
+        for (name, open, prepare) in walked_overlays() {
             for (press, release) in &inputs {
-                fresh(window, open);
-                assert!(window.open(), "the {name} overlay did not open");
+                fresh_overlay(window, name, open, prepare);
                 window.frame(press.clone());
                 window.frame(release.clone());
                 window.frame(Vec::new());
-                still_held(window, &format!("{press:?} in the {name} overlay"), Expect::Free, before);
+                let what = format!("{press:?} in the {name} overlay");
+                let asks = *press == enter && ["add", "push"].contains(&name);
+                still_held(window, &what, if asks { Expect::Held } else { Expect::Free }, before);
+                // The older overlays change what a demo changes in memory, and say so (a group moved).
+                if !OLDER_OVERLAYS.contains(&name) {
+                    says_held_or_nothing(window, &what);
+                }
             }
         }
     }
 
-    /// Every control of the toolbar, the selection bar and the top row, and the table's, each on a fresh demo.
-    fn press_every_control(window: &mut Window, before: [usize; 4]) {
-        // Every control of the toolbar, the selection bar and the top row, clicked on a fresh demo.
-        fresh(window, unchanged);
+    /// The overlays before this plan's: their keys are swept too, but they may say what they changed in memory.
+    const OLDER_OVERLAYS: [&str; 4] = ["progress", "remove", "group", "menu"];
+
+    /// Every control of the toolbar, the selection bar and the top row, clicked and double-clicked, each on a fresh
+    /// demo (`empty`: with no repositories), in a window of `size`; and, on the demo as it starts in the design's
+    /// window, the table's.
+    fn press_every_control(window: &mut Window, before: [usize; 5], size: [f32; 2], empty: bool) {
+        window.size = size;
+        let start: fn(&mut Repos) = if empty { emptied } else { unchanged };
+        fresh(window, start);
         let layout = window.layout();
         let mut controls = Vec::new();
-        let input = egui::RawInput { screen_rect: Some(crate::dialogs::testing::window()), ..Default::default() };
-        let session = crate::session::Session::demo(repos());
+        let mut top = None;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size[0], size[1]));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut started = repos();
+        start(&mut started);
+        let session = crate::session::Session::demo(started);
         window
             .ctx
             .clone()
             .run_ui(input, |ui| {
                 let plan = repos_screen::plan(ui.painter(), &layout, &session).unwrap();
                 controls = repos_screen::control_places(ui.painter(), &plan);
+                top = repos_screen::top_row(&plan);
             })
             .drop_without_applying_deltas();
+        let (capsule, main) = top.unwrap_or_else(|| panic!("{size:?}: no top row"));
         let words: Vec<&str> = controls.iter().map(|(words, _)| words.as_str()).collect();
-        for asked in ["Update", "Move to group", "Open folder", "Remove", "x", "Import", "Update all", "Add repository"] {
-            assert!(words.contains(&asked), "no control {asked} among {words:?}");
+        let asked: &[&str] = if empty { &["Add repository"] } else { &["Update", "Move to group", "Open folder", "Remove", "x", "Add repository"] };
+        for asked in asked {
+            assert!(words.contains(asked), "{size:?}: no control {asked} among {words:?}");
         }
+        // The top row's capsule (Import and Update all, by their words or their icons) and its main button.
+        assert!(controls.len() >= asked.len() + 2, "{size:?}: the top row's capsule is missing among {words:?}");
         for (words, rect) in &controls {
-            fresh(window, unchanged);
-            window.click(rect.center());
-            let expect = if ["Update", "Open folder", "Update all"].contains(&words.as_str()) { Expect::Held } else { Expect::Free };
-            still_held(window, &format!("the control {words}"), expect, before);
+            for double in [false, true] {
+                fresh(window, start);
+                window.click(rect.center());
+                if double {
+                    window.click(rect.center());
+                }
+                let what = format!("the control {words} at {size:?}{}", if double { ", double-clicked" } else { "" });
+                let expect = match (["Update", "Open folder", "Update all"].contains(&words.as_str()), empty) {
+                    (_, true) => Expect::Empty,
+                    (true, false) => Expect::Held,
+                    (false, false) => Expect::Free,
+                };
+                still_held(window, &what, expect, before);
+                // The top row's controls are this plan's; the others may say what they changed in memory (a sort).
+                if capsule.contains_rect(*rect) || *rect == main {
+                    says_held_or_nothing(window, &what);
+                }
+            }
+        }
+        window.size = crate::theme::WINDOW;
+        if empty || size != crate::theme::WINDOW {
+            return;
         }
         // The table: a group's header, a row, its tick, the status bar (which brings a run back; there is none).
         let lines = crate::repos_view::lines(window.repos());
@@ -673,8 +808,28 @@ mod tests {
         }
     }
 
+    /// Every input of [`every_input`] on the demo with no repositories, each on a fresh one: nothing runs, is written
+    /// or reaches out; and `a` and `i` open Add and Import there too.
+    fn press_the_keys_of_the_empty_demo(window: &mut Window, before: [usize; 5]) {
+        for (press, release) in every_input() {
+            fresh(window, emptied);
+            window.frame(press.clone());
+            window.frame(release);
+            window.frame(Vec::new());
+            still_held(window, &format!("{press:?} on the empty demo"), Expect::Empty, before);
+        }
+        for (key, letter, dialog) in [(Key::A, "a", Which::Add), (Key::I, "i", Which::Folder)] {
+            fresh(window, emptied);
+            window.frame(vec![key_event(key, Modifiers::NONE, true), Event::Text(letter.to_owned())]);
+            window.frame(vec![key_event(key, Modifiers::NONE, false)]);
+            window.frame(Vec::new());
+            assert!(window.shows(dialog), "{letter} on the empty demo opened no {dialog:?}");
+            still_held(window, &format!("{letter} on the empty demo"), Expect::Empty, before);
+        }
+    }
+
     /// Every line of the row's menu, by its letter and by a click, each on a fresh demo.
-    fn run_every_line_of_the_menu(window: &mut Window, before: [usize; 4]) {
+    fn run_every_line_of_the_menu(window: &mut Window, before: [usize; 5]) {
         // The row's menu, opened by its "…" on the ticked api (so it is for api and web): every line it shows, by
         // its letter and by a click. A line that asks for work is refused; Move to a group and Remove open their
         // dialogs, whose buttons come next.
@@ -719,7 +874,7 @@ mod tests {
     /// Every line of the menu's side menu (Migrate), by its letter and by a click, each on a fresh demo with the menu
     /// opened on a ticked row (for api and web) and on one alone (homelab): Move opens its dialog, Push its dialog for
     /// one row and the core's refusal for two. Nothing runs; the dialogs' buttons come next.
-    fn run_every_line_of_the_side_menu(window: &mut Window, before: [usize; 4]) {
+    fn run_every_line_of_the_side_menu(window: &mut Window, before: [usize; 5]) {
         for (row, rows) in [("api", 2), ("homelab", 1)] {
             for item in MigrateItem::ALL {
                 for by_click in [false, true] {
@@ -857,16 +1012,25 @@ mod tests {
     }
 
     /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
-    fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 4]) {
+    fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 5]) {
         let dialogs = walked_dialogs();
         for (name, open, buttons) in dialogs {
             for (words, expect) in buttons {
-                fresh(window, open);
-                assert!(window.open(), "the {name} dialog did not open");
-                assert!(window.said().contains(words), "the {name} dialog has no {words}: {:?}", window.said());
-                window.press(words);
-                window.frame(Vec::new());
-                still_held(window, &format!("{words} in the {name} dialog"), *expect, before);
+                for double in [false, true] {
+                    fresh(window, open);
+                    assert!(window.open(), "the {name} dialog did not open");
+                    let said = window.said();
+                    assert!(said.iter().any(|said| said == words), "the {name} dialog has no {words}: {said:?}");
+                    let (place, _) = window.buttons().into_iter().find(|(_, said)| said == words).unwrap();
+                    window.click(place.center());
+                    if double {
+                        // The second click lands where the button was: on the dialog, or on the screen once it closed.
+                        window.click(place.center());
+                    }
+                    window.frame(Vec::new());
+                    let what = format!("{words} in the {name} dialog{}", if double { ", double-clicked" } else { "" });
+                    still_held(window, &what, *expect, before);
+                }
             }
             // Esc, Enter, Tab and the arrows in it too.
             for key in [Key::Tab, Key::ArrowDown, Key::ArrowUp, Key::Enter, Key::Escape] {
@@ -880,6 +1044,115 @@ mod tests {
             fresh(window, open);
             window.click(pos(30.0, 450.0));
             still_held(window, "a click on the scrim", Expect::Free, before);
+        }
+    }
+
+    /// Every place of each of this plan's overlays of [`walked_overlays`] (the menu with its side menu open, Add with
+    /// its search, with its folder field and its rows, failed and searched, Import, Move and Push) a person can point at: the middle of every text it draws
+    /// (each button's words, each row's name, description and note, each field's text or hint, each folder it
+    /// suggests, each line and key of the menus, Retry, the row that lists an account) and the Add dialog's checkboxes,
+    /// each clicked and double-clicked on a fresh demo with that overlay open. Nothing runs, is written or reaches out,
+    /// and the status line says only the demo's words, or that the held core refused what was asked.
+    fn click_everything_in_each_overlay(window: &mut Window, before: [usize; 5]) {
+        // The older overlays' buttons are pressed by name ([`press_every_button_of_the_dialogs`]).
+        for (name, open, prepare) in walked_overlays().into_iter().filter(|(name, ..)| !OLDER_OVERLAYS.contains(name)) {
+            fresh_overlay(window, name, open, prepare);
+            let room = window.overlay_rect().unwrap_or_else(|| panic!("the {name} overlay has no place"));
+            let mut points: Vec<egui::Pos2> =
+                window.texts.iter().map(|(_, rect, _)| rect.center()).filter(|at| room.contains(*at)).chain(window.add_boxes()).collect();
+            points.dedup_by(|a, b| a.distance(*b) < 2.0);
+            assert!(points.len() >= 4, "the {name} overlay drew almost nothing: {points:?}");
+            if name.starts_with("add") && name != "add failed" {
+                assert!(!window.add_boxes().is_empty(), "the {name} overlay has no checkbox");
+            }
+            for at in points {
+                for double in [false, true] {
+                    fresh_overlay(window, name, open, prepare);
+                    window.click(at);
+                    if double {
+                        window.click(at);
+                    }
+                    window.frame(Vec::new());
+                    let what = format!("a {}click at {at:?} in the {name} overlay", if double { "double " } else { "" });
+                    still_held(window, &what, Expect::Free, before);
+                    says_held_or_nothing(window, &what);
+                }
+            }
+        }
+    }
+
+    /// Words typed into every field of the new dialogs, each on a fresh demo with the field's dialog open (the field
+    /// has the keyboard), after its text and over it, then Enter: Add's search and folder field, Import's, Move's and
+    /// Push's fields. Folders under the demo's made-up one are suggested from the demo's own list; nothing runs, is
+    /// written or reaches out.
+    fn type_into_every_field(window: &mut Window, before: [usize; 5]) {
+        let sep = std::path::MAIN_SEPARATOR;
+        let typed = [
+            "work".to_owned(),
+            format!("{sep}"),
+            format!("{CODE_DIR}{sep}"),
+            format!("{CODE_DIR}{sep}w"),
+            "acme/".to_owned(),
+            "zzzz".to_owned(),
+            "~/code".to_owned(),
+            "\"quoted folder\"".to_owned(),
+            "git@codeberg.org:acme/web.git".to_owned(),
+            "https://gitlab.com/acme/web.git".to_owned(),
+        ];
+        let fields: [(&str, Opener, Prepare); 5] = [
+            ("add", show_add, as_opened),
+            (ADD_FOLDER, show_add, into_the_folder_field),
+            ("import", show_import, as_opened),
+            ("move", show_move, as_opened),
+            ("push", show_push, as_opened),
+        ];
+        for (name, open, prepare) in fields {
+            for words in &typed {
+                for over in [false, true] {
+                    fresh_overlay(window, name, open, prepare);
+                    if over {
+                        window.frame(vec![key_event(Key::A, Modifiers::COMMAND, true)]);
+                        window.frame(vec![key_event(Key::A, Modifiers::COMMAND, false)]);
+                    }
+                    window.frame(vec![Event::Text(words.clone())]);
+                    window.frame(Vec::new());
+                    let what = format!("{words:?} typed into the {name} dialog{}", if over { " over its text" } else { "" });
+                    still_held(window, &what, Expect::Free, before);
+                    window.key(Key::Enter);
+                    window.frame(Vec::new());
+                    let what = format!("{what}, then Enter");
+                    still_held(window, &what, Expect::Free, before);
+                    says_held_or_nothing(window, &what);
+                }
+            }
+        }
+    }
+
+    /// Retry in the Add dialog, with GitHub failed (the test's seam: the catalog's failed state): clicked,
+    /// double-clicked, and pressed by Enter once Tab gave it the focus. The held core asks GitHub nothing, and Add stays
+    /// open on its failed state.
+    fn press_retry_in_add(window: &mut Window, before: [usize; 5]) {
+        for by in ["a click", "a double click", "Enter"] {
+            fresh(window, show_add_failed);
+            let retry = window.add_retry().expect("no Retry beside the failed status");
+            match by {
+                "a click" => window.click(retry.center()),
+                "a double click" => {
+                    window.click(retry.center());
+                    window.click(retry.center());
+                }
+                _ => {
+                    window.key(Key::Tab);
+                    window.key(Key::Enter);
+                }
+            }
+            window.frame(Vec::new());
+            let what = format!("Retry in Add by {by}");
+            assert!(window.shows(Which::Add), "{what}: Add closed");
+            let failed = matches!(window.repos().remotes_state, devassist_core::repos::state::RemoteState::Failed(_));
+            assert!(failed, "{what}: the catalog is no longer failed");
+            still_held(window, &what, Expect::Free, before);
+            says_held_or_nothing(window, &what);
         }
     }
 

@@ -1071,8 +1071,9 @@ mod tests {
         window.key(Key::Escape);
         assert!(!window.open() && window.repos().mode == CoreMode::List);
         let selected = (window.repos().selected.clone(), window.repos().add_selected.clone());
-        // Past the lookup's delay, the window takes in what the core's workers send: nothing was started.
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Until the core waits for nothing (the planned lookup's time has passed and the core let it go, or it was
+        // dropped as Add closed), the window takes in what the core's workers send: nothing was started.
+        until(&mut window, "waiting for nothing", |window| !window.repos().waiting());
         for _ in 0..5 {
             window.session.tick();
             window.frame(Vec::new());

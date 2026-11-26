@@ -106,8 +106,9 @@ impl Window {
         }
     }
 
-    /// The window on `session` from now on, as a fresh one starts: the screen, the dialogs and the keyboard's focus
-    /// as they are in a new window, and two frames drawn, so an overlay of what was there before has closed.
+    /// The window on `session` from now on, as a fresh one starts: the screen, the dialogs, the keyboard's focus and
+    /// what the window's controls keep in egui (a folder field's rows closed by Esc, an overlay's opening) as they are
+    /// in a new window, and two frames drawn, so an overlay of what was there before has closed.
     pub(crate) fn restart(&mut self, session: Session) {
         self.session = session;
         self.screen = Screen::default();
@@ -117,7 +118,10 @@ impl Window {
                 memory.surrender_focus(focused);
             }
         });
-        self.frame(Vec::new());
+        self.ctx.data_mut(egui::util::IdTypeMap::clear);
+        // A second later on egui's clock: no click made before is part of a double click with the next one.
+        let now = self.ctx.input(|input| input.time);
+        self.frame_at(Vec::new(), Some(now + 1.0));
         self.frame(Vec::new());
     }
 
@@ -216,15 +220,15 @@ impl Window {
     }
 
     /// The places of the buttons in the last frame, with their words.
-    pub(crate) fn buttons(&self) -> Vec<(Rect, &'static str)> {
+    pub(crate) fn buttons(&self) -> Vec<(Rect, String)> {
+        let owned = |words: Vec<&str>| words.into_iter().map(str::to_owned).collect::<Vec<String>>();
         let (room, words) = match self.parts() {
-            Parts::Progress(places) => (places.buttons, progress::button_words(self.job())),
-            Parts::Remove(places) => (places.buttons, remove::button_words()),
-            Parts::Group(places) => (places.buttons, group::said(self.repos())),
-            // The main button's words are made each frame; a test's copy of them lives as long as the test.
-            Parts::Add(places) => (places.buttons, add::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
-            Parts::Folder(places) => (places.buttons, folder::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
-            Parts::Push(places) => (places.buttons, push::said(self.repos())),
+            Parts::Progress(places) => (places.buttons, owned(progress::button_words(self.job()))),
+            Parts::Remove(places) => (places.buttons, owned(remove::button_words())),
+            Parts::Group(places) => (places.buttons, owned(group::said(self.repos()))),
+            Parts::Add(places) => (places.buttons, add::said(self.repos())),
+            Parts::Folder(places) => (places.buttons, folder::said(self.repos())),
+            Parts::Push(places) => (places.buttons, owned(push::said(self.repos()))),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()
@@ -246,6 +250,34 @@ impl Window {
         }
     }
 
+    /// Where the overlay's controls were in the last frame: a dialog's pane, or the menu's with its side menu's.
+    pub(crate) fn overlay_rect(&self) -> Option<Rect> {
+        self.plan.as_ref().map(Plan::whole)
+    }
+
+    /// The Add dialog's Retry button in the last frame, while GitHub failed.
+    pub(crate) fn add_retry(&self) -> Option<Rect> {
+        match self.plan.as_ref()?.0 {
+            Planned::Dialog(_, Parts::Add(places)) => places.retry,
+            _ => None,
+        }
+    }
+
+    /// The Add dialog's checkboxes in the last frame: one at the left of each found row in view.
+    pub(crate) fn add_boxes(&self) -> Vec<Pos2> {
+        let Some(Planned::Dialog(_, Parts::Add(places))) = self.plan.as_ref().map(|plan| &plan.0) else { return Vec::new() };
+        let found = super::add_rows(places.list, self.repos(), &self.dialogs);
+        let x = places.list.left() + crate::theme::ADD_ROW_PAD + crate::theme::CHECKBOX / 2.0;
+        found.iter().map(|(row, _)| pos2(x, row.center().y)).filter(|at| places.list.contains(*at)).collect()
+    }
+
+    /// Whether the Add dialog's folder field has the keyboard and shows its rows of folders in the last frame.
+    pub(crate) fn add_folder_rows_open(&self) -> bool {
+        let focused = self.ctx.memory(|memory| memory.has_focus(add::folder_id()));
+        let tall = matches!(self.plan.as_ref().map(|plan| &plan.0), Some(Planned::Dialog(_, Parts::Add(places))) if places.folder.height() > crate::theme::DIALOG_FIELD_HEIGHT + 1.0);
+        focused && tall
+    }
+
     /// The window's layout, as its frames lay it out.
     pub(crate) fn layout(&self) -> shell::Layout {
         shell::layout(vec2(self.size[0], self.size[1]), true, repos_screen::has_toolbar(&self.session))
@@ -264,13 +296,13 @@ impl Window {
     }
 
     pub(crate) fn press(&mut self, words: &str) {
-        let (place, _) = self.buttons().into_iter().find(|(_, said)| *said == words).unwrap();
+        let (place, _) = self.buttons().into_iter().find(|(_, said)| said == words).unwrap();
         self.click(place.center());
     }
 
     /// The words of the dialog's buttons, from the left.
-    pub(crate) fn said(&self) -> Vec<&'static str> {
-        self.buttons().iter().map(|(_, words)| *words).collect()
+    pub(crate) fn said(&self) -> Vec<String> {
+        self.buttons().into_iter().map(|(_, words)| words).collect()
     }
 }
 
@@ -335,11 +367,17 @@ pub(crate) fn behind(name: &str, repos: &[&str]) -> (Temp, Settings) {
     (root, settings)
 }
 
-/// Runs frames of `window`, taking in what the core's workers sent, until `done` or 30 seconds.
+/// How long [`until`] waits before it calls a wait a hang. The work waited for is real git on temporary folders, a
+/// second or two alone; but the crate's tests run in parallel, and the contrast tests keep every core busy for
+/// minutes, during which starting git (and `gh` for a clone's token) can take many times as long. The budget only
+/// tells a hang from slow work: what a test proves is what it checks once the wait is over.
+const UNTIL_BUDGET: Duration = Duration::from_secs(180);
+
+/// Runs frames of `window`, taking in what the core's workers sent, until `done` or [`UNTIL_BUDGET`].
 pub(crate) fn until(window: &mut Window, what: &str, done: impl Fn(&Window) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + UNTIL_BUDGET;
     while !done(window) {
-        assert!(Instant::now() < deadline, "still not {what} after 30 seconds");
+        assert!(Instant::now() < deadline, "still not {what} after {UNTIL_BUDGET:?}");
         window.session.tick();
         window.frame(Vec::new());
         std::thread::sleep(Duration::from_millis(20));

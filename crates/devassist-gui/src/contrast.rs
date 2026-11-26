@@ -603,6 +603,18 @@ enum Over {
     Menu,
     /// The test dialog with a folder field (`widgets::tests::show_folder_dialog`), on its scrim.
     Folder(FolderShot),
+    /// A dialog of the core's with a folder field, on its scrim, the field with the keyboard and its rows of folders
+    /// shown (the Add dialog's folder field is given the keyboard as `--show add-folder` gives it).
+    Rows(RowsShot),
+}
+
+/// What the rows of a dialog's folder field show in a shot over [`Over::Rows`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowsShot {
+    /// The first lit by Down, the rest resting; the pointer nowhere on them.
+    Lit,
+    /// No row lit, the pointer resting on the first, on the hover's fill; the rest resting.
+    Hovered,
 }
 
 /// What the folder field of a shot shows.
@@ -620,7 +632,7 @@ enum FolderShot {
 impl Over {
     /// A dialog is over the screen: one the core's mode asks for, or the test dialog with a folder field.
     fn is_dialog(self) -> bool {
-        matches!(self, Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_))
+        matches!(self, Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_) | Over::Rows(_))
     }
 
     /// Nothing is over the screen.
@@ -666,8 +678,10 @@ struct Shot {
 /// button off; why the folder cannot be used, in the place of the hint), and with a folder the core refused; the
 /// Import dialog refusing a long path, its reason wrapped across the dialog's width; and the Push dialog as the demo
 /// opens it (its label, address, note, facts with their checks and crosses, buttons), with no address (the field's
-/// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was).
-const SHOTS: [Shot; 32] = [
+/// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was); the
+/// Add and the Import dialog with their folder field's rows shown on their own glass, the first row lit and under
+/// the pointer.
+const SHOTS: [Shot; 36] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -856,7 +870,19 @@ const SHOTS: [Shot; 32] = [
             repos.set_service_input("my own server");
         },
     },
+    // The Add dialog's folder field at the demo's clone folder, with the keyboard: the demo's two folders that match.
+    Shot { name: "add folder rows lit", over: Over::Rows(RowsShot::Lit), set_up: |repos| demo::show(repos, demo::ADD_FOLDER).unwrap() },
+    Shot { name: "add folder rows hovered", over: Over::Rows(RowsShot::Hovered), set_up: |repos| demo::show(repos, demo::ADD_FOLDER).unwrap() },
+    // The Import dialog's field (it has the keyboard as it opens) in the demo's made-up folder: its four folders.
+    Shot { name: "import folder rows lit", over: Over::Rows(RowsShot::Lit), set_up: set_up_import_rows },
+    Shot { name: "import folder rows hovered", over: Over::Rows(RowsShot::Hovered), set_up: set_up_import_rows },
 ];
+
+/// The demo's Import dialog with its field in the demo's made-up folder, so it suggests the demo's four folders.
+fn set_up_import_rows(repos: &mut Repos) {
+    demo::show(repos, "import").unwrap();
+    repos.set_path_input(&format!("{}{}", demo::CODE_DIR, std::path::MAIN_SEPARATOR));
+}
 
 /// The demo's Add dialog searched for "p", for the shots that point at its rows: acme/api (installed),
 /// acme/artcraft (highlighted), acme/artcraft-plugins (ordinary), then more.
@@ -868,14 +894,10 @@ fn set_up_pointing(repos: &mut Repos) {
     assert_eq!(repos.add_selected.as_deref(), Some("acme/artcraft"));
 }
 
-/// The window sizes a shot is drawn at: the design's, and for an overlay also the smallest the window allows, where
-/// a dialog lies over the sidebar as well as the table.
+/// The window sizes a shot is drawn at: the design's and the smallest the window allows (where a dialog lies over
+/// the sidebar as well as the table); where the top row gives way, the windows narrower than that.
 fn sizes(over: Over) -> &'static [[f32; 2]] {
-    match over {
-        Over::Nothing | Over::MainHovered => &[WINDOW],
-        Over::TopRow => &TOP_ROW_SIZES,
-        _ => &[WINDOW, MIN_WINDOW],
-    }
+    if over == Over::TopRow { &TOP_ROW_SIZES } else { &[WINDOW, MIN_WINDOW] }
 }
 
 /// How many frames a shot is drawn for before the one measured: the overlay opens, its glass is placed and baked,
@@ -1111,6 +1133,14 @@ struct Frame {
     top: Option<(Rect, Rect)>,
     /// The words the panel shows instead of the table, when it shows none.
     state: Vec<String>,
+    /// The folder field of the Add or the folder dialog, with the room its rows take; the test dialog's field.
+    field: Option<Rect>,
+    /// The menu's pane and its side menu's, when the menu is drawn.
+    menu: Option<(Rect, Option<Rect>)>,
+    /// The core's highlight in the menu and in its side menu, as places among their lines.
+    menu_lit: (Option<usize>, Option<usize>),
+    /// The row of the Add list the core highlights, when it is among the rows.
+    add_lit: Option<Rect>,
 }
 
 /// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
@@ -1129,26 +1159,26 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let mut last = None;
     // The test dialog's folder field: its text and the folders it suggests, and where the pointer rests on it.
     let (mut folder_text, folder_suggestions) = test_folder(shot.over);
-    let mut pointer = None;
-    let mut found = None;
-    let mut reason = None;
-    let mut main = None;
+    let (mut pointer, mut found, mut reason, mut main, mut field, mut menu) = (None, None, None, None, None, None);
     let mut rows: Vec<(Rect, bool)> = Vec::new();
     for frame in 0..=SETTLE {
         let mut drew = None;
-        let events = shot_events(shot.over, frame, pointer, found, main);
+        let events = shot_events(shot.over, frame, pointer, found, main, field);
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
             found = planned.as_ref().and_then(dialogs::add_found_box);
             reason = planned.as_ref().zip(session.repos()).and_then(|(plan, repos)| dialogs::reason_box(plan, repos, &dialogs));
+            field = planned.as_ref().and_then(dialogs::folder_field_box);
+            menu = planned.as_ref().and_then(dialogs::menu_panes);
             let wanted = if let Over::Folder(_) = shot.over {
                 if frame == 0 {
                     overlay::open(&ctx, Some(widgets::tests::folder_id()));
                 }
                 let rows = widgets::folder_field_rows(&ctx, widgets::tests::folder_id(), folder_suggestions.len());
                 pointer = Some(widgets::tests::folder_shot_pointer(ui.painter(), window, rows));
+                field = Some(widgets::tests::folder_dialog_places(ui.painter(), window, rows).2);
                 vec![overlay::want_dialog(widgets::tests::folder_dialog_places(ui.painter(), window, rows).0)]
             } else {
                 planned.as_ref().map_or_else(Vec::new, dialogs::Plan::wants)
@@ -1173,6 +1203,9 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
                 assert!(!shown.closed && shown.did == widgets::FolderDid::default(), "{}: the folder field did something", shot.name);
             } else {
                 dialogs::after(&ctx, planned, session.repos_mut(), &overlay_glass, mode, &mut dialogs);
+                // As the window does for `--show add-folder`, once the Add dialog is open.
+                let focus = matches!(shot.over, Over::Rows(_)) && frame == 0 && shot.name.starts_with("add");
+                assert!(!focus || dialogs::focus_add_folder(&ctx, session.repos()), "{}: the Add dialog is not open", shot.name);
             }
             let count = ctx.graphics(|layers| layers.get(overlay::layer()).map_or(0, |list| list.next_idx().0));
             rows = match (found, session.repos()) {
@@ -1198,6 +1231,10 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             rows: rows.clone(),
             top,
             state: state_words(&session),
+            field,
+            menu,
+            menu_lit: menu_lit(&session),
+            add_lit: add_lit(&session, &rows),
         });
     }
     if !shot.over.is_screen() {
@@ -1208,7 +1245,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         }
     }
     let last = last.unwrap();
-    hover_lands(shot, &last, size, mode);
+    state_lands(shot, &last, size, mode);
     last
 }
 
@@ -1244,39 +1281,82 @@ fn test_folder(over: Over) -> (String, Vec<String>) {
     }
 }
 
+/// The row among the Add list's `rows` that `session`'s core highlights, if any.
+fn add_lit(session: &Session, rows: &[(Rect, bool)]) -> Option<Rect> {
+    let repos = session.repos()?;
+    let at = repos.add_list().iter().position(|remote| repos.add_selected.as_deref().is_some_and(|id| remote.id().eq_ignore_ascii_case(id)))?;
+    rows.get(at).map(|(row, _)| *row)
+}
+
+/// Where the core's highlight of `session`'s menu and side menu stands among their lines, when they are open.
+fn menu_lit(session: &Session) -> (Option<usize>, Option<usize>) {
+    let Some(repos) = session.repos() else { return (None, None) };
+    let menu = repos.menu_highlight().and_then(|item| crate::menu::shown().iter().position(|shown| *shown == item));
+    let side = repos.migrate_highlight().and_then(|item| MigrateItem::ALL.iter().position(|known| *known == item));
+    (menu, side)
+}
+
 /// The words the panel of `session` shows instead of the table: its title and the lines under it; none with a table.
 fn state_words(session: &Session) -> Vec<String> {
     repos_screen::state_text(session).map_or_default(|(title, lines)| std::iter::once(title).chain(lines).collect())
 }
 
 /// What a person does in the frame `frame` of a shot over `over`: the folder field's keys and pointer at `pointer`,
-/// Enter once the dialog is open, the pointer on a row of the Add list `found`, or on the top row's main button
-/// `main` (both from the last frame).
-fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Rect>, main: Option<Rect>) -> Vec<egui::Event> {
+/// Enter once the dialog is open, the pointer on a row of the Add list `found`, on the top row's main button `main`,
+/// or Down or the pointer on the first row of a dialog's folder field `field` (all from the last frame).
+fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Rect>, main: Option<Rect>, field: Option<Rect>) -> Vec<egui::Event> {
+    let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
     match (over, pointer) {
+        (Over::Rows(RowsShot::Lit), _) if frame == 2 => vec![key(egui::Key::ArrowDown)],
+        (Over::Rows(RowsShot::Hovered), _) if frame >= 1 => {
+            field.map_or_default(|field| vec![egui::Event::PointerMoved(widgets::tests::folder_row_centre(field, 0))])
+        }
         (Over::MainHovered, _) if frame >= 1 => main.map_or_default(|main| vec![egui::Event::PointerMoved(main.center())]),
         (Over::Hovering(index), _) if frame >= 1 => found.map_or_default(|found: Rect| {
             let row = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
             vec![egui::Event::PointerMoved(pos2(found.center().x, found.top() + (row + 0.5) * ADD_ROW))]
         }),
         (Over::Folder(kind), Some(at)) if kind != FolderShot::Empty => widgets::tests::folder_shot_events(frame, at, kind == FolderShot::Lit),
-        (Over::Entered, _) if frame == 2 => {
-            vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]
-        }
+        (Over::Entered, _) if frame == 2 => vec![key(egui::Key::Enter)],
         _ => Vec::new(),
     }
 }
 
-/// Checks, for a shot that points at something, that the frame `last` of `shot`, at the window `size` in `mode`,
-/// shows the pointer where the shot says: the row of the Add list it rests on whole inside the list, filled with the
-/// hover's fill when it is an ordinary row and not when it is installed (an installed row shows no hover); the top
-/// row's main button filled with it. The shot measures what it says.
-fn hover_lands(shot: &Shot, last: &Frame, size: egui::Vec2, mode: Mode) {
+/// Checks that the frame `last` of `shot`, at the window `size` in `mode`, draws the states the shot says it
+/// measures, so that each claimed state is what was measured: the row of the Add list the pointer rests on whole
+/// inside the list, filled with the hover's fill when it is an ordinary row and not when it is installed (an
+/// installed row shows no hover); the row of the Add list the core highlights on the selection's fill; the top row's
+/// main button on the hover's fill; the menu's highlighted line and its side menu's on the selection's fill; a folder
+/// field's lit row on the selection's fill (and the row under the pointer beside it unfilled), its row under the
+/// pointer on the hover's fill.
+fn state_lands(shot: &Shot, last: &Frame, size: egui::Vec2, mode: Mode) {
     let name = shot.name;
-    let hover = theme::palette(mode).on_glass.gamma_multiply(HOVER_OPACITY);
-    let filled = |place: Rect| {
-        last.shapes.iter().any(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == hover && place.contains_rect(rect.rect)))
+    let palette = theme::palette(mode);
+    let hover = palette.on_glass.gamma_multiply(HOVER_OPACITY);
+    let filled_with = |colour: Color32, place: Rect| {
+        last.shapes.iter().any(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == colour && place.contains_rect(rect.rect)))
     };
+    let filled = |place: Rect| filled_with(hover, place);
+    // The row of a folder field's suggestion `index`, whole.
+    let folder_row = |index: usize| {
+        let field = last.field.unwrap_or_else(|| panic!("{name}: no folder field"));
+        Rect::from_center_size(widgets::tests::folder_row_centre(field, index), vec2(field.width(), theme::FOLDER_ROW))
+    };
+    if let Some(row) = last.add_lit {
+        assert!(
+            filled_with(palette.selection, row),
+            "{name} at {size:?} in {mode:?}: the highlighted row of the Add list is not on the selection's fill"
+        );
+    }
+    if let (Some((pane, side)), (lit, side_lit)) = (last.menu, last.menu_lit) {
+        let line = crate::menu::line_rects(pane)[lit.unwrap_or_else(|| panic!("{name}: no line of the menu is highlighted"))];
+        assert!(filled_with(palette.selection, line.expand(0.5)), "{name} at {size:?} in {mode:?}: the menu's highlighted line is not lit");
+        if let Some(side_lit) = side_lit {
+            let side_pane = side.unwrap_or_else(|| panic!("{name}: the side menu is open in the core, not drawn"));
+            let line = crate::menu::side_line_rects(side_pane)[side_lit];
+            assert!(filled_with(palette.selection, line.expand(0.5)), "{name} at {size:?} in {mode:?}: the side menu's highlighted line is not lit");
+        }
+    }
     match shot.over {
         Over::Hovering(index) => {
             let found_box = last.found_box.unwrap_or_else(|| panic!("{name}: no Add list"));
@@ -1291,6 +1371,19 @@ fn hover_lands(shot: &Shot, last: &Frame, size: egui::Vec2, mode: Mode) {
         Over::MainHovered => {
             let main = last.top.map_or_else(|| panic!("{name}: no top row"), |(_, main)| main);
             assert!(filled(main), "{name} at {size:?} in {mode:?}: no hover fill drawn on \"Add repository\"");
+        }
+        Over::Rows(RowsShot::Lit) | Over::Folder(FolderShot::Lit) => {
+            assert!(filled_with(palette.selection, folder_row(0)), "{name} at {size:?} in {mode:?}: the first folder is not lit");
+            assert!(
+                !filled(folder_row(0)) && !filled(folder_row(1)),
+                "{name} at {size:?} in {mode:?}: a folder on the hover's fill beside the lit one"
+            );
+        }
+        Over::Rows(RowsShot::Hovered) => {
+            assert!(filled(folder_row(0)), "{name} at {size:?} in {mode:?}: the folder under the pointer is not on the hover's fill");
+        }
+        Over::Folder(FolderShot::Hovered) => {
+            assert!(filled(folder_row(1)), "{name} at {size:?} in {mode:?}: the folder under the pointer is not on the hover's fill");
         }
         _ => {}
     }
@@ -1341,7 +1434,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                             words == dots || frame.state.contains(&words) || controls.iter().any(|(_, control)| control.contains(rect.center()))
                         }
                         Over::TopRow => controls.iter().any(|(_, control)| control.contains(rect.center())),
-                        Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_) => on_overlay,
+                        Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_) | Over::Rows(_) => on_overlay,
                         Over::Menu => on_overlay || words == dots,
                     };
                     if wanted {

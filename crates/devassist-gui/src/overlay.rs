@@ -192,6 +192,8 @@ pub fn open(ctx: &Context, focus: Option<Id>) {
     });
     let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, typing, presses: 0 };
     ctx.data_mut(|data| data.insert_temp(opening_id(), opened));
+    // A menu that closed while a key that closed its side menu was down leaves that key to no later overlay.
+    forget_side_closing(ctx);
     seed(ctx, layer(), ctx.content_rect());
     ctx.memory_mut(|memory| match (focus, memory.focused()) {
         (Some(id), _) => memory.request_focus(id),
@@ -354,6 +356,9 @@ pub fn open_submenu(ctx: &Context) {
     let held = ctx.input(|input| input.keys_down.iter().copied().collect());
     let opened = SideOpening { pass: ctx.cumulative_pass_nr(), shown: None, held, presses: 0 };
     ctx.data_mut(|data| data.insert_temp(side_opening_id(), opened));
+    // The keys that closed it before are the menu's no more: it may close again without them (the pointer on another
+    // line), and a key let go while it was open is no longer down.
+    forget_side_closing(ctx);
 }
 
 /// This frame's events for the open side menu: without the presses of a key held since it opened (its repeats), and
@@ -411,6 +416,12 @@ fn side_closing_id() -> Id {
 pub fn close_submenu(ctx: &Context) {
     let held = ctx.input(|input| input.keys_down.iter().copied().collect());
     ctx.data_mut(|data| data.insert_temp(side_closing_id(), SideClosing { held }));
+}
+
+/// Forgets the keys that were down as a menu's side menu closed ([`close_submenu`]): when the side menu opens again,
+/// and when an overlay opens ([`open`]), so a fresh press of such a key in a later menu is that menu's.
+fn forget_side_closing(ctx: &Context) {
+    ctx.data_mut(|data| data.remove::<SideClosing>(side_closing_id()));
 }
 
 /// This frame's events for an open menu whose side menu is closed: without the presses of a key held since the side
