@@ -14,8 +14,10 @@
 //! dialog the [`scrim`], the pane's [`glass`] (baked from the wallpaper like every pane, from [`want_dialog`] or
 //! [`want_menu`]), the [`pane`] that keeps a click on the pane's empty part off the scrim, then [`walk`] and the
 //! controls. The screen under an open overlay ([`is_open`]) is told it has no keyboard and takes no press
-//! (`repos_screen::show` takes `keys`). It closes when it is no longer shown. Only the window's own top row stays
-//! above it ([`above`]): the window can be moved, minimised, maximised and closed under a dialog.
+//! (`repos_screen::show` takes `keys`). It closes when it is no longer shown, and what is left of the press that
+//! closed it does nothing under it ([`settle`]): the repeats of a key held since, its text, the second click of a
+//! double click whose first click closed it. Only the window's own top row stays above it ([`above`]): the window
+//! can be moved, minimised, maximised and closed under a dialog.
 //!
 //! The keyboard: only the controls in an overlay take egui's focus ([`crate::widgets::button`]). [`walk`] moves it
 //! among them on Tab and Shift-Tab, and nowhere else; Enter and Space press the one that has it, and nothing else.
@@ -161,6 +163,9 @@ struct Opening {
     /// presses (one, two for a double click, three for a triple) all came since is a person's click on the overlay,
     /// not the rest of the gesture that opened it ([`fresh_click`]).
     presses: u32,
+    /// The keys that were down the last time it was shown: when it closes, the screen under it hears none of them
+    /// until it comes up ([`settle`]).
+    down: Vec<Key>,
 }
 
 /// Where egui keeps the [`Opening`].
@@ -190,10 +195,12 @@ pub fn open(ctx: &Context, focus: Option<Id>) {
         input.events.retain(|event| !matches!(event, Event::Key { key: Key::Enter | Key::Space, pressed: true, .. }));
         (PRESS_KEYS.into_iter().filter(|key| input.key_down(*key)).collect(), input.keys_down.iter().copied().collect())
     });
-    let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, typing, presses: 0 };
+    let opened = Opening { pass: ctx.cumulative_pass_nr(), shown: None, held, typing, presses: 0, down: Vec::new() };
     ctx.data_mut(|data| data.insert_temp(opening_id(), opened));
-    // A menu that closed while a key that closed its side menu was down leaves that key to no later overlay.
+    // A menu that closed while a key that closed its side menu was down leaves that key to no later overlay; what is
+    // left of the gesture that closed the last overlay is this one's to keep from itself, as above.
     forget_side_closing(ctx);
+    ctx.data_mut(|data| data.remove::<Closing>(closing_id()));
     seed(ctx, layer(), ctx.content_rect());
     ctx.memory_mut(|memory| match (focus, memory.focused()) {
         (Some(id), _) => memory.request_focus(id),
@@ -243,6 +250,7 @@ pub fn show<R>(ctx: &Context, contents: impl FnOnce(&mut Ui) -> R) -> R {
         if now > opened.pass && input.pointer.any_pressed() {
             opened.presses = opened.presses.saturating_add(1);
         }
+        opened.down = input.keys_down.iter().copied().collect();
     });
     opened.shown = Some(now);
     ctx.data_mut(|data| data.insert_temp(opening_id(), opened));
@@ -399,53 +407,133 @@ pub fn submenu_events(ctx: &Context) -> Vec<Event> {
     events
 }
 
-/// The keys that were down as a menu's side menu closed (the Esc, `q` or Left that closed it): until each comes up,
-/// its presses (its repeats) are not the menu's, and while any is down, no text is.
+/// What is left of the gesture that closed something on the overlay, for what is under it: the keys that were down
+/// as it closed (the Esc, `q` or Left that closed a menu's side menu; the Space, Enter or letter that closed the whole
+/// overlay), and the presses of the pointer made since. Until such a key comes up, its presses (its repeats) are not
+/// for what is under it, and while any is down, no text is; a click counts only when all its presses came since, so
+/// the second click of a double click whose first click closed it does nothing under it. Kept for a menu whose side
+/// menu closed ([`close_submenu`], [`menu_events`]) and for the screen under an overlay that closed ([`settle`]).
 #[derive(Clone, Debug, Default)]
-struct SideClosing {
+struct Closing {
+    /// The keys down as it closed that are still down.
     held: Vec<Key>,
+    /// How many frames had a pointer button pressed since it closed.
+    presses: u32,
+    /// The pass it last took the input in ([`Closing::take_in`]).
+    seen: u64,
+    /// Whether that pass had a click made of presses that did not all come since it closed.
+    stale: bool,
 }
 
-/// Where egui keeps the [`SideClosing`].
+impl Closing {
+    /// A closing now in `ctx`: the keys among `down` that are still down, or every key that is down without `down`.
+    fn now(ctx: &Context, down: Option<Vec<Key>>) -> Closing {
+        let held = ctx.input(|input| match down {
+            Some(down) => down.into_iter().filter(|key| input.key_down(*key)).collect(),
+            None => input.keys_down.iter().copied().collect(),
+        });
+        Closing { held, ..Closing::default() }
+    }
+
+    /// Takes in the `input` of pass `now` once (a second call in the same pass changes nothing): forgets the keys that
+    /// came up, counts a press, and notes whether a click in it is stale. Gives what to keep of the frame's events:
+    /// none of the presses of a key held since it closed, no text while one is down.
+    fn take_in(&mut self, input: &egui::InputState, now: u64) -> impl Fn(&Event) -> bool + use<> {
+        let held = self.held.clone();
+        if self.seen != now {
+            self.seen = now;
+            self.held.retain(|key| input.key_down(*key));
+            if input.pointer.any_pressed() {
+                self.presses = self.presses.saturating_add(1);
+            }
+            let clicks = if input.pointer.button_triple_clicked(PointerButton::Primary) {
+                3
+            } else if input.pointer.button_double_clicked(PointerButton::Primary) {
+                2
+            } else {
+                1
+            };
+            self.stale = input.pointer.any_click() && clicks > self.presses;
+        }
+        let typing = !self.held.is_empty();
+        move |event: &Event| match event {
+            Event::Key { key, pressed: true, .. } => !held.contains(key),
+            Event::Text(_) => !typing,
+            _ => true,
+        }
+    }
+}
+
+/// Where egui keeps the [`Closing`] of a menu's side menu.
 fn side_closing_id() -> Id {
     Id::unique("overlay-side-closing")
+}
+
+/// Where egui keeps the [`Closing`] of the overlay, for the screen under it.
+fn closing_id() -> Id {
+    Id::unique("overlay-closing")
 }
 
 /// Closes a menu's side menu on the open overlay, as the window closes one: from now on the keys that are down (the
 /// one that closed it) do nothing in the menu while they stay down ([`menu_events`]).
 pub fn close_submenu(ctx: &Context) {
-    let held = ctx.input(|input| input.keys_down.iter().copied().collect());
-    ctx.data_mut(|data| data.insert_temp(side_closing_id(), SideClosing { held }));
+    let closing = Closing::now(ctx, None);
+    ctx.data_mut(|data| data.insert_temp(side_closing_id(), closing));
 }
 
 /// Forgets the keys that were down as a menu's side menu closed ([`close_submenu`]): when the side menu opens again,
 /// and when an overlay opens ([`open`]), so a fresh press of such a key in a later menu is that menu's.
 fn forget_side_closing(ctx: &Context) {
-    ctx.data_mut(|data| data.remove::<SideClosing>(side_closing_id()));
+    ctx.data_mut(|data| data.remove::<Closing>(side_closing_id()));
 }
 
 /// This frame's events for an open menu whose side menu is closed: without the presses of a key held since the side
 /// menu closed (its repeats), and without text while such a key is down. Called once every such frame.
 #[must_use]
 pub fn menu_events(ctx: &Context) -> Vec<Event> {
-    let mut closing = ctx.data(|data| data.get_temp::<SideClosing>(side_closing_id())).unwrap_or_default();
+    let now = ctx.cumulative_pass_nr();
+    let mut closing = ctx.data(|data| data.get_temp::<Closing>(side_closing_id())).unwrap_or_default();
     let events = ctx.input(|input| {
-        let held = closing.held.clone();
-        closing.held.retain(|key| input.key_down(*key));
-        let typing = !closing.held.is_empty();
-        input
-            .events
-            .iter()
-            .filter(|event| match event {
-                Event::Key { key, pressed: true, .. } => !held.contains(key),
-                Event::Text(_) => !typing,
-                _ => true,
-            })
-            .cloned()
-            .collect()
+        let keep = closing.take_in(input, now);
+        input.events.iter().filter(|event| keep(event)).cloned().collect()
     });
     ctx.data_mut(|data| data.insert_temp(side_closing_id(), closing));
     events
+}
+
+/// Keeps what is left of the gesture that closed the overlay from the screen under it. Called once at the start of
+/// every frame, before the shell or the screen read the input ([`crate::dialogs::before`]). In the first frame the
+/// overlay is no longer open ([`is_open`]) it notes the keys that were down the last time it was shown; from then
+/// on, until each comes up, the frame's presses of such a key (its repeats) are taken from the input, and while one
+/// is down its text too; a click made of presses that did not all come after the close is stale ([`stale_click`]).
+/// So a press that closes an overlay never acts in what is under it, whatever closed it: a key, a button, the scrim,
+/// the core.
+pub fn settle(ctx: &Context) {
+    let now = ctx.cumulative_pass_nr();
+    if let Some(opening) = opening(ctx)
+        && !is_open(ctx)
+    {
+        let closing = Closing::now(ctx, Some(opening.down));
+        ctx.data_mut(|data| {
+            data.remove::<Opening>(opening_id());
+            data.insert_temp(closing_id(), closing);
+        });
+    }
+    let Some(mut closing) = ctx.data(|data| data.get_temp::<Closing>(closing_id())) else { return };
+    ctx.input_mut(|input| {
+        let keep = closing.take_in(input, now);
+        input.events.retain(|event| keep(event));
+    });
+    ctx.data_mut(|data| data.insert_temp(closing_id(), closing));
+}
+
+/// Whether this frame's click is the rest of the gesture that closed the overlay ([`settle`]): the second click of a
+/// double click whose first click closed it (on Cancel, on the scrim), or the third of a triple click. The screen and
+/// the shell under it then act on no press in this frame.
+#[must_use]
+pub fn stale_click(ctx: &Context) -> bool {
+    let now = ctx.cumulative_pass_nr();
+    ctx.data(|data| data.get_temp::<Closing>(closing_id())).is_some_and(|closing| closing.seen == now && closing.stale)
 }
 
 /// Whether `response`, of a line of a menu whose side menu is open, was clicked by a person: as [`fresh_click`], and

@@ -254,8 +254,11 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
         ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized));
     }
 
+    // The rest of a double click whose first click closed an overlay chooses nothing here.
+    let stale = overlay::stale_click(ui.ctx());
     if layout.sidebar.is_positive()
         && let Some(chosen) = draw_sidebar(ui, layout.sidebar, *page, shown.waiting, palette)
+        && !stale
     {
         *page = chosen;
         ui.ctx().request_repaint();
@@ -263,7 +266,7 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
 
     let painter = ui.painter().clone();
     let toggle = layout.toggle;
-    if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked() {
+    if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked() && !stale {
         *sidebar_shown = !*sidebar_shown;
         ui.ctx().request_repaint();
     }

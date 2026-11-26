@@ -655,10 +655,18 @@ mod tests {
         std::fs::create_dir_all(&root.0).unwrap();
         let file = root.0.join("notes.txt");
         std::fs::write(&file, "notes").unwrap();
+        // A held demo checks the text alone: it closes on Import, refusing the work, and looks at nothing.
         let mut repos = crate::demo::repos();
         crate::demo::show(&mut repos, "import").unwrap();
         let mut window = Window::new(Session::demo(repos));
         window.frame(Vec::new());
+        let reads = super::super::disk_reads();
+        type_over(&mut window, &file.display().to_string());
+        tap(&mut window, Key::Enter, None);
+        assert!(!window.open() && window.repos().status == HELD, "the held Import did not refuse the work");
+        assert_eq!(super::super::disk_reads(), reads, "the held Import looked at the folder");
+        // A live session looks, and refuses the file in the core's words.
+        let mut window = live_import();
         assert!(window.shows(Which::Folder));
         assert_eq!(parts(&window).note, None, "nothing refused yet");
         type_over(&mut window, &file.display().to_string());
@@ -686,7 +694,7 @@ mod tests {
 
     #[test]
     fn a_held_import_of_a_real_folder_changes_nothing() {
-        // The held core looks at the folder (a read), then refuses the work and says so.
+        // The held core checks the folder by its text alone, then refuses the work and says so.
         let mut repos = crate::demo::repos();
         crate::demo::show(&mut repos, "import").unwrap();
         let before = repos.checkouts.clone();
@@ -878,24 +886,64 @@ mod tests {
         assert_ne!(window.repos().status, HELD);
     }
 
+    /// A live session that reads no folder of its own and calls no network (`Repos::offline` on the test settings),
+    /// with the Import dialog open; one frame drawn.
+    fn live_import() -> Window {
+        let mut repos = Repos::offline(test_settings());
+        repos.open_import();
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        window.frame(Vec::new());
+        window
+    }
+
+    /// A live session as [`live_import`] with two checkouts, api and web, in folders of `root`, both ticked and the
+    /// Move dialog open for them; one frame drawn.
+    fn live_move(root: &Path) -> Window {
+        let mut repos = Repos::offline(test_settings());
+        for name in ["api", "web"] {
+            let mut repo = installed("acme", name);
+            repo.path = root.join("here").join(name);
+            std::fs::create_dir_all(&repo.path).unwrap();
+            repos.checkouts.push(repo.path.clone());
+            repos.installed.push(repo);
+        }
+        repos.marked = vec!["api".to_owned(), "web".to_owned()];
+        repos.run_migrate(MigrateItem::Folder);
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        window.frame(Vec::new());
+        window
+    }
+
     #[test]
     fn a_move_into_a_file_is_refused_in_the_cores_words() {
-        // The held demo tells where each goes by the text alone; the core looks once the button is pressed.
+        // The held demo tells where each goes by the text alone, and its Move refuses the work without a look.
         let file = std::env::current_exe().unwrap();
         let mut window = move_dialog(&["api", "web"], WORK);
+        let reads = super::super::disk_reads();
         type_over(&mut window, &file.display().to_string());
         assert_eq!(window.said(), ["Cancel", "Move 2 repositories"]);
         window.press("Move 2 repositories");
-        assert!(window.shows(Which::Folder), "the move went on into a file");
-        assert_eq!(window.repos().prompt.as_ref().unwrap().error, Some(format!("{} is a file, not a folder.", file.display())));
-        assert_ne!(window.repos().status, HELD, "the refusal is no held work");
+        assert!(!window.open() && window.repos().status == HELD, "the held move did not refuse the work");
+        assert_eq!(super::super::disk_reads(), reads, "the held move looked at the folder");
+        // A live session looks as the text changes: the core's reason stands under the field, and nothing moves.
+        let root = Temp(std::env::temp_dir().join(format!("devassist-gui-move-file-{}", std::process::id())));
+        let mut window = live_move(&root.0);
+        type_over(&mut window, &file.display().to_string());
+        let said = format!("{} is a file, not a folder.", file.display());
+        assert_eq!(window.repos().path_reason(), Some(said.clone()));
         let places = parts(&window);
         let hint = places.hint.expect("the line under the field");
         assert!(hint.top() >= places.field.bottom() && hint.bottom() <= places.list.unwrap().top());
+        assert!(
+            window.texts.iter().any(|(words, rect, cut)| *words == said && !cut && hint.contains_rect(*rect)),
+            "the reason is not under the field"
+        );
+        assert_eq!(window.said(), ["Cancel", "Move"], "nothing can move into a file");
+        tap(&mut window, Key::Enter, None);
+        assert!(window.shows(Which::Folder), "the move went on into a file");
+        assert_ne!(window.repos().status, HELD, "the refusal is no held work");
         assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()), "the field keeps the keys");
-        // Typing takes the reason away.
-        tap(&mut window, Key::X, Some("x"));
-        assert_eq!(window.repos().prompt.as_ref().unwrap().error, None);
+        window.session.close();
     }
 
     #[test]
@@ -993,16 +1041,17 @@ mod tests {
     fn a_long_reason_wraps_and_keeps_its_end() {
         let file = std::env::current_exe().unwrap();
         let said = format!("{} is a file, not a folder.", file.display());
+        let root = Temp(std::env::temp_dir().join(format!("devassist-gui-long-reason-{}", std::process::id())));
         for name in ["import", "move"] {
-            let mut repos = crate::demo::repos();
-            crate::demo::show(&mut repos, name).unwrap();
-            let mut window = Window::new(Session::demo(repos));
+            // Live: a held session checks the text alone, and gives no reason a file would.
+            let mut window = if name == "import" { live_import() } else { live_move(&root.0) };
             window.size = MIN_WINDOW;
             window.frame(Vec::new());
             type_over(&mut window, &file.display().to_string());
             tap(&mut window, Key::Enter, None);
             assert!(window.shows(Which::Folder), "{name}: no refusal");
-            assert_eq!(window.repos().prompt.as_ref().unwrap().error.as_deref(), Some(said.as_str()), "{name}");
+            let reason = if name == "import" { window.repos().prompt.as_ref().unwrap().error.clone() } else { window.repos().path_reason() };
+            assert_eq!(reason.as_deref(), Some(said.as_str()), "{name}");
             let places = parts(&window);
             let line = places.note.or(places.hint).unwrap();
             assert!(line.height() > 1.5 * line_height(TEXT_SMALL), "{name}: the reason is not wrapped: {line:?}");

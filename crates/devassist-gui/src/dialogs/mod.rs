@@ -381,10 +381,12 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Opti
     }
 }
 
-/// Before the bake: brings the overlay in line with the core's mode ([`sync`]) and gives the place of the dialog
+/// Before the bake, first thing in a frame: keeps what is left of the press that closed an overlay from the screen
+/// ([`overlay::settle`]), brings the overlay in line with the core's mode ([`sync`]) and gives the place of the dialog
 /// or the menu it asks for (the menu under `anchor`), whose glass is then baked with the other panes
 /// ([`Plan::wants`]).
 pub fn before(ctx: &Context, repos: Option<&Repos>, anchor: Option<Rect>, dialogs: &mut Dialogs) -> Option<Plan> {
+    overlay::settle(ctx);
     sync(ctx, repos, dialogs);
     plan(&ctx.layer_painter(LayerId::background()), ctx.content_rect(), repos, anchor, dialogs)
 }
@@ -678,5 +680,119 @@ mod tests {
         repos.hide_job();
         ctx.run_ui(input(), |ui| sync(ui.ctx(), Some(&repos), &mut dialogs)).drop_without_applying_deltas();
         assert_eq!(dialogs.open, None);
+    }
+
+    /// A key pressed (`down`, a repeat when `repeat`) or let go, without modifiers.
+    fn key_event(key: Key, down: bool, repeat: bool) -> Event {
+        Event::Key { key, physical_key: None, pressed: down, repeat, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// A click at `at`, its press at egui's clock `pressed` and its release 0.05 seconds later.
+    fn click_at_time(window: &mut Window, at: egui::Pos2, pressed: f64) {
+        let button = |down| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: down, modifiers: egui::Modifiers::NONE };
+        window.frame_at(vec![Event::PointerMoved(at)], Some(pressed - 0.01));
+        window.frame_at(vec![button(true)], Some(pressed));
+        window.frame_at(vec![button(false)], Some(pressed + 0.05));
+    }
+
+    /// What a press on the screen changes: the highlight, the ticks, the lines shown (a fold), the sort.
+    fn screen_state(window: &Window) -> (Option<String>, Vec<String>, usize, bool) {
+        let repos = window.repos();
+        let sorted = repos.sort == devassist_core::repos::state::SortMode::Name;
+        (repos.selected.clone(), repos.marked.clone(), crate::repos_view::lines(repos).len(), sorted)
+    }
+
+    /// The demo with the group dialog open over api and web, at egui's clock 1, drawn.
+    fn group_open() -> Window {
+        let mut window = Window::new(Session::demo(crate::demo::repos()));
+        window.frame_at(Vec::new(), Some(0.9));
+        window.session.repos_mut().unwrap().open_group_prompt();
+        window.frame_at(Vec::new(), Some(1.0));
+        window.frame_at(Vec::new(), Some(1.1));
+        assert!(window.shows(Which::Group));
+        window
+    }
+
+    #[test]
+    fn a_space_held_on_cancel_closes_the_dialog_and_ticks_nothing_under_it() {
+        let mut window = group_open();
+        window.frame_at(vec![key_event(Key::Tab, true, false)], Some(1.2));
+        window.frame_at(vec![key_event(Key::Tab, false, false)], Some(1.3));
+        let before = screen_state(&window);
+        // Space on Cancel closes the dialog; held, it repeats, with its text, onto the table under it.
+        window.frame_at(vec![key_event(Key::Space, true, false), Event::Text(" ".to_owned())], Some(1.4));
+        assert!(!window.shows(Which::Group), "Space on Cancel did not close the dialog");
+        for step in 0..6 {
+            window.frame_at(vec![key_event(Key::Space, true, true), Event::Text(" ".to_owned())], Some(1.5 + 0.05 * f64::from(step)));
+            assert_eq!(screen_state(&window), before, "a repeat of the Space that closed the dialog reached the table");
+        }
+        window.frame_at(vec![key_event(Key::Space, false, false)], Some(2.0));
+        window.frame_at(Vec::new(), Some(2.1));
+        assert_eq!(screen_state(&window), before);
+        // A fresh Space after the release is the table's: it ticks.
+        window.frame_at(vec![key_event(Key::Space, true, false), Event::Text(" ".to_owned())], Some(2.2));
+        window.frame_at(vec![key_event(Key::Space, false, false)], Some(2.3));
+        assert_ne!(screen_state(&window).1, before.1, "a fresh Space did not tick");
+    }
+
+    #[test]
+    fn the_second_click_of_a_double_click_that_closed_a_dialog_lands_on_nothing() {
+        // On Cancel, and on the scrim beside the dialog, over the table.
+        for on_cancel in [true, false] {
+            let mut window = group_open();
+            let Parts::Group(places) = window.parts() else { panic!("not the group dialog") };
+            let panel = window.layout().panel;
+            let at = if on_cancel {
+                window.buttons().into_iter().find(|(_, words)| words == "Cancel").unwrap().0.center()
+            } else {
+                egui::pos2(f32::midpoint(panel.left(), places.pane.left()), places.pane.center().y)
+            };
+            assert!(panel.contains(at) && (on_cancel || !places.pane.contains(at)), "{at:?}");
+            let before = screen_state(&window);
+            click_at_time(&mut window, at, 5.0);
+            assert!(!window.shows(Which::Group), "the first click did not close the dialog");
+            click_at_time(&mut window, at, 5.2);
+            window.frame_at(Vec::new(), Some(5.3));
+            window.frame_at(Vec::new(), Some(5.4));
+            assert!(!window.open(), "the second click opened something");
+            assert_eq!(screen_state(&window), before, "the second click acted on the table (on Cancel: {on_cancel})");
+            // A click of its own, later, is the table's.
+            click_at_time(&mut window, at, 9.0);
+            window.frame_at(Vec::new(), Some(9.1));
+            assert_ne!(screen_state(&window), before, "a fresh click on the table did nothing (on Cancel: {on_cancel})");
+        }
+    }
+
+    #[test]
+    fn a_key_held_while_a_dialog_opens_and_closes_acts_in_neither() {
+        // `m` opens the group dialog; held, its text does not type into the name, and after Esc closes it the
+        // repeats of `m` do not open it again, while `m` is down.
+        let mut window = Window::new(Session::demo(crate::demo::repos()));
+        window.frame(Vec::new());
+        window.frame(vec![key_event(Key::M, true, false), Event::Text("m".to_owned())]);
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Group), "m did not open the group dialog");
+        let start = window_text(&window);
+        for _ in 0..3 {
+            window.frame(vec![key_event(Key::M, true, true), Event::Text("m".to_owned())]);
+        }
+        assert_eq!(window_text(&window), start, "the held m typed into the name");
+        window.frame(vec![key_event(Key::Escape, true, false)]);
+        window.frame(vec![key_event(Key::Escape, false, false)]);
+        assert!(!window.open(), "Esc did not close it");
+        for _ in 0..4 {
+            window.frame(vec![key_event(Key::M, true, true), Event::Text("m".to_owned())]);
+            assert!(!window.open(), "a repeat of the m held since the dialog opened opened it again");
+        }
+        window.frame(vec![key_event(Key::M, false, false)]);
+        window.frame(Vec::new());
+        window.frame(vec![key_event(Key::M, true, false), Event::Text("m".to_owned())]);
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Group), "a fresh m did not open the dialog");
+    }
+
+    /// The group dialog's name as the core has it.
+    fn window_text(window: &Window) -> String {
+        window.repos().group_prompt.as_ref().map_or_default(|prompt| prompt.input.clone())
     }
 }

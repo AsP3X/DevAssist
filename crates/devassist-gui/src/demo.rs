@@ -1310,8 +1310,9 @@ mod tests {
     /// One window, never restarted, through every new overlay in a row, each closed before the next opens: the menu
     /// with its side menu (closed by Esc held over several frames, then the menu by a fresh Esc), Add (typed into, its
     /// folder field's rows closed by Esc, then closed by Esc), Add again (its search empty, its folder field's rows
-    /// shown again), Import, Move, Push, and the menu again. Each opens clean (no stale highlight, no closed rows, a
-    /// fresh key acts in it), and nothing runs, is written or reaches out.
+    /// shown again), Import (and again by a held `i`, which types nothing into it, closed by a held Space on its
+    /// Cancel, which ticks nothing under it), Move, Push, and the menu again. Each opens clean (no stale highlight, no
+    /// closed rows, a fresh key acts in it), and nothing runs, is written or reaches out.
     fn open_each_overlay_in_turn_on_one_window(before: [usize; 5]) {
         // The clone folder the demo's Add offers, so Add's folder field suggests the demo's folders as it opens.
         let mut start = repos();
@@ -1354,6 +1355,29 @@ mod tests {
         tap(window, Key::Escape, None);
         assert!(!window.open(), "Esc left Import open");
         still_held(window, "Import in turn", Expect::Free, before);
+        // A key held across an overlay opening, and one held across its closing: `i` held opens Import and types
+        // nothing into its field while it repeats; Space held on its Cancel closes it, and its repeats tick nothing.
+        let repeat = |key: Key| Event::Key { key, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE };
+        window.frame(vec![key_event(Key::I, Modifiers::NONE, true), Event::Text("i".to_owned())]);
+        assert!(window.shows(Which::Folder), "a held i opened no Import");
+        let typed = window.repos().prompt.as_ref().unwrap().input.clone();
+        for _ in 0..4 {
+            window.frame(vec![repeat(Key::I), Event::Text("i".to_owned())]);
+            assert_eq!(window.repos().prompt.as_ref().unwrap().input, typed, "the i held since Import opened typed into it");
+        }
+        window.frame(vec![key_event(Key::I, Modifiers::NONE, false)]);
+        tap(window, Key::Tab, None);
+        let ticks = window.repos().marked.clone();
+        window.frame(vec![key_event(Key::Space, Modifiers::NONE, true), Event::Text(" ".to_owned())]);
+        assert!(!window.open(), "Space on Import's Cancel did not close it");
+        for _ in 0..4 {
+            window.frame(vec![repeat(Key::Space), Event::Text(" ".to_owned())]);
+            assert_eq!(window.repos().marked, ticks, "the Space held since Import closed ticked the table");
+        }
+        window.frame(vec![key_event(Key::Space, Modifiers::NONE, false)]);
+        window.frame(Vec::new());
+        assert_eq!(window.repos().marked, ticks);
+        still_held(window, "a key held across Import", Expect::Free, before);
         // Move, by the side menu on the ticked api (api and web), and Push by the side menu on homelab alone.
         for (row, item, dialog) in [("api", MigrateItem::Folder, Which::Folder), ("homelab", MigrateItem::Service, Which::Push)] {
             open_side_menu_on(window, row);

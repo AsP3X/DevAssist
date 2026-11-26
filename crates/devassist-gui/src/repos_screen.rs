@@ -14,7 +14,6 @@ use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Pa
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
-use crate::frost;
 use crate::repos_view::{self, Line, Status};
 use crate::session::Session;
 use crate::shell::{self, Layout, Page, Wants};
@@ -23,6 +22,7 @@ use crate::theme::{
     self, BAR_GAP, FIELD_MIN_WIDTH, FIELD_WIDTH, Mode, PAGE_ROWS, PANEL_TEXT_INSET, RADIUS_PANEL, STATE_GAP, TEXT, TEXT_TITLE, TOOLBAR_GAP,
 };
 use crate::widgets::{self, Item, font};
+use crate::{frost, overlay};
 
 /// The filter field's glass pane.
 const FILTER: &str = "filter";
@@ -603,6 +603,9 @@ pub fn show(
     // The frame's keys are the filter's when it held the focus at the end of the last frame; egui takes the focus
     // away on Esc before the frame sees the key, so the focus now would not say it.
     let typing = screen.filter_focused;
+    // The rest of a double click whose first click closed an overlay is no press here (`overlay::settle` took the
+    // repeats of a key held since from the input already).
+    let presses = keys && !overlay::stale_click(ui.ctx());
     let mut moved = false;
     if let (Some(plan), Some(repos)) = (plan, session.repos_mut()) {
         if keys && ui.memory(|memory| memory.has_focus(filter_id())) {
@@ -616,7 +619,7 @@ pub fn show(
                 }
             }
         }
-        controls(ui, plan, repos, palette, keys);
+        controls(ui, plan, repos, palette, presses);
     }
 
     let events = if keys { ui.input(|input| input.events.clone()) } else { Vec::new() };
@@ -637,7 +640,7 @@ pub fn show(
         }
     }
     // A hidden run says how it goes in the status bar; a click there shows its dialog again, as `l` does.
-    if keys && let Some(repos) = session.repos_mut().filter(|repos| repos.job.is_some()) {
+    if presses && let Some(repos) = session.repos_mut().filter(|repos| repos.job.is_some()) {
         let response = ui.interact(layout.status, Id::unique("status-bar"), Sense::CLICK).on_hover_cursor(CursorIcon::PointingHand);
         if response.clicked() {
             repos.show_job();
@@ -682,7 +685,7 @@ pub fn show(
     }
     let open = screen.menu.as_ref().filter(|_| repos.mode == CoreMode::Menu).map(|(key, _)| key.as_str());
     let did = table::show(ui, layout.panel, &lines, sheet, palette, mode, &mut screen.scroll, open);
-    match if keys { did } else { Did::None } {
+    match if presses { did } else { Did::None } {
         Did::Menu { key, anchor } => {
             open_menu(repos, &key);
             screen.menu = Some((key, anchor));

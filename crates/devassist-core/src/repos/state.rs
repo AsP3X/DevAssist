@@ -6790,7 +6790,11 @@ mod tests {
             app.run_migrate(MigrateItem::Service);
             app.set_service_input(&folder);
             let facts = app.service_facts();
-            assert!(facts[3].words.contains("the remote mirror"), "{}", facts[3].words);
+            assert!(
+                facts[3].words.contains("the remote mirror"),
+                "{}",
+                facts[3].words
+            );
             app.accept_service();
             app.close_service();
             app.open_import();

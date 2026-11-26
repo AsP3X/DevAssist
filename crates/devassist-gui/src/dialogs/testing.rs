@@ -183,17 +183,19 @@ impl Window {
         }
     }
 
+    /// `key` pressed in one frame and let go in the next, as a tap.
     pub(crate) fn key(&mut self, key: Key) {
         self.frame(vec![Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
-        self.frame(Vec::new());
+        self.frame(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
     }
 
+    /// `key` pressed with the `text` it types in one frame, and let go in the next.
     pub(crate) fn typed(&mut self, key: Key, text: &str) {
         self.frame(vec![
             Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE },
             Event::Text(text.to_owned()),
         ]);
-        self.frame(Vec::new());
+        self.frame(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
     }
 
     pub(crate) fn repos(&self) -> &Repos {

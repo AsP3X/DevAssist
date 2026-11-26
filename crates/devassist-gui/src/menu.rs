@@ -759,6 +759,10 @@ mod tests {
         assert!(window.repos().mode == CoreMode::List);
         window.frame(Vec::new());
         assert!(!window.open(), "the overlay went with it");
+        // A third of a second on egui's clock, so the next click is no double click with the one that opened it.
+        for _ in 0..20 {
+            window.frame(Vec::new());
+        }
         // A letter of a line the window does not show does nothing; Esc closes.
         open_on(&mut window, "homelab");
         window.typed(Key::F, "f");
@@ -1465,6 +1469,30 @@ mod tests {
         let status = crate::repos_screen::status(&window.session).unwrap();
         assert_eq!((status.text.as_str(), status.error), (probe.status.as_str(), true), "the status line shows the core's words");
         assert_eq!(window.repos().marked, ["api", "web"], "the ticks stay");
+    }
+
+    #[test]
+    fn a_held_s_whose_push_is_refused_does_not_sort_the_list_after_the_menu_closes() {
+        let mut window = demo();
+        open_on(&mut window, "api");
+        assert_eq!(window.repos().chosen(), ["api", "web"]);
+        tap(&mut window, Key::T, Some("t"));
+        let by_name = |window: &Window| window.repos().sort == devassist_core::repos::state::SortMode::Name;
+        let sort = by_name(&window);
+        // `s` on the side menu with two rows ticked: the core refuses the push and the menu closes. Held, `s` repeats
+        // with its text: on the screen that would be Sort.
+        window.frame(vec![key_down(Key::S, false), Event::Text("s".to_owned())]);
+        for _ in 0..6 {
+            window.frame(vec![key_down(Key::S, true), Event::Text("s".to_owned())]);
+            assert!(window.repos().mode == CoreMode::List && !window.open());
+            assert_eq!(by_name(&window), sort, "a repeat of the s that closed the menu sorted the list");
+        }
+        window.frame(vec![key_up(Key::S)]);
+        window.frame(Vec::new());
+        assert_eq!(by_name(&window), sort);
+        // A fresh `s` sorts.
+        tap(&mut window, Key::S, Some("s"));
+        assert_ne!(by_name(&window), sort, "a fresh s did not sort");
     }
 
     /// The menu on homelab with its side menu open by its letter, drawn.
