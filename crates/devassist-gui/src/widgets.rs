@@ -259,7 +259,9 @@ pub fn main_action_width(painter: &Painter, words: &str, compact: bool, high: f3
 
 /// Draws the top row's main button at `rect` as the design's `primary` draws it: a fill, never glass, in the accent
 /// colour, round at its ends, with `icon` and `words` in white; with its icon alone when `compact`, its words then
-/// its name and hover text. `id` names it. Says whether it was clicked.
+/// its name and hover text. `id` names it. Like every control of the screen it senses clicks but never takes the
+/// keyboard's focus (`Sense::CLICK`, not `Sense::click()`): the filter is the one control there that holds it, so
+/// it needs no focus ring. Says whether it was clicked.
 pub fn main_action(ui: &mut Ui, rect: Rect, icon: Icon, words: &str, compact: bool, palette: Palette, id: Id) -> bool {
     let mut response = ui.interact(rect, id, Sense::CLICK);
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, words));
@@ -436,7 +438,7 @@ fn taken_text(folder: &str) -> String {
 /// view: cut on a path separator (`\` or `/`) where one leaves an end that fits, else by characters; nothing when not
 /// even the "…" fits.
 #[must_use]
-fn path_tail(path: &str, font: &FontId, room: f32, ui: &Ui) -> String {
+pub(crate) fn path_tail(path: &str, font: &FontId, room: f32, ui: &Ui) -> String {
     let fits = |candidate: &str| width(ui.painter(), candidate, font) <= room;
     if fits(path) {
         return path.to_owned();
@@ -751,6 +753,33 @@ pub(crate) mod tests {
             });
             output.drop_without_applying_deltas();
             assert_eq!(hint, Some(palette.quiet), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_top_rows_main_button_never_takes_the_keyboards_focus() {
+        let palette = theme::palette(Mode::Light);
+        let ctx = context();
+        let id = Id::unique("main-action-test");
+        let rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(180.0, 36.0));
+        let tab = egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let input = |events| RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), events, ..Default::default() };
+        let focus_ring = |output: &FullOutput| {
+            output.shapes.iter().any(|clipped| matches!(&clipped.shape, egui::Shape::Rect(shape) if shape.stroke.color == palette.focus))
+        };
+        // Asked for the focus, and Tab pressed: it keeps neither, so no ring is ever drawn on it.
+        ctx.run_ui(input(Vec::new()), |ui| {
+            ui.memory_mut(|memory| memory.request_focus(id));
+            main_action(ui, rect, Icon::Plus, "Add repository", false, palette, id);
+        })
+        .drop_without_applying_deltas();
+        for events in [Vec::new(), vec![tab.clone()], vec![tab]] {
+            let output = ctx.run_ui(input(events), |ui| {
+                main_action(ui, rect, Icon::Plus, "Add repository", false, palette, id);
+            });
+            assert!(!ctx.memory(|memory| memory.has_focus(id)), "the top row's main button took the keyboard's focus");
+            assert!(!focus_ring(&output));
+            output.drop_without_applying_deltas();
         }
     }
 

@@ -130,6 +130,8 @@ icons! {
     Trash2 => 0xe18e, "trash-2",
     FolderInput => 0xe334, "folder-input",
     Plus => 0xe13d, "plus",
+    ArrowRight => 0xe049, "arrow-right",
+    HardDrive => 0xe0ed, "hard-drive",
 }
 
 /// The JPEG bytes of the backdrop picture for `key`, one of `devassist_core::config::BACKDROPS`.
@@ -235,8 +237,8 @@ mod tests {
         assert_eq!(names.len(), Icon::ALL.len(), "two icons share a name");
         assert!(!codes.contains(&char::REPLACEMENT_CHARACTER), "an icon has no valid code point");
         // The README lists 16 icons beyond the 14 the sidebar and bar already had, the group dialog's, and the
-        // row menu's five, and the folder field's.
-        assert_eq!(Icon::ALL.len(), 39);
+        // row menu's five, the folder field's, the top row's two, and the Move dialog's arrow and drive.
+        assert_eq!(Icon::ALL.len(), 41);
         assert_eq!(Icon::X.name(), "x");
         assert_eq!(Icon::FolderGit2.name(), "folder-git-2");
     }

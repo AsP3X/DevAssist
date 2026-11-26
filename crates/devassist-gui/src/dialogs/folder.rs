@@ -1,65 +1,151 @@
 //! The folder dialog ([`super::Which::Folder`]), for the core's `Mode::Path`: it asks for a folder, and the core does
-//! with it what its question is for (`Purpose`). For now that is Import: the GitHub clones in the folder, and the
-//! folder itself, are added to the overview. The design draws no such dialog; it is built from the Add dialog's
-//! parts, 600 wide: the header, "Folder" over the folder field with the folders that match under it, the core's
-//! reason under the field when it refused the folder, and the buttons.
+//! with it what its question is for (`Purpose`): an Import, or a Move.
 //!
-//! What differs between the purposes is said in one place ([`words`]): the title, the quiet line and the main
-//! button's word. A purpose the dialog does not show yet has no words, and the bridge shows no dialog for it.
+//! Import adds the GitHub clones in the folder, and the folder itself, to the overview. The design draws no such
+//! dialog; it is built from the Add dialog's parts, 600 wide: the header, "Folder" over the folder field with the
+//! folders that match under it, the core's reason under the field when it refused the folder, and the buttons.
+//!
+//! Move takes the chosen checkouts into another folder, as the design's `13-move` draws it, 600 wide: the header
+//! (its title names them by the remove dialog's rule, [`super::remove::named`]), "Move into" over the folder field and
+//! the quiet hint under it (the core's reason in its place when it refused the folder), "What moves": a box with a
+//! row for each checkout (its folder, an arrow, where it goes; "is there already" or "cannot move there" at the
+//! right of one that stays), which scrolls past [`MOVE_ROWS`] rows, the note on another drive when the core can tell
+//! that the move copies, and the buttons. The main button counts the rows that move, and is off while none can.
+//!
+//! What differs between the purposes is said in one place ([`words`]): the title, the quiet line, the words over
+//! the field and the main button's. A purpose the dialog does not show has no words, and the bridge shows no
+//! dialog for it.
 //!
 //! The field has the focus when the dialog opens. Its text is the core's (`Repos::set_path_input` as it is typed); the
-//! folders that match are asked for once when it opens and again only when the text changes. Enter in the field
-//! (with no suggestion lit) and the main button ask the core to go ahead (`Action::Confirm`): when it refuses the
-//! folder, the dialog stays with the core's reason under the field, in the danger colour, until the text changes;
-//! else the dialog closes and the core's status line says what was done. Esc, Cancel and the scrim close it through
-//! the core (`Repos::close_path`). The import runs in the core on the window's thread.
+//! folders that match, and for a move each checkout's row (`Repos::move_lines`) and whether it crosses to another
+//! drive (`Repos::move_crosses_volumes`), are asked for once when it opens and again only when the text changes
+//! (they read the disk). Enter in the field (with no suggestion lit) and the main button ask the core to go ahead
+//! (`Action::Confirm`): when it refuses the folder, the dialog stays with the core's reason under the field, in the
+//! danger colour, until the text changes; else the dialog closes: an import runs in the core on the window's thread
+//! and its status line says what was done; a move is the core's run, whose progress dialog the bridge opens. Esc,
+//! Cancel and the scrim close it through the core (`Repos::close_path`).
 
-use devassist_core::repos::state::{Action, Purpose, Repos};
-use egui::{Align2, FontFamily, Id, Key, Rect, Ui, pos2, vec2};
+use std::sync::Arc;
 
-use super::{Dialogs, Header, Parts, Plan, folder_suggestions, main_id, take_press};
-use crate::assets;
+use devassist_core::repos::gitops;
+use devassist_core::repos::state::{Action, MoveLine, Purpose, Repos};
+use egui::text::LayoutJob;
+use egui::{Align2, Color32, FontFamily, FontId, Galley, Id, Key, Painter, Rect, Sense, Stroke, Ui, pos2, vec2};
+
+use super::{Dialogs, Header, Parts, Plan, folder_suggestions, inset, list_height, main_id, most_scroll, remove, rows as count_rows, take_press};
+use crate::assets::{self, Icon};
 use crate::overlay::{self, Kind};
 use crate::theme::{
-    ADD_FOLDER_GAP, BUTTON_HEIGHT, DIALOG_FIELD_HEIGHT, DIALOG_GAP, DIALOG_MARGIN, DIALOG_PAD, FOLDER_DIALOG_WIDTH, HEADER_LINE_HEIGHT, Palette,
-    TEXT, TEXT_SMALL,
+    ADD_FOLDER_GAP, BUTTON_HEIGHT, DIALOG_FIELD_HEIGHT, DIALOG_GAP, DIALOG_MARGIN, DIALOG_PAD, FOLDER_DIALOG_WIDTH, HAIRLINE, HEADER_LINE_HEIGHT,
+    ICON, LINE_OPACITY, LIST_GAP, LIST_PAD, LIST_ROW, MOVE_LEAST_ROWS, MOVE_NOTE_LINE_HEIGHT, MOVE_NOTE_WIDTH, MOVE_ROWS, Palette, TEXT, TEXT_SMALL,
 };
 use crate::widgets::{self, font};
 
-/// The words over the field.
-const FOLDER: &str = "Folder";
 /// The button that closes the dialog.
 const CANCEL: &str = "Cancel";
 
+/// Import's words over the field.
+const IMPORT_LABEL: &str = "Folder";
+/// Import's title.
+const IMPORT_TITLE: &str = "Import clones you already have";
+/// Import's quiet line.
+const IMPORT_LINE: &str = "Adds the GitHub clones in a folder to the overview. The folder itself counts too. Nothing on disk is changed.";
+/// Import's main button.
+const IMPORT_BUTTON: &str = "Import";
+
+/// Move's words over the field.
+const MOVE_LABEL: &str = "Move into";
+/// Move's quiet line.
+const MOVE_LINE: &str = "Each keeps its folder name, its group, the automatic pull and the saved pull requests.";
+/// Move's hint under the field, in the quiet colour.
+const MOVE_HINT: &str = "A folder that does not exist yet is created.";
+/// Move's main button for one row that moves (and while none can).
+const MOVE_BUTTON: &str = "Move";
+/// The note of a row that is in the folder already, in the warning colour.
+const THERE: &str = "is there already";
+/// The note of a row whose move the core will refuse, in the warning colour.
+const TAKEN: &str = "cannot move there";
+
 /// What the dialog says for one purpose.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Words {
     /// The title.
-    title: &'static str,
+    title: String,
     /// The quiet line under it.
     line: &'static str,
-    /// The main button's word.
-    button: &'static str,
+    /// The words over the field.
+    label: &'static str,
+    /// The main button's words.
+    button: String,
+    /// Whether the main button can be pressed.
+    on: bool,
 }
 
-/// Import's words.
-const IMPORT: Words = Words {
-    title: "Import clones you already have",
-    line: "Adds the GitHub clones in a folder to the overview. The folder itself counts too. Nothing on disk is changed.",
-    button: "Import",
-};
+/// Move's title for the checkouts `repos` (row name and path): the remove dialog's rule
+/// ("Move api and web to another folder", "Move 5 repositories to another folder").
+fn move_title(repos: &[(String, std::path::PathBuf)]) -> String {
+    let names: Vec<String> = repos.iter().map(|(name, _)| name.clone()).collect();
+    format!("Move {} to another folder", remove::named(&names))
+}
 
-/// The dialog's words for `purpose`; `None` for a purpose it does not show (a move, for now; the core's own folder
-/// question of a clone, which Add stands for).
-fn words(purpose: &Purpose) -> Option<&'static Words> {
+/// Move's main button when `moving` rows move: "Move" for one (and for none, when it is off), else
+/// "Move {n} repositories".
+fn move_button(moving: usize) -> String {
+    if moving > 1 { format!("{MOVE_BUTTON} {moving} repositories") } else { MOVE_BUTTON.to_owned() }
+}
+
+/// The dialog's words for `purpose`, with `moving` rows of a move that will move; `None` for a purpose it does not
+/// show (the core's own folder question of a clone, which Add stands for).
+fn words(purpose: &Purpose, moving: usize) -> Option<Words> {
     match purpose {
-        Purpose::Import => Some(&IMPORT),
-        Purpose::Move(_) | Purpose::Clone(_) => None,
+        Purpose::Import => {
+            Some(Words { title: IMPORT_TITLE.to_owned(), line: IMPORT_LINE, label: IMPORT_LABEL, button: IMPORT_BUTTON.to_owned(), on: true })
+        }
+        Purpose::Move(repos) => {
+            Some(Words { title: move_title(repos), line: MOVE_LINE, label: MOVE_LABEL, button: move_button(moving), on: moving > 0 })
+        }
+        Purpose::Clone(_) => None,
     }
 }
 
 /// Whether the dialog shows the core's folder question for `purpose`.
 pub(super) fn shown(purpose: &Purpose) -> bool {
-    words(purpose).is_some()
+    words(purpose, 0).is_some()
+}
+
+/// Whether `line`'s checkout moves: the folder is usable and it neither stays nor is refused.
+fn moves(line: &MoveLine) -> bool {
+    line.to.is_some() && !line.there && !line.taken
+}
+
+/// How many of `lines` move.
+fn moving(lines: &[MoveLine]) -> usize {
+    lines.iter().filter(|line| moves(line)).count()
+}
+
+/// The note at the right of `line`'s row, in the warning colour: one that stays where it is says so, one whose move
+/// the core will refuse says that; none for the others.
+fn note(line: &MoveLine) -> Option<&'static str> {
+    if line.there {
+        Some(THERE)
+    } else if line.taken {
+        Some(TAKEN)
+    } else {
+        None
+    }
+}
+
+/// The drive or root the move takes the checkouts to, to name in the note: that of the first row that moves.
+fn target_root(lines: &[MoveLine]) -> Option<String> {
+    lines.iter().filter(|line| moves(line)).find_map(|line| line.to.as_deref().and_then(gitops::volume_root))
+}
+
+/// The note on another drive, naming `root`.
+fn drive_note(root: &str) -> String {
+    format!(
+        "{root} is another drive. Everything is copied first, and the original is deleted only after the copy is complete. Close programs that have \
+         files of these repositories open."
+    )
 }
 
 /// The id of the folder field, which has the focus when the dialog opens.
@@ -79,22 +165,41 @@ pub(super) struct State {
     text: String,
     /// The folders that match it ([`folder_suggestions`]), asked for again only when it changes.
     suggestions: Vec<String>,
+    /// For a move, each checkout and where it goes (`Repos::move_lines`), asked for again only when the text changes.
+    lines: Vec<MoveLine>,
+    /// For a move, whether it takes a checkout to another drive (`Repos::move_crosses_volumes`), asked for with them.
+    crosses: Option<bool>,
 }
 
 impl State {
-    /// The state of a folder dialog that opens on `repos`: the core's text, and the folders that match it, asked for
-    /// once (a text the dialog did not type never says it changed).
+    /// The state of a folder dialog that opens on `repos`: the core's text, and what goes with it, asked for once (a
+    /// text the dialog did not type never says it changed).
     pub(super) fn new(repos: &Repos) -> State {
-        let text = repos.prompt.as_ref().map_or_default(|prompt| prompt.input.clone());
-        let suggestions = folder_suggestions(repos, &text);
-        State { text, suggestions }
+        let mut state = State::default();
+        state.follow(repos, repos.prompt.as_ref().map_or_default(|prompt| prompt.input.clone()));
+        state
+    }
+
+    /// The text is `text` now, the core's: asks the disk again for the folders that match it and, for a move, where
+    /// each checkout goes and whether it crosses to another drive.
+    fn follow(&mut self, repos: &Repos, text: String) {
+        self.suggestions = folder_suggestions(repos, &text);
+        self.lines = repos.move_lines();
+        self.crosses = if self.lines.is_empty() { None } else { repos.move_crosses_volumes() };
+        self.text = text;
+    }
+
+    /// The drive the note names, when the core can tell that the move crosses to another one.
+    fn other_drive(&self) -> Option<String> {
+        if self.crosses == Some(true) { target_root(&self.lines) } else { None }
     }
 }
 
 /// The words of the folder dialog's buttons in `repos`, from the left.
 #[cfg(test)]
-pub(super) fn said(repos: &Repos) -> Vec<&'static str> {
-    repos.prompt.as_ref().and_then(|prompt| words(&prompt.purpose)).map_or_default(|words| vec![CANCEL, words.button])
+pub(super) fn said(repos: &Repos) -> Vec<String> {
+    let moving = moving(&repos.move_lines());
+    repos.prompt.as_ref().and_then(|prompt| words(&prompt.purpose, moving)).map_or_default(|words| vec![CANCEL.to_owned(), words.button])
 }
 
 /// The parts of the folder dialog.
@@ -104,14 +209,37 @@ pub(super) struct Places {
     pub(super) pane: Rect,
     /// The title and the quiet line.
     pub(super) header: Rect,
-    /// "Folder".
+    /// The words over the field.
     pub(super) label: Rect,
     /// The folder field with the room its rows take.
     pub(super) field: Rect,
-    /// The core's reason under it, when it refused the folder.
+    /// Import: the core's reason under the field, when it refused the folder.
     pub(super) note: Option<Rect>,
+    /// Move: the hint under the field, or the core's reason in its place.
+    pub(super) hint: Option<Rect>,
+    /// Move: the box of the rows, one a checkout.
+    pub(super) list: Option<Rect>,
+    /// Move: the note on another drive, when the core can tell that the move crosses to one.
+    pub(super) drive: Option<Rect>,
     /// The row of the buttons.
     pub(super) buttons: Rect,
+}
+
+/// What stands under the folder field besides its rows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Under {
+    /// Import: the core's reason, when it refused the folder.
+    Import {
+        /// It refused the folder.
+        refused: bool,
+    },
+    /// Move: the hint line, a box of `lines` rows, and the note on another drive, `drive` points tall, when it shows.
+    Move {
+        /// How many checkouts move.
+        lines: usize,
+        /// How tall the note on another drive is, when it shows.
+        drive: Option<f32>,
+    },
 }
 
 /// The height of a line of `size`-point text.
@@ -120,34 +248,78 @@ fn line_height(size: f32) -> f32 {
 }
 
 /// Where the folder dialog's parts are in `window`, with a header `header` points tall, the field showing `rows`
-/// suggestions, and the core's reason under it or not. The dialog grows with the rows, as far as the window lets it;
-/// the rows give up their room before anything else, and the buttons stay inside the pane.
-fn folder_places(window: Rect, header: f32, rows: usize, note: bool) -> Places {
-    let note_want = if note { ADD_FOLDER_GAP + line_height(TEXT_SMALL) } else { 0.0 };
-    let fixed =
-        2.0 * DIALOG_PAD + header + DIALOG_GAP + line_height(TEXT) + ADD_FOLDER_GAP + DIALOG_FIELD_HEIGHT + note_want + DIALOG_GAP + BUTTON_HEIGHT;
-    let room = window.height() - 2.0 * DIALOG_MARGIN;
+/// suggestions, and `under` under it. The dialog grows with the rows, as far as the window lets it. A move's box
+/// takes what the window leaves, at least [`MOVE_LEAST_ROWS`] rows (all, when fewer) and at most [`MOVE_ROWS`]; the
+/// field's rows give up their room before that, and the buttons stay inside the pane.
+fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places {
+    let small = line_height(TEXT_SMALL);
+    let (under_field, list_want, list_least, drive_want) = match under {
+        Under::Import { refused } => (if refused { ADD_FOLDER_GAP + small } else { 0.0 }, 0.0, 0.0, 0.0),
+        Under::Move { lines, drive } => (
+            ADD_FOLDER_GAP + small,
+            DIALOG_GAP + list_height(lines.min(MOVE_ROWS)),
+            DIALOG_GAP + list_height(lines.min(MOVE_LEAST_ROWS)),
+            drive.map_or(0.0, |drive| DIALOG_GAP + drive),
+        ),
+    };
+    let fixed = 2.0 * DIALOG_PAD
+        + header
+        + DIALOG_GAP
+        + line_height(TEXT)
+        + ADD_FOLDER_GAP
+        + DIALOG_FIELD_HEIGHT
+        + under_field
+        + drive_want
+        + DIALOG_GAP
+        + BUTTON_HEIGHT;
+    let spare = (window.height() - 2.0 * DIALOG_MARGIN - fixed).max(0.0);
     let rows_want = widgets::folder_field_height(rows) - DIALOG_FIELD_HEIGHT;
-    let rows_height = rows_want.min((room - fixed).max(0.0));
-    let pane = overlay::dialog_rect(window, vec2(FOLDER_DIALOG_WIDTH, fixed + rows_height));
+    let rows_height = rows_want.min((spare - list_least).max(0.0));
+    let list_room = list_want.min(spare - rows_height);
+    let pane = overlay::dialog_rect(window, vec2(FOLDER_DIALOG_WIDTH, fixed + rows_height + list_room));
     let inside = pane.shrink(DIALOG_PAD);
     let at = |top: f32, height: f32| Rect::from_min_size(pos2(inside.left(), top), vec2(inside.width(), height));
     let header = at(inside.top(), header);
     let label = at(header.bottom() + DIALOG_GAP, line_height(TEXT));
     let field = at(label.bottom() + ADD_FOLDER_GAP, DIALOG_FIELD_HEIGHT + rows_height);
-    let note = note.then(|| at(field.bottom() + ADD_FOLDER_GAP, line_height(TEXT_SMALL)));
+    let below = at(field.bottom() + ADD_FOLDER_GAP, small);
+    let (note, hint) = match under {
+        Under::Import { refused } => (refused.then_some(below), None),
+        Under::Move { .. } => (None, Some(below)),
+    };
+    let (list, drive) = match under {
+        Under::Import { .. } => (None, None),
+        Under::Move { drive, .. } => {
+            let list = at(below.bottom() + DIALOG_GAP, (list_room - DIALOG_GAP).max(0.0));
+            (Some(list), drive.map(|drive| at(list.bottom() + DIALOG_GAP, drive)))
+        }
+    };
     let buttons = Rect::from_min_max(pos2(inside.left(), (inside.bottom() - BUTTON_HEIGHT).max(inside.top())), inside.max);
-    Places { pane, header, label, field, note, buttons }
+    Places { pane, header, label, field, note, hint, list, drive, buttons }
 }
 
-/// Where the folder dialog of `repos` stands in `window`, its header laid out with `painter`'s faces, its field as
-/// `state` has it; `None` without a folder question the dialog shows.
-pub(super) fn plan(painter: &egui::Painter, window: Rect, repos: &Repos, state: &State) -> Option<Plan> {
+/// The note on another drive naming `root`, laid out with `painter`'s faces: quiet 12-point text that wraps at
+/// [`MOVE_NOTE_WIDTH`], at the design's line height.
+fn drive_galley(painter: &Painter, root: &str) -> Arc<Galley> {
+    let mut job = LayoutJob::simple(drive_note(root), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, MOVE_NOTE_WIDTH);
+    for section in &mut job.sections {
+        section.format.line_height = Some(TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT);
+    }
+    painter.layout_job(job)
+}
+
+/// Where the folder dialog of `repos` stands in `window`, its header laid out with `painter`'s faces, its field and
+/// a move's rows as `state` has them; `None` without a folder question the dialog shows.
+pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, state: &State) -> Option<Plan> {
     let prompt = repos.prompt.as_ref()?;
-    let words = words(&prompt.purpose)?;
-    let header = Header::new(painter, words.title, words.line, FOLDER_DIALOG_WIDTH - 2.0 * DIALOG_PAD);
+    let words = words(&prompt.purpose, moving(&state.lines))?;
+    let header = Header::new(painter, &words.title, words.line, FOLDER_DIALOG_WIDTH - 2.0 * DIALOG_PAD);
     let rows = widgets::folder_field_rows(painter.ctx(), field_id(), state.suggestions.len());
-    let places = folder_places(window, header.height(), rows, prompt.error.is_some());
+    let under = match prompt.purpose {
+        Purpose::Move(_) => Under::Move { lines: state.lines.len(), drive: state.other_drive().map(|root| drive_galley(painter, &root).size().y) },
+        _ => Under::Import { refused: prompt.error.is_some() },
+    };
+    let places = folder_places(window, header.height(), rows, under);
     Some(Plan::dialog(header, Parts::Folder(places)))
 }
 
@@ -166,21 +338,26 @@ struct Done {
 /// whether the scrim was clicked in this frame.
 pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Repos, palette: Palette, dialogs: &mut Dialogs, scrim: bool) {
     let Some(mut state) = dialogs.folder.take() else { return };
-    let Some((words, input, error)) =
-        repos.prompt.as_ref().and_then(|prompt| words(&prompt.purpose).map(|words| (words, prompt.input.clone(), prompt.error.clone())))
-    else {
+    let Some((input, error)) = repos.prompt.as_ref().map(|prompt| (prompt.input.clone(), prompt.error.clone())) else {
         dialogs.folder = Some(state);
         return;
     };
-    overlay::walk(ui, &[field_id(), cancel_id(), main_id()]);
     if input != state.text {
-        // The core changed the text: the field follows it, typing goes on at its end, and its folders are asked for.
+        // The core changed the text: the field follows it, typing goes on at its end, and what goes with it is asked for.
         widgets::put_cursor_at_end(ui.ctx(), field_id(), &input);
-        state.suggestions = folder_suggestions(repos, &input);
-        state.text = input;
+        state.follow(repos, input);
     }
+    let Some(words) = repos.prompt.as_ref().and_then(|prompt| words(&prompt.purpose, moving(&state.lines))) else {
+        dialogs.folder = Some(state);
+        return;
+    };
+    let mut ids = vec![field_id(), cancel_id()];
+    if words.on {
+        ids.push(main_id());
+    }
+    overlay::walk(ui, &ids);
     header.draw(ui, places.header, palette);
-    ui.painter().text(places.label.left_center(), Align2::LEFT_CENTER, FOLDER, font(TEXT, assets::medium_family()), palette.on_glass);
+    ui.painter().text(places.label.left_center(), Align2::LEFT_CENTER, words.label, font(TEXT, assets::medium_family()), palette.on_glass);
 
     // The field first: it takes Esc, Enter, Up and Down while its rows show; the dialog's own come after.
     let focused = ui.memory(|memory| memory.has_focus(field_id()));
@@ -195,19 +372,95 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     }
     done.close |= take_press(ui, Key::Escape, None);
 
-    if let (Some(rect), Some(reason)) = (places.note, error.filter(|_| !did.changed)) {
-        let small = font(TEXT_SMALL, FontFamily::Proportional);
-        let reason = widgets::ellipsis(&reason, &small, rect.width(), ui);
-        ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, reason, small, palette.danger);
+    // Under the field: the core's reason while it stands (until the text changes), else a move's hint.
+    let small = font(TEXT_SMALL, FontFamily::Proportional);
+    let reason = error.filter(|_| !did.changed);
+    if let Some(rect) = places.note.or(places.hint) {
+        let (said, colour) = match (&reason, places.hint) {
+            (Some(reason), _) => (reason.as_str(), palette.danger),
+            (None, Some(_)) => (MOVE_HINT, palette.quiet),
+            (None, None) => ("", palette.quiet),
+        };
+        let said = widgets::ellipsis(said, &small, rect.width(), ui);
+        ui.painter().text(rect.left_center(), Align2::LEFT_CENTER, said, small, colour);
+    }
+    if let Some(rect) = places.list {
+        list(ui, rect, &state.lines, palette, dialogs);
+    }
+    if let (Some(rect), Some(root)) = (places.drive, state.other_drive()) {
+        let note = drive_galley(ui.painter(), &root);
+        let painter = ui.painter();
+        let first_line = TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT;
+        widgets::draw_icon(painter, pos2(rect.left() + ICON / 2.0, rect.top() + first_line / 2.0), Icon::HardDrive, ICON, palette.quiet);
+        painter.galley(pos2(rect.left() + ICON + LIST_GAP, rect.top()), note, palette.quiet);
     }
 
-    let widths = [widgets::button_width(ui, CANCEL), widgets::button_width(ui, words.button)];
+    let widths = [widgets::button_width(ui, CANCEL), widgets::button_width(ui, &words.button)];
     if let [cancel, main] = overlay::buttons(places.buttons, &widths).as_slice() {
         done.close |= widgets::button(ui, *cancel, CANCEL, Kind::Plain, palette, cancel_id());
-        done.accept |= widgets::button(ui, *main, words.button, Kind::Main, palette, main_id());
+        if words.on {
+            done.accept |= widgets::button(ui, *main, &words.button, Kind::Main, palette, main_id());
+        } else {
+            widgets::button_off(ui, *main, &words.button, palette);
+        }
     }
+    done.accept &= words.on;
     act(ui, repos, &mut state, &done);
     dialogs.folder = Some(state);
+}
+
+/// Draws a move's `lines` in the box at `rect`, scrolled by the wheel: for each, the folder's icon, where it is, an
+/// arrow and where it goes (each cut from the left to show its last folder, the whole path its hover text), the note
+/// of one that stays at the right; a line between two.
+fn list(ui: &Ui, rect: Rect, lines: &[MoveLine], palette: Palette, dialogs: &mut Dialogs) {
+    let inset = inset(ui, rect, palette);
+    dialogs.list_scroll = (dialogs.list_scroll - inset.wheel).clamp(0.0, most_scroll(lines.len(), rect.height()));
+    let clip = rect.intersect(ui.clip_rect());
+    let regular = font(TEXT, FontFamily::Proportional);
+    let medium = font(TEXT, assets::medium_family());
+    let small = font(TEXT_SMALL, FontFamily::Proportional);
+    let painter = &inset.painter;
+    for (index, line) in lines.iter().enumerate() {
+        let top = rect.top() + LIST_PAD[0] + count_rows(index) * LIST_ROW - dialogs.list_scroll;
+        let row = Rect::from_min_max(pos2(rect.left() + LIST_PAD[1], top), pos2(rect.right() - LIST_PAD[1], top + LIST_ROW));
+        if !row.intersects(rect) {
+            continue;
+        }
+        if index + 1 != lines.len() {
+            painter.hline(row.x_range(), row.bottom() - HAIRLINE / 2.0, Stroke::new(HAIRLINE, palette.on_glass.gamma_multiply(LINE_OPACITY)));
+        }
+        let y = row.center().y;
+        widgets::draw_icon(painter, pos2(row.left() + ICON / 2.0, y), Icon::FolderGit2, ICON, palette.quiet);
+        let mut right = row.right();
+        if let Some(words) = note(line) {
+            painter.text(pos2(right, y), Align2::RIGHT_CENTER, words, small.clone(), palette.warning);
+            right -= widgets::width(painter, words, &small) + LIST_GAP;
+        }
+        let left = row.left() + ICON + LIST_GAP;
+        let half = ((right - left - ICON - 2.0 * LIST_GAP) / 2.0).max(0.0);
+        let from = Rect::from_min_max(pos2(left, row.top()), pos2(left + half, row.bottom()));
+        let to = Rect::from_min_max(pos2(from.right() + 2.0 * LIST_GAP + ICON, row.top()), pos2(right, row.bottom()));
+        path_cell(ui, painter, from, clip, &line.from.display().to_string(), &regular, palette.on_glass, Id::unique(("dialog-move-from", index)));
+        widgets::draw_icon(painter, pos2(from.right() + LIST_GAP + ICON / 2.0, y), Icon::ArrowRight, ICON, palette.quiet);
+        // While the folder is not usable yet: the name it keeps, quiet.
+        let (target, colour) = line.to.as_ref().map_or_else(
+            || (line.from.file_name().map_or_default(|name| name.to_string_lossy().into_owned()), palette.quiet),
+            |target| (target.display().to_string(), palette.on_glass),
+        );
+        path_cell(ui, painter, to, clip, &target, &medium, colour, Id::unique(("dialog-move-to", index)));
+    }
+}
+
+/// Draws `path` at the left of `cell` with `painter`, in `face` and `colour`, cut from the left on a separator so its
+/// last folder shows; when cut, the whole path is the hover text of the part of `cell` inside `clip`, under `id`.
+#[expect(clippy::too_many_arguments, reason = "the cell, its clip, the path, its face and colour, and the hover's id")]
+fn path_cell(ui: &Ui, painter: &Painter, cell: Rect, clip: Rect, path: &str, face: &FontId, colour: Color32, id: Id) {
+    let words = widgets::path_tail(path, face, cell.width(), ui);
+    painter.text(cell.left_center(), Align2::LEFT_CENTER, &words, face.clone(), colour);
+    let seen = cell.intersect(clip);
+    if words != path && seen.is_positive() {
+        ui.interact(seen, id, Sense::hover()).on_hover_text(path);
+    }
 }
 
 /// Does in `repos` what a person did in the folder dialog in one frame; keeps the dialog's own `state`.
@@ -218,8 +471,7 @@ fn act(ui: &Ui, repos: &mut Repos, state: &mut State, done: &Done) {
     }
     if let Some(text) = &done.typed {
         repos.set_path_input(text);
-        state.suggestions = folder_suggestions(repos, text);
-        text.clone_into(&mut state.text);
+        state.follow(repos, text.clone());
     }
     if done.accept {
         repos.run(Action::Confirm);
@@ -233,12 +485,14 @@ fn act(ui: &Ui, repos: &mut Repos, state: &mut State, done: &Done) {
 
 #[cfg(test)]
 mod tests {
-    use devassist_core::repos::state::testing::{hold_github, test_settings};
-    use devassist_core::repos::state::{HELD, Mode as CoreMode};
+    use std::path::{Path, PathBuf};
+
+    use devassist_core::repos::state::testing::{hold_github, installed, test_settings};
+    use devassist_core::repos::state::{HELD, MigrateItem, Mode as CoreMode};
     use egui::{Event, Memory, Modifiers, Pos2};
 
     use super::super::Which;
-    use super::super::testing::{Temp, Window, git, until};
+    use super::super::testing::{Temp, Window, behind, git, until, wheel};
     use super::*;
     use crate::session::Session;
     use crate::theme::{MIN_WINDOW, WINDOW};
@@ -388,7 +642,7 @@ mod tests {
         for size in [MIN_WINDOW, WINDOW] {
             let window = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
             for (rows, note) in [(0, false), (0, true), (6, false), (6, true)] {
-                let places = folder_places(window, 60.0, rows, note);
+                let places = folder_places(window, 60.0, rows, Under::Import { refused: note });
                 assert!(window.contains_rect(places.pane), "{size:?} {rows} {note}");
                 assert!((places.pane.width() - FOLDER_DIALOG_WIDTH).abs() < 1e-3);
                 for part in [places.header, places.label, places.field, places.buttons] {
@@ -400,7 +654,8 @@ mod tests {
         }
         // The dialog grows with the rows.
         let window = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
-        assert!(folder_places(window, 60.0, 3, false).pane.height() > folder_places(window, 60.0, 0, false).pane.height());
+        let import = Under::Import { refused: false };
+        assert!(folder_places(window, 60.0, 3, import).pane.height() > folder_places(window, 60.0, 0, import).pane.height());
     }
 
     #[test]
@@ -423,22 +678,291 @@ mod tests {
     }
 
     #[test]
-    fn the_enter_that_opens_import_does_not_import() {
-        let mut repos = crate::demo::repos();
-        crate::demo::show(&mut repos, "import").unwrap();
-        let mut window = Window::new(Session::demo(repos));
-        let enter = |pressed, repeat| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat, modifiers: Modifiers::NONE };
-        window.frame(vec![enter(true, false)]);
-        for _ in 0..3 {
-            window.frame(vec![enter(true, true)]);
+    fn an_enter_held_into_the_first_frame_does_not_press_the_main_button() {
+        for (name, main) in [("import", "Import"), ("move", "Move 2 repositories")] {
+            let mut repos = crate::demo::repos();
+            crate::demo::show(&mut repos, name).unwrap();
+            let mut window = Window::new(Session::demo(repos));
+            let enter = |pressed, repeat| Event::Key { key: Key::Enter, physical_key: None, pressed, repeat, modifiers: Modifiers::NONE };
+            window.frame(vec![enter(true, false)]);
+            for _ in 0..3 {
+                window.frame(vec![enter(true, true)]);
+            }
+            assert!(window.shows(Which::Folder), "{name}: the Enter that opened it pressed {main}");
+            assert_ne!(window.repos().status, HELD, "{name}");
+            assert_eq!(window.said(), ["Cancel", main]);
+            window.frame(vec![enter(false, false)]);
+            // Tab from the field goes to Cancel, then the main button.
+            window.key(Key::Tab);
+            assert_eq!(window.ctx.memory(Memory::focused), Some(cancel_id()), "{name}");
+            window.key(Key::Tab);
+            assert_eq!(window.ctx.memory(Memory::focused), Some(main_id()), "{name}");
         }
-        assert!(window.shows(Which::Folder), "the Enter that opened Import pressed Import");
+    }
+
+    #[test]
+    fn importing_a_folder_without_clones_closes_and_says_so_in_the_cores_words() {
+        let _live = crate::session::tests::live_git();
+        let (root, _code, settings) = two_clones("import-none");
+        let empty = root.0.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let mut repos = Repos::offline(settings);
+        hold_github(&mut repos);
+        repos.run(Action::Import);
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Folder));
+        type_over(&mut window, &empty.display().to_string());
+        tap(&mut window, Key::Enter, None);
+        assert!(!window.open(), "Import stayed open: {:?}", window.repos().prompt.as_ref().and_then(|prompt| prompt.error.clone()));
+        assert_eq!(window.repos().status, format!("No GitHub clones in {}.", empty.display()));
+        assert!(window.repos().installed.is_empty() && window.repos().checkouts.is_empty());
+        window.session.close();
+    }
+
+    /// The demo with the Move dialog open for its repositories `marked`, as the Migrate menu's move line opens it,
+    /// its folder `text`; one frame drawn.
+    fn move_dialog(marked: &[&str], text: &str) -> Window {
+        let mut repos = crate::demo::repos();
+        repos.marked = marked.iter().map(|name| (*name).to_owned()).collect();
+        repos.run_migrate(MigrateItem::Folder);
+        repos.set_path_input(text);
+        let mut window = Window::new(Session::demo(repos));
+        window.frame(Vec::new());
+        window
+    }
+
+    /// Where each row of the Move dialog goes, as the dialog keeps them.
+    fn targets(window: &Window) -> Vec<Option<PathBuf>> {
+        state(window).lines.iter().map(|line| line.to.clone()).collect()
+    }
+
+    /// The demo's folder of its Work group, where api and web are.
+    const WORK: &str = r"D:\code\work";
+    /// A folder on another drive than the demo's.
+    const OTHER: &str = r"E:\work";
+
+    #[test]
+    fn the_rows_say_where_each_goes_as_the_folder_is_typed() {
+        // The title follows the remove dialog's rule.
+        let one = |name: &str| (name.to_owned(), PathBuf::from(WORK).join(name));
+        assert_eq!(move_title(&[one("api")]), "Move api to another folder");
+        assert_eq!(move_title(&[one("api"), one("web")]), "Move api and web to another folder");
+        assert_eq!(move_title(&["a", "b", "c", "d", "e"].map(one)), "Move 5 repositories to another folder");
+        assert_eq!(
+            (move_button(1), move_button(2), move_button(12)),
+            ("Move".to_owned(), "Move 2 repositories".to_owned(), "Move 12 repositories".to_owned())
+        );
+
+        // It opens where api and web are: both are there already, and nothing can be moved.
+        let mut window = move_dialog(&["api", "web"], WORK);
+        assert!(window.shows(Which::Folder));
+        assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()));
+        assert!(state(&window).lines.iter().all(|line| line.there));
+        assert_eq!(window.said(), ["Cancel", "Move"]);
+        let prompt = window.repos().prompt.as_ref().unwrap();
+        assert_eq!(words(&prompt.purpose, 0).unwrap().title, "Move api and web to another folder");
+        assert!(!words(&prompt.purpose, 0).unwrap().on, "the main button is off while nothing moves");
+        tap(&mut window, Key::Enter, None);
+        assert!(window.shows(Which::Folder), "Enter moved what cannot move");
         assert_ne!(window.repos().status, HELD);
-        window.frame(vec![enter(false, false)]);
-        // Tab from the field goes to Cancel, then Import.
-        window.key(Key::Tab);
-        assert_eq!(window.ctx.memory(Memory::focused), Some(cancel_id()));
-        window.key(Key::Tab);
-        assert_eq!(window.ctx.memory(Memory::focused), Some(main_id()));
+
+        // Another folder: each row says where it goes, and the button counts them.
+        type_over(&mut window, OTHER);
+        assert_eq!(window.repos().prompt.as_ref().unwrap().input, OTHER, "the text is the core's");
+        assert_eq!(targets(&window), [Some(PathBuf::from(OTHER).join("api")), Some(PathBuf::from(OTHER).join("web"))]);
+        assert_eq!(window.said(), ["Cancel", "Move 2 repositories"]);
+        // A folder that is no full path: nowhere to go yet, and the button is off.
+        type_over(&mut window, "dev");
+        assert_eq!(targets(&window), [None, None]);
+        assert_eq!(window.said(), ["Cancel", "Move"]);
+        let main = window.buttons()[1].0;
+        window.click(main.center());
+        assert!(window.shows(Which::Folder), "the button that is off moved");
+        // Back to the other drive, and the button: the held demo refuses the work and says so; the ticks stay.
+        let field = parts(&window).field;
+        window.click(Pos2::new(field.center().x, field.top() + DIALOG_FIELD_HEIGHT / 2.0));
+        type_over(&mut window, OTHER);
+        window.press("Move 2 repositories");
+        assert!(!window.open());
+        assert_eq!(window.repos().status, HELD);
+        assert_eq!(window.repos().marked, ["api", "web"]);
+    }
+
+    #[test]
+    fn a_row_that_is_there_already_says_so_and_does_not_count() {
+        // api is in the Work folder already; notes moves there.
+        let mut window = move_dialog(&["api", "notes"], WORK);
+        let lines = state(&window).lines.clone();
+        assert_eq!((lines[0].name.as_str(), lines[0].there), ("api", true));
+        assert_eq!((note(&lines[0]), note(&lines[1])), (Some("is there already"), None));
+        assert_eq!(targets(&window)[1], Some(PathBuf::from(WORK).join("notes")));
+        assert_eq!(window.said(), ["Cancel", "Move"], "the one that moves is counted, not the one that stays");
+        // Into api itself: the core refuses that one, and the other still moves.
+        type_over(&mut window, &format!(r"{WORK}\api"));
+        let lines = state(&window).lines.clone();
+        assert!(lines[0].taken && !lines[0].there);
+        assert_eq!((note(&lines[0]), note(&lines[1])), (Some("cannot move there"), None));
+        assert_eq!(window.said(), ["Cancel", "Move"]);
+        // When every row stays, the button is off and Enter does nothing.
+        let mut window = move_dialog(&["api", "web", "portal"], WORK);
+        assert_eq!(window.said(), ["Cancel", "Move"]);
+        assert_eq!(moving(&state(&window).lines), 0);
+        tap(&mut window, Key::Enter, None);
+        assert!(window.shows(Which::Folder));
+        assert_ne!(window.repos().status, HELD);
+    }
+
+    #[test]
+    fn a_move_into_a_file_is_refused_in_the_cores_words() {
+        // The held demo tells where each goes by the text alone; the core looks once the button is pressed.
+        let file = std::env::current_exe().unwrap();
+        let mut window = move_dialog(&["api", "web"], WORK);
+        type_over(&mut window, &file.display().to_string());
+        assert_eq!(window.said(), ["Cancel", "Move 2 repositories"]);
+        window.press("Move 2 repositories");
+        assert!(window.shows(Which::Folder), "the move went on into a file");
+        assert_eq!(window.repos().prompt.as_ref().unwrap().error, Some(format!("{} is a file, not a folder.", file.display())));
+        assert_ne!(window.repos().status, HELD, "the refusal is no held work");
+        let places = parts(&window);
+        let hint = places.hint.expect("the line under the field");
+        assert!(hint.top() >= places.field.bottom() && hint.bottom() <= places.list.unwrap().top());
+        assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()), "the field keeps the keys");
+        // Typing takes the reason away.
+        tap(&mut window, Key::X, Some("x"));
+        assert_eq!(window.repos().prompt.as_ref().unwrap().error, None);
+    }
+
+    #[test]
+    fn the_other_drive_note_shows_only_when_the_core_can_tell() {
+        assert_eq!(
+            drive_note("E:"),
+            "E: is another drive. Everything is copied first, and the original is deleted only after the copy is complete. Close programs that \
+             have files of these repositories open."
+        );
+        let mut window = move_dialog(&["api", "web"], OTHER);
+        assert_eq!(state(&window).crosses, Some(true));
+        assert_eq!(state(&window).other_drive().as_deref(), Some("E:"));
+        let places = parts(&window);
+        let (list, drive) = (places.list.unwrap(), places.drive.expect("the note on another drive"));
+        assert!(drive.top() >= list.bottom() && drive.bottom() <= places.buttons.top() && places.pane.contains_rect(drive));
+        let tall = places.pane.height();
+        // The same drive: no note, and the dialog is shorter by it.
+        type_over(&mut window, r"D:\elsewhere");
+        assert_eq!(state(&window).crosses, Some(false));
+        assert_eq!(parts(&window).drive, None);
+        assert!(parts(&window).pane.height() < tall);
+        // A folder the core cannot judge: no note either.
+        type_over(&mut window, "dev");
+        assert_eq!(state(&window).crosses, None);
+        assert_eq!(parts(&window).drive, None);
+        // Rows that stay do not count: all of them there, no note.
+        let window = move_dialog(&["api", "web"], WORK);
+        assert_eq!((state(&window).crosses, parts(&window).drive), (Some(false), None));
+    }
+
+    #[test]
+    fn fifty_rows_scroll_and_the_buttons_stay_in_view() {
+        // Placed: in the smallest window, with the folder rows open and the note shown, the box keeps three rows and
+        // the buttons stay inside the pane; in the design's window it shows six.
+        let small = Rect::from_min_size(Pos2::ZERO, vec2(MIN_WINDOW[0], MIN_WINDOW[1]));
+        let big = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
+        let fifty = Under::Move { lines: 50, drive: Some(3.0 * TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT) };
+        for (window, rows) in [(small, 0), (small, 6), (big, 0), (big, 6)] {
+            let places = folder_places(window, 45.0, rows, fifty);
+            let (list, drive, hint) = (places.list.unwrap(), places.drive.unwrap(), places.hint.unwrap());
+            assert!(window.contains_rect(places.pane), "{window:?} {rows}");
+            for part in [places.header, places.label, places.field, hint, list, drive, places.buttons] {
+                assert!(places.pane.contains_rect(part), "{window:?} {rows}: {part:?} outside {:?}", places.pane);
+            }
+            assert!(places.field.bottom() <= hint.top() && hint.bottom() <= list.top() && list.bottom() <= drive.top());
+            assert!(drive.bottom() <= places.buttons.top(), "{window:?} {rows}");
+            let least = if window == small { MOVE_LEAST_ROWS } else { MOVE_ROWS };
+            assert!(list.height() >= list_height(least) - 1e-3, "{window:?} {rows}: {list:?}");
+            assert!(list.height() <= list_height(MOVE_ROWS) + 1e-3);
+        }
+        // Drawn: fifty checkouts on another drive, the folder rows open in the smallest window.
+        let mut repos = Repos::offline(test_settings());
+        repos.hold_work();
+        for index in 0..50 {
+            let name = format!("repo-{index:02}");
+            let mut repo = installed("acme", &name);
+            repo.folder.clone_from(&name);
+            repo.path = PathBuf::from(r"E:\many").join(&name);
+            repos.checkouts.push(repo.path.clone());
+            repos.marked.push(name);
+            repos.installed.push(repo);
+        }
+        repos.run_migrate(MigrateItem::Folder);
+        let mut window = Window::new(Session::demo(repos));
+        window.size = MIN_WINDOW;
+        window.frame(Vec::new());
+        type_over(&mut window, &format!("{}{}", crate::demo::CODE_DIR, std::path::MAIN_SEPARATOR));
+        assert_eq!(state(&window).suggestions.len(), 4);
+        assert!(widgets::folder_field_rows(&window.ctx, field_id(), 4) > 0, "the folder rows are not open");
+        assert_eq!(window.said(), ["Cancel", "Move 50 repositories"]);
+        let places = parts(&window);
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(MIN_WINDOW[0], MIN_WINDOW[1]));
+        assert!(places.drive.is_some(), "no note on another drive");
+        assert!(screen.contains_rect(places.pane) && places.pane.contains_rect(places.buttons));
+        let list = places.list.unwrap();
+        assert!(list.height() >= list_height(MOVE_LEAST_ROWS) - 1e-3, "{list:?}");
+        // The wheel reaches the last row and no further.
+        window.frame(vec![Event::PointerMoved(list.center())]);
+        for _ in 0..100 {
+            window.frame(vec![wheel(-120.0)]);
+        }
+        let end = most_scroll(50, list.height());
+        assert!(end > 0.0 && (window.dialogs.list_scroll - end).abs() < 1e-3, "{} of {end}", window.dialogs.list_scroll);
+        // The buttons are there to press.
+        window.press("Cancel");
+        assert!(!window.open() && window.repos().mode == CoreMode::List);
+    }
+
+    #[test]
+    fn moving_two_checkouts_moves_them_and_keeps_their_groups() {
+        let _live = crate::session::tests::live_git();
+        let (root, settings) = behind("move", &["api", "web"]);
+        assert!(settings.config_path.starts_with(&root.0), "the settings are kept in the temporary folder");
+        let mut repos = Repos::new(settings);
+        // Nothing after the move asks GitHub: no test reaches the network.
+        hold_github(&mut repos);
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        until(&mut window, "read", |window| !window.repos().waiting() && window.repos().installed.len() == 2);
+        // Both in a group, through the core's group question.
+        let repos = window.session.repos_mut().unwrap();
+        repos.marked = vec!["api".to_owned(), "web".to_owned()];
+        repos.open_group_prompt();
+        repos.set_group_name("Work");
+        repos.accept_group();
+        let group_of = |window: &Window| -> Vec<(String, String)> {
+            window.repos().installed.iter().map(|repo| (repo.folder.clone(), repo.group.clone())).collect()
+        };
+        assert_eq!(group_of(&window), [("api".to_owned(), "Work".to_owned()), ("web".to_owned(), "Work".to_owned())]);
+        // The Migrate menu's move line, as the terminal app opens it.
+        window.session.repos_mut().unwrap().run_migrate(MigrateItem::Folder);
+        window.frame(Vec::new());
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Folder), "{}", window.repos().status);
+        let target = root.0.join("moved");
+        type_over(&mut window, &target.display().to_string());
+        assert_eq!(targets(&window), [Some(target.join("api")), Some(target.join("web"))]);
+        assert_eq!(state(&window).crosses, Some(false), "one temporary folder is one drive");
+        assert_eq!(parts(&window).drive, None);
+        window.press("Move 2 repositories");
+        // The dialog went; the run's progress dialog shows its two tasks until it has ended.
+        until(&mut window, "moved", |window| window.repos().job.as_ref().is_some_and(|job| !job.running()) && !window.repos().busy);
+        assert!(window.shows(Which::Progress), "the run's dialog is not shown: {}", window.repos().status);
+        assert_eq!(window.job().items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["api", "web"]);
+        assert!(matches!(&window.job().result, Some(Ok(_))), "{:?}", window.job().result);
+        for name in ["api", "web"] {
+            assert!(target.join(name).join(".git").exists(), "{name} is not in {}", target.display());
+            assert!(!root.0.join(name).exists(), "{name} is still where it was");
+        }
+        let paths: Vec<&Path> = window.repos().installed.iter().map(|repo| repo.path.as_path()).collect();
+        assert_eq!(paths, [target.join("api").as_path(), target.join("web").as_path()]);
+        assert_eq!(group_of(&window), [("api".to_owned(), "Work".to_owned()), ("web".to_owned(), "Work".to_owned())]);
+        assert!(root.0.join("devassist.toml").is_file(), "the settings were not saved in the temporary folder");
+        window.session.close();
     }
 }

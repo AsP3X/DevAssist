@@ -86,6 +86,11 @@ the same way from the bundled `lucide.ttf`, with a short script of the standard 
 same reading gives `folder` as `e0d7`, `group` as `e464` and `arrow-down-to-line` as `e455`, as `src/assets.rs` has
 them.
 
+The Move dialog's icons, `arrow-right` (`e049`, between a checkout's folder and where it goes) and `hard-drive` (`e0ed`,
+the note on another drive), were read on 2026-11-26 the same way from the bundled `lucide.ttf` (its `post` glyph names
+and its format 4 `cmap`), with a short script of the standard library; nothing was downloaded. The same reading gives
+`folder` as `e0d7`, `folder-git-2` as `e40a` and `plus` as `e13d`, as `src/assets.rs` has them.
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

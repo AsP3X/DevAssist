@@ -107,6 +107,16 @@ pub fn suggest(text: &str) -> Vec<String> {
 
 /// Turns what was typed into a full path. `~` is the home folder.
 pub fn resolve(input: &str) -> Result<PathBuf, String> {
+    let path = resolve_text(input)?;
+    if path.is_file() {
+        return Err(format!("{} is a file, not a folder.", path.display()));
+    }
+    Ok(path)
+}
+
+/// `resolve` by the text alone: the same full path and the same refusals,
+/// except that a file at the path is not looked for. Reads nothing.
+pub fn resolve_text(input: &str) -> Result<PathBuf, String> {
     let text = input.trim().trim_matches('"').trim();
     if text.is_empty() {
         return Err("Type the folder.".to_string());
@@ -117,9 +127,6 @@ pub fn resolve(input: &str) -> Result<PathBuf, String> {
             "Use a full path, such as {} or ~{MAIN_SEPARATOR}dev.",
             if cfg!(windows) { "C:\\dev" } else { "/srv/dev" }
         ));
-    }
-    if path.is_file() {
-        return Err(format!("{} is a file, not a folder.", path.display()));
     }
     Ok(path)
 }

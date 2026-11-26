@@ -586,6 +586,9 @@ fn every_text_in_the_window_holds_its_contrast_on_all_six_backdrops() {
 enum Over {
     /// Nothing: the screen's own controls are measured.
     Nothing,
+    /// Nothing, the pointer resting on the top row's main button ("Add repository"): the screen's own controls are
+    /// measured, that button on its hover's fill.
+    MainHovered,
     /// Nothing, in windows narrower than the app allows, where the top row gives way ([`TOP_ROW_SIZES`]): only the
     /// top row's controls are measured.
     TopRow,
@@ -622,7 +625,7 @@ impl Over {
 
     /// Nothing is over the screen.
     fn is_screen(self) -> bool {
-        matches!(self, Over::Nothing | Over::TopRow)
+        matches!(self, Over::Nothing | Over::MainHovered | Over::TopRow)
     }
 }
 
@@ -653,8 +656,11 @@ struct Shot {
 /// "private", the status line, the note), searched so that a tick is hidden ("Also ticked") with the folder refused
 /// (the danger note), and with GitHub failed and a plain word typed (the status line in the danger colour, "Retry",
 /// the row that lists the account); the screen without repositories (its panel's two lines, the top row), the top row
-/// where it gives way, and the Import dialog as the demo opens it and with a folder the core refused.
-const SHOTS: [Shot; 20] = [
+/// where it gives way, and the Import dialog as the demo opens it and with a folder the core refused; the screen with
+/// the pointer on the top row's "Add repository"; the Move dialog as the demo opens it (its rows, the note on another
+/// drive), with rows that are there already and that cannot move, with no usable folder (its quiet targets, the main
+/// button off), and with a folder the core refused.
+const SHOTS: [Shot; 26] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -768,6 +774,45 @@ const SHOTS: [Shot; 20] = [
             repos.set_path_input("code");
         },
     },
+    Shot { name: "add repository hovered", over: Over::MainHovered, set_up: |_| {} },
+    Shot { name: "move", over: Over::Dialog, set_up: |repos| demo::show(repos, "move").unwrap() },
+    Shot {
+        // api and web are in the folder already; notes moves there.
+        name: "move there already",
+        over: Over::Dialog,
+        set_up: |repos| {
+            repos.marked = vec!["api".to_owned(), "web".to_owned(), "notes".to_owned()];
+            demo::show(repos, "move").unwrap();
+            repos.set_path_input(demo::CLONE_DIR);
+        },
+    },
+    Shot {
+        // Into api itself: api cannot move there, web can.
+        name: "move cannot",
+        over: Over::Dialog,
+        set_up: |repos| {
+            demo::show(repos, "move").unwrap();
+            repos.set_path_input(&std::path::Path::new(demo::CLONE_DIR).join("api").display().to_string());
+        },
+    },
+    Shot {
+        // A folder that is no full path: the targets quiet, the main button off.
+        name: "move without a folder",
+        over: Over::Dialog,
+        set_up: |repos| {
+            demo::show(repos, "move").unwrap();
+            repos.set_path_input("work");
+        },
+    },
+    Shot {
+        name: "move refused",
+        over: Over::Entered,
+        set_up: |repos| {
+            demo::show(repos, "move").unwrap();
+            // A file: the held core tells the rows by the text, then refuses the folder when Enter moves.
+            repos.set_path_input(&std::env::current_exe().unwrap().display().to_string());
+        },
+    },
 ];
 
 /// The demo's Add dialog searched for "p", for the shots that point at its rows: acme/api (installed),
@@ -784,7 +829,7 @@ fn set_up_pointing(repos: &mut Repos) {
 /// a dialog lies over the sidebar as well as the table.
 fn sizes(over: Over) -> &'static [[f32; 2]] {
     match over {
-        Over::Nothing => &[WINDOW],
+        Over::Nothing | Over::MainHovered => &[WINDOW],
         Over::TopRow => &TOP_ROW_SIZES,
         _ => &[WINDOW, MIN_WINDOW],
     }
@@ -1047,10 +1092,11 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     };
     let mut pointer = None;
     let mut found = None;
+    let mut main = None;
     let mut rows: Vec<(Rect, bool)> = Vec::new();
     for frame in 0..=SETTLE {
         let mut drew = None;
-        let events = shot_events(shot.over, frame, pointer, found);
+        let events = shot_events(shot.over, frame, pointer, found, main);
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
@@ -1107,6 +1153,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             textures.insert(GLASS_TEXTURE, picture.image());
         }
         let (overlay, wants, layout, top) = drew.unwrap();
+        main = top.map(|(_, main)| main);
         last = Some(Frame {
             ctx: ctx.clone(),
             shapes: std::mem::take(&mut output.shapes),
@@ -1123,9 +1170,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         assert!(overlay::is_open(&ctx) && glass.is_some(), "{}: its overlay is not drawn", shot.name);
     }
     let last = last.unwrap();
-    if let Over::Hovering(index) = shot.over {
-        hover_lands(shot.name, &last, index, size, mode);
-    }
+    hover_lands(shot, &last, size, mode);
     last
 }
 
@@ -1135,9 +1180,11 @@ fn state_words(session: &Session) -> Vec<String> {
 }
 
 /// What a person does in the frame `frame` of a shot over `over`: the folder field's keys and pointer at `pointer`,
-/// Enter once the dialog is open, or the pointer on a row of the Add list `found` (from the last frame).
-fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Rect>) -> Vec<egui::Event> {
+/// Enter once the dialog is open, the pointer on a row of the Add list `found`, or on the top row's main button
+/// `main` (both from the last frame).
+fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Rect>, main: Option<Rect>) -> Vec<egui::Event> {
     match (over, pointer) {
+        (Over::MainHovered, _) if frame >= 1 => main.map_or_default(|main| vec![egui::Event::PointerMoved(main.center())]),
         (Over::Hovering(index), _) if frame >= 1 => found.map_or_default(|found: Rect| {
             let row = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
             vec![egui::Event::PointerMoved(pos2(found.center().x, found.top() + (row + 0.5) * ADD_ROW))]
@@ -1150,19 +1197,32 @@ fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Re
     }
 }
 
-/// Checks that the row `index` of the Add list the pointer rests on in the frame `last` of the shot `name`, at the
-/// window `size` in `mode`, is whole inside the list, and that the frame fills it with the hover's fill when it is an
-/// ordinary row and not when it is installed (an installed row shows no hover): the shot measures what it says.
-fn hover_lands(name: &str, last: &Frame, index: usize, size: egui::Vec2, mode: Mode) {
-    let found_box = last.found_box.unwrap_or_else(|| panic!("{name}: no Add list"));
-    let (row, installed) = last.rows[index];
-    assert!(found_box.contains_rect(row), "{name} at {size:?}: the pointed row {row:?} is not inside the list {found_box:?}");
+/// Checks, for a shot that points at something, that the frame `last` of `shot`, at the window `size` in `mode`,
+/// shows the pointer where the shot says: the row of the Add list it rests on whole inside the list, filled with the
+/// hover's fill when it is an ordinary row and not when it is installed (an installed row shows no hover); the top
+/// row's main button filled with it. The shot measures what it says.
+fn hover_lands(shot: &Shot, last: &Frame, size: egui::Vec2, mode: Mode) {
+    let name = shot.name;
     let hover = theme::palette(mode).on_glass.gamma_multiply(HOVER_OPACITY);
-    let filled = last.shapes.iter().any(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == hover && row.contains_rect(rect.rect)));
-    if installed {
-        assert!(!filled, "{name} at {size:?}: a hover fill drawn on an installed row");
-    } else {
-        assert!(filled, "{name} at {size:?}: no hover fill drawn on the hovered row");
+    let filled = |place: Rect| {
+        last.shapes.iter().any(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == hover && place.contains_rect(rect.rect)))
+    };
+    match shot.over {
+        Over::Hovering(index) => {
+            let found_box = last.found_box.unwrap_or_else(|| panic!("{name}: no Add list"));
+            let (row, installed) = last.rows[index];
+            assert!(found_box.contains_rect(row), "{name} at {size:?}: the pointed row {row:?} is not inside the list {found_box:?}");
+            if installed {
+                assert!(!filled(row), "{name} at {size:?}: a hover fill drawn on an installed row");
+            } else {
+                assert!(filled(row), "{name} at {size:?}: no hover fill drawn on the hovered row");
+            }
+        }
+        Over::MainHovered => {
+            let main = last.top.map_or_else(|| panic!("{name}: no top row"), |(_, main)| main);
+            assert!(filled(main), "{name} at {size:?} in {mode:?}: no hover fill drawn on \"Add repository\"");
+        }
+        _ => {}
     }
 }
 
@@ -1207,7 +1267,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
             Shape::Text(text) => {
                 if let Some((words, rect, ink, font)) = text_of(text, clipped.clip_rect) {
                     let wanted = match shot.over {
-                        Over::Nothing => {
+                        Over::Nothing | Over::MainHovered => {
                             words == dots || frame.state.contains(&words) || controls.iter().any(|(_, control)| control.contains(rect.center()))
                         }
                         Over::TopRow => controls.iter().any(|(_, control)| control.contains(rect.center())),

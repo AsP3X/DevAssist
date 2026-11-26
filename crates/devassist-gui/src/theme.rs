@@ -407,9 +407,19 @@ pub const ADD_FOLDER_GAP: f32 = 8.0;
 /// The room between the found repositories' box and the highlighted row's fill at either side, and that fill's
 /// corner radius (the group dialog's, `GROUP_PICK`: the design draws no highlight).
 pub const ADD_PICK: [f32; 2] = GROUP_PICK;
-/// The width of the folder dialog (Import, and Move to come): the Add dialog's, whose parts it is built from (the
-/// design draws no Import dialog).
+/// The width of the folder dialog (Import and Move): the Add dialog's, whose parts it is built from, and the design's
+/// Move dialog's (`dialog("Move", 600, …)`; the design draws no Import dialog).
 pub const FOLDER_DIALOG_WIDTH: f32 = ADD_WIDTH;
+/// The most rows the Move dialog's "What moves" shows before it scrolls.
+pub const MOVE_ROWS: usize = 6;
+/// The fewest rows the Move dialog's "What moves" keeps (all, when fewer) while the window is short: the folder
+/// field's rows give up their room first.
+pub const MOVE_LEAST_ROWS: usize = 3;
+/// The width the Move dialog's note on another drive wraps at (the design's `fixed(…, 420, …)`).
+pub const MOVE_NOTE_WIDTH: f32 = 420.0;
+/// The line height of the Move dialog's note on another drive, as a share of its size (the design's
+/// `lineHeight: 1.4`).
+pub const MOVE_NOTE_LINE_HEIGHT: f32 = 1.4;
 /// The size of the spinner on the Add dialog's status line while the core looks something up (the plan's own: a
 /// small icon's, `ICON_SMALL`'s width less the arc's stroke).
 pub const SPINNER: f32 = 12.0;

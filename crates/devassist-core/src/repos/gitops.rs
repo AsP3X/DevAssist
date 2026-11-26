@@ -959,26 +959,41 @@ pub fn same_volume(a: &Path, b: &Path) -> Option<bool> {
     same_device(&nearest(a)?, &nearest(b)?)
 }
 
-#[cfg(windows)]
-fn same_device(a: &Path, b: &Path) -> Option<bool> {
-    use std::path::{Component, Prefix};
-    let volume = |path: &Path| match path.components().next()? {
-        Component::Prefix(prefix) => match prefix.kind() {
-            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-                Some(format!("{}:", char::from(letter).to_ascii_uppercase()))
-            }
-            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => Some(
-                format!(
+/// The drive or root `path` is on, told by its text alone, to name in a
+/// sentence: on Windows its drive ("E:") or its network share
+/// ("\\server\share"); elsewhere the first folder under the root ("/srv"),
+/// or "/" for the root itself. A mount point is not looked up. None for a
+/// relative path. Reads nothing.
+pub fn volume_root(path: &Path) -> Option<String> {
+    use std::path::Component;
+    let mut parts = path.components();
+    match parts.next()? {
+        #[cfg(windows)]
+        Component::Prefix(prefix) => {
+            use std::path::Prefix;
+            match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                    Some(format!("{}:", char::from(letter).to_ascii_uppercase()))
+                }
+                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => Some(format!(
                     "\\\\{}\\{}",
                     server.to_string_lossy(),
                     share.to_string_lossy()
-                )
-                .to_lowercase(),
-            ),
-            _ => None,
+                )),
+                _ => None,
+            }
+        }
+        Component::RootDir if !cfg!(windows) => match parts.next() {
+            Some(Component::Normal(first)) => Some(format!("/{}", first.to_string_lossy())),
+            _ => Some("/".to_owned()),
         },
         _ => None,
-    };
+    }
+}
+
+#[cfg(windows)]
+fn same_device(a: &Path, b: &Path) -> Option<bool> {
+    let volume = |path: &Path| volume_root(path).map(|root| root.to_lowercase());
     Some(volume(a)? == volume(b)?)
 }
 
@@ -3686,6 +3701,38 @@ refs/remotes/fork/dev\tiii\t\t
                 Some(true)
             );
         }
+    }
+
+    #[test]
+    fn a_path_names_its_drive_or_root_by_its_text() {
+        if cfg!(windows) {
+            assert_eq!(
+                volume_root(Path::new(r"E:\work\api")),
+                Some("E:".to_owned())
+            );
+            assert_eq!(volume_root(Path::new(r"e:\work")), Some("E:".to_owned()));
+            assert_eq!(
+                volume_root(Path::new(r"\\?\D:\code")),
+                Some("D:".to_owned())
+            );
+            assert_eq!(
+                volume_root(Path::new(r"\\server\share\code\api")),
+                Some(r"\\server\share".to_owned())
+            );
+            assert_eq!(
+                volume_root(Path::new(r"\\?\UNC\server\share\code")),
+                Some(r"\\server\share".to_owned())
+            );
+            assert_eq!(volume_root(Path::new(r"code\api")), None);
+        } else {
+            assert_eq!(
+                volume_root(Path::new("/srv/code/api")),
+                Some("/srv".to_owned())
+            );
+            assert_eq!(volume_root(Path::new("/")), Some("/".to_owned()));
+            assert_eq!(volume_root(Path::new("code/api")), None);
+        }
+        assert_eq!(volume_root(Path::new("")), None);
     }
 
     #[test]

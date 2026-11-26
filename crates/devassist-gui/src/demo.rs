@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use devassist_core::config::Settings;
 use devassist_core::repos::github::{PullCounts, RemoteRepo};
 use devassist_core::repos::gitops::{LocalRepo, PendingPulls};
-use devassist_core::repos::state::{Action, Repos};
+use devassist_core::repos::state::{Action, MigrateItem, Repos};
 use devassist_core::task::job::{Job, JobEvent};
 
 /// The folder, under the system's temporary folder, of the demo's settings path, which is never written.
@@ -159,7 +159,7 @@ pub fn repos() -> Repos {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 7] = [
+pub const SHOWS: [(&str, Opener); 8] = [
     ("progress", show_progress),
     ("remove", show_remove),
     ("group", show_group),
@@ -167,6 +167,7 @@ pub const SHOWS: [(&str, Opener); 7] = [
     ("add", show_add),
     (ADD_FOLDER, show_add),
     ("import", show_import),
+    ("move", show_move),
 ];
 
 /// The name `--show` opens the Add dialog by with the keyboard in its folder field, so a picture shows the folders
@@ -320,6 +321,18 @@ fn show_import(repos: &mut Repos) {
     repos.run(Action::Import);
 }
 
+/// The made-up folder the demo's Move dialog moves into: the drawing's `E:\work`, on another drive than the demo's
+/// checkouts, so the note on another drive shows (`/mnt/work` on other systems).
+pub const MOVE_DIR: &str = if cfg!(windows) { r"E:\work" } else { "/mnt/work" };
+
+/// The drawing's Move dialog: the ticked api and web, opened as the Migrate menu's move line opens it, its folder
+/// [`MOVE_DIR`]. The held core tells where each goes and that the drive is another from the text alone: nothing reads
+/// the disk.
+fn show_move(repos: &mut Repos) {
+    repos.run_migrate(MigrateItem::Folder);
+    repos.set_path_input(MOVE_DIR);
+}
+
 #[cfg(test)]
 mod tests {
     use devassist_core::repos::state::Mode;
@@ -351,7 +364,10 @@ mod tests {
             repos.drain();
         }
         assert!(repos.mode == Mode::Progress && !repos.waiting());
-        assert_eq!(show(&mut repos, "nothing").unwrap_err(), "--show knows progress, remove, group, menu, add, add-folder, import, not nothing");
+        assert_eq!(
+            show(&mut repos, "nothing").unwrap_err(),
+            "--show knows progress, remove, group, menu, add, add-folder, import, move, not nothing"
+        );
     }
 
     #[test]
@@ -379,6 +395,21 @@ mod tests {
         assert_eq!(repos.add_selected.as_deref(), Some("acme/artcraft"));
         assert!(!repos.waiting() && repos.work_held());
         assert_eq!(repos.add_status().text, "8 repositories · 2 cloned · type owner/ or paste a link to list any account");
+    }
+
+    #[test]
+    fn the_demo_opens_move_for_api_and_web_onto_another_drive() {
+        let mut repos = repos();
+        show(&mut repos, "move").unwrap();
+        assert!(repos.mode == Mode::Path);
+        let lines = repos.move_lines();
+        assert_eq!(lines.iter().map(|line| line.name.as_str()).collect::<Vec<_>>(), ["api", "web"]);
+        assert!(lines.iter().all(|line| line.to.as_ref().is_some_and(|to| to.starts_with(MOVE_DIR)) && !line.there && !line.taken));
+        if cfg!(windows) {
+            // The drawing's note: E: is another drive than the demo's D:, told without the disk.
+            assert_eq!(repos.move_crosses_volumes(), Some(true));
+        }
+        assert!(repos.work_held());
     }
 
     #[test]
@@ -631,7 +662,7 @@ mod tests {
     /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
     fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 4]) {
         // Forget takes api and web off the list (in memory only); Delete from disk is refused.
-        let dialogs: [Dialog; 11] = [
+        let dialogs: [Dialog; 14] = [
             ("add", show_add, &[("Cancel", Expect::Free), ("Clone 2 repositories", Expect::Held)]),
             (
                 "add on one",
@@ -661,6 +692,25 @@ mod tests {
                     repos.set_path_input(&std::env::temp_dir().display().to_string());
                 },
                 &[("Import", Expect::Held)],
+            ),
+            // The made-up folder on another drive is looked at once (the core's check of the folder), then the held
+            // core refuses the move.
+            ("move", show_move, &[("Cancel", Expect::Free), ("Move 2 repositories", Expect::Held)]),
+            (
+                "move where they are",
+                |repos| {
+                    show_move(repos);
+                    repos.set_path_input(CLONE_DIR);
+                },
+                &[("Move", Expect::Free)],
+            ),
+            (
+                "move into a folder that is no full path",
+                |repos| {
+                    show_move(repos);
+                    repos.set_path_input("work");
+                },
+                &[("Cancel", Expect::Free), ("Move", Expect::Free)],
             ),
             ("group", show_group, &[("Cancel", Expect::Free), ("Move", Expect::Free)]),
             (
@@ -706,7 +756,7 @@ mod tests {
             }
         }
         // A click on each dialog's scrim.
-        for open in [show_remove, show_group, show_progress, show_add, show_import] {
+        for open in [show_remove, show_group, show_progress, show_add, show_import, show_move] {
             fresh(window, open);
             window.click(pos(30.0, 450.0));
             still_held(window, "a click on the scrim", Expect::Free, before);

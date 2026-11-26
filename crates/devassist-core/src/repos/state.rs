@@ -2316,6 +2316,10 @@ impl Repos {
     /// move itself works that out (`move_checkouts`, `gitops::move_checkout`).
     /// Empty while no move question is open. It looks at the disk on every
     /// call: ask again only when the text changed.
+    ///
+    /// While work is held (`hold_work`) it reads nothing: where each goes is
+    /// told by the text alone, and only what the disk would tell is left
+    /// out (a file at the typed folder, something at a checkout's target).
     pub fn move_lines(&self) -> Vec<MoveLine> {
         let Some(prompt) = &self.prompt else {
             return Vec::new();
@@ -2323,7 +2327,12 @@ impl Repos {
         let Purpose::Move(repos) = &prompt.purpose else {
             return Vec::new();
         };
-        let dir = prompt.folder().ok();
+        let held = self.work_held;
+        let dir = if held {
+            pathprompt::resolve_text(&prompt.input).ok()
+        } else {
+            prompt.folder().ok()
+        };
         let mut lines: Vec<MoveLine> = Vec::with_capacity(repos.len());
         for (name, from) in repos {
             let to = dir.as_deref().and_then(|dir| move_target(dir, from));
@@ -2340,7 +2349,7 @@ impl Repos {
                                 .as_deref()
                                 .is_some_and(|other| paths::same_path(other, to))
                     });
-                    to.exists() || earlier || to.starts_with(from)
+                    (!held && to.exists()) || earlier || to.starts_with(from)
                 });
             lines.push(MoveLine {
                 name: name.clone(),
@@ -2358,18 +2367,24 @@ impl Repos {
     /// folder. True when one is known to; None while no move question is
     /// open, its folder is not usable, or a checkout's volume cannot be
     /// told. Checkouts that do not move (`there` or `taken`) do not count.
+    /// While work is held it reads nothing: the drives or roots the paths
+    /// name are compared (`gitops::volume_root`).
     pub fn move_crosses_volumes(&self) -> Option<bool> {
         let lines = self.move_lines();
         if lines.is_empty() {
             return None;
         }
+        let same = |from: &Path, to: &Path| {
+            if self.work_held {
+                let root = |path: &Path| gitops::volume_root(path).map(|root| root.to_lowercase());
+                Some(root(from)? == root(to)?)
+            } else {
+                gitops::same_volume(from, to)
+            }
+        };
         let mut known = true;
         for line in lines.iter().filter(|line| !line.there && !line.taken) {
-            match line
-                .to
-                .as_deref()
-                .and_then(|to| gitops::same_volume(&line.from, to))
-            {
+            match line.to.as_deref().and_then(|to| same(&line.from, to)) {
                 Some(false) => return Some(true),
                 Some(true) => {}
                 None => known = false,
@@ -6543,6 +6558,68 @@ mod tests {
                 line("api-copy", &copy, Some(there.join("api")), false, true),
             ]
         );
+    }
+
+    #[test]
+    fn a_held_move_question_says_where_each_goes_from_the_text_alone() {
+        let temp = Temp::new("move-held");
+        let root = temp.0.clone();
+        // Something sits where api would go: a live question calls it taken,
+        // a held one does not look.
+        std::fs::create_dir_all(root.join("there").join("api")).unwrap();
+        let (here, elsewhere) = if cfg!(windows) {
+            (PathBuf::from(r"D:\code\work"), PathBuf::from(r"E:\work"))
+        } else {
+            (PathBuf::from("/srv/code/work"), PathBuf::from("/mnt/work"))
+        };
+        let mut app = Repos::empty(test_settings());
+        app.hold_work();
+        for name in ["api", "web", "docs"] {
+            let mut repo = installed("acme", name);
+            repo.folder = name.into();
+            repo.path = here.join(name);
+            app.checkouts.push(repo.path.clone());
+            app.installed.push(repo);
+        }
+        app.marked = vec!["api".into(), "web".into()];
+        app.run_migrate(MigrateItem::Folder);
+        assert!(app.mode == Mode::Path);
+        let to = |dir: &Path, name: &str| Some(dir.join(name));
+        // It starts where they are: both are there already, by their text.
+        let lines = app.move_lines();
+        assert_eq!(
+            lines.iter().map(|line| line.there).collect::<Vec<_>>(),
+            [true, true]
+        );
+        assert_eq!(app.move_crosses_volumes(), Some(false), "nothing moves");
+        // Another drive, told by the text.
+        app.set_path_input(&elsewhere.display().to_string());
+        let lines = app.move_lines();
+        assert_eq!(
+            lines.iter().map(|line| line.to.clone()).collect::<Vec<_>>(),
+            [to(&elsewhere, "api"), to(&elsewhere, "web")]
+        );
+        assert!(lines.iter().all(|line| !line.there && !line.taken));
+        assert_eq!(app.move_crosses_volumes(), Some(true));
+        // What is on the disk is not looked at.
+        let there = root.join("there");
+        app.set_path_input(&there.display().to_string());
+        let lines = app.move_lines();
+        assert_eq!(lines[0].to, to(&there, "api"));
+        assert!(!lines[0].taken, "a held question looked at the disk");
+        assert_eq!(
+            app.move_crosses_volumes(),
+            Some(true),
+            "{} is on another drive",
+            there.display()
+        );
+        // Still refused by the text: into the checkout itself.
+        app.set_path_input(&here.join("api").display().to_string());
+        assert!(app.move_lines()[0].taken);
+        // A text that is no folder: nowhere to go yet.
+        app.set_path_input("dev");
+        assert!(app.move_lines().iter().all(|line| line.to.is_none()));
+        assert_eq!(app.move_crosses_volumes(), None);
     }
 
     #[test]

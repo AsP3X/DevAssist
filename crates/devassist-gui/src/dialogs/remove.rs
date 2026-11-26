@@ -53,14 +53,21 @@ fn button_id(index: usize) -> Id {
 }
 
 /// The remove dialog's title for the repositories `names`: it names up to three ("Remove api and web?"), then
-/// counts them ("Remove 5 repositories?").
+/// counts them ("Remove 5 repositories?"), as [`named`] does.
 #[must_use]
 pub fn remove_title(names: &[String]) -> String {
+    format!("Remove {}?", named(names))
+}
+
+/// The repositories `names` in a title: up to three by name ("api", "api and web", "api, web and portal"), more
+/// counted ("5 repositories"). The remove dialog's rule, which the Move dialog's title follows too.
+#[must_use]
+pub fn named(names: &[String]) -> String {
     match names {
-        [one] => format!("Remove {one}?"),
-        [first, second] => format!("Remove {first} and {second}?"),
-        [first, second, third] => format!("Remove {first}, {second} and {third}?"),
-        many => format!("Remove {} repositories?", many.len()),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, third] => format!("{first}, {second} and {third}"),
+        many => format!("{} repositories", many.len()),
     }
 }
 

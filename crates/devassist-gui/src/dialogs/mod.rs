@@ -21,8 +21,8 @@
 //!
 //! The dialogs: [`progress`], the run the core keeps; [`remove`], which deletes or forgets the chosen
 //! repositories; [`group`], which moves them into a group or renames one; [`add`], which finds repositories on
-//! GitHub and clones the ticked ones into a folder; [`folder`], which asks for a folder whose clones are imported
-//! (the group, Add and folder dialogs open with the focus in their first field). A dialog with a main button opens with
+//! GitHub and clones the ticked ones into a folder; [`folder`], which asks for a folder whose clones are imported, or
+//! into which the chosen checkouts move (the group, Add and folder dialogs open with the focus in their first field). A dialog with a main button opens with
 //! the focus on it, the group dialog with the focus in its name field, the remove dialog (which has no main
 //! button) with no focus at all.
 //!
@@ -69,7 +69,8 @@ pub enum Which {
     Menu,
     /// The repositories found on GitHub, to tick and clone into a folder (`Mode::Add`).
     Add,
-    /// The folder whose clones are imported (`Mode::Path` for `Purpose::Import`).
+    /// The folder whose clones are imported, or into which checkouts move (`Mode::Path` for `Purpose::Import` and
+    /// `Purpose::Move`).
     Folder,
 }
 
@@ -101,15 +102,15 @@ pub struct Dialogs {
     shown: Option<usize>,
     /// The wheel turned over the output that does not come to a whole line yet, in points.
     wheel: f32,
-    /// How far the remove dialog's paths or the group dialog's groups are moved up, in points.
+    /// How far the remove dialog's paths, the group dialog's groups or the Move dialog's rows are moved up, in points.
     list_scroll: f32,
     /// The group the group dialog's list showed picked last, so the list follows Up and Down.
     list_shown: Option<usize>,
     /// What the Add dialog keeps of its own: the folder field's text, its suggestions, the reason a folder was
     /// refused, the row its list showed highlighted last. Made when Add opens.
     add: Option<add::State>,
-    /// What the folder dialog keeps of its own: the field's text as it last stood, and the folders that match it.
-    /// Made when it opens.
+    /// What the folder dialog keeps of its own: the field's text as it last stood, the folders that match it, and a
+    /// move's rows. Made when it opens.
     folder: Option<folder::State>,
 }
 

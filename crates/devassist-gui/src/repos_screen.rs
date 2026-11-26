@@ -1845,8 +1845,6 @@ mod tests {
         let mut session = Session::Live(Box::new(busy));
         let mut screen = Screen::default();
         frame(&ctx, &mut session, &mut screen, Vec::new());
-        let (_, planned) = planned(&context(), &session, vec2(WINDOW[0], WINDOW[1]), true);
-        let _ = planned;
         for (at, time) in [(top_item(&session, TOP_UPDATE_ALL).center(), 1.0), (bar_item(&session, BAR_UPDATE).center(), 5.0)] {
             let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
             let frames = [

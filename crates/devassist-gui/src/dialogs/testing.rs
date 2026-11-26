@@ -194,7 +194,7 @@ impl Window {
             Parts::Group(places) => (places.buttons, group::said(self.repos())),
             // The main button's words are made each frame; a test's copy of them lives as long as the test.
             Parts::Add(places) => (places.buttons, add::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
-            Parts::Folder(places) => (places.buttons, folder::said(self.repos())),
+            Parts::Folder(places) => (places.buttons, folder::said(self.repos()).into_iter().map(|words| &*words.leak()).collect()),
         };
         let widths: Vec<f32> = words.iter().map(|words| Window::button_width(words)).collect();
         overlay::buttons(room, &widths).into_iter().zip(words).collect()
