@@ -438,6 +438,12 @@ pub const PUSH_ADDRESS_GAP: f32 = 8.0;
 /// The room above and below a fact's words in the Push dialog's "What happens": a fact of one line is a list row
 /// tall (`Fact`'s `height: 36`), one that wraps grows by its lines.
 pub const PUSH_FACT_PAD: f32 = 8.0;
+/// The width of the cue in the Push dialog's facts while some of them are out of view: a bar in the box's right
+/// room, in the quiet colour, as long as the share of the facts in view and placed as far down as the box is
+/// scrolled. Not the design's: its window always showed every fact.
+pub const PUSH_SCROLL_CUE: f32 = 4.0;
+/// The least length of that cue, so it stays a bar however many facts there are.
+pub const PUSH_SCROLL_CUE_LEAST: f32 = 24.0;
 /// The size of the spinner on the Add dialog's status line while the core looks something up (the plan's own: a
 /// small icon's, `ICON_SMALL`'s width less the arc's stroke).
 pub const SPINNER: f32 = 12.0;

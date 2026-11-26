@@ -41,8 +41,8 @@ use crate::session::Session;
 use crate::shell::{Page, Shown as ShellShown};
 use crate::theme::{
     self, ADD_ROW, BUTTON_OFF_OPACITY, CHECK_MARK, FOCUS_RING, GROUP_FILL_OPACITY, GROUP_ROW_GAP, HEAD_FILL_OPACITY, HEAD_HEIGHT, HOVER_OPACITY,
-    MIN_WINDOW, Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING, RULE_LABEL_GAP,
-    RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
+    MIN_WINDOW, Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, PUSH_SCROLL_CUE, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING,
+    RULE_LABEL_GAP, RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
 };
 use crate::{demo, frost, overlay, shell, table, widgets};
 
@@ -806,11 +806,12 @@ const SHOTS: [Shot; 36] = [
     },
     Shot {
         name: "import refused long",
-        over: Over::Entered,
+        over: Over::Dialog,
         set_up: |repos| {
             demo::show(repos, "import").unwrap();
-            // A file with a long path: the reason spans the dialog's width, and wraps.
-            repos.set_path_input(&std::env::current_exe().unwrap().display().to_string());
+            // A file with a long path: the reason spans the dialog's width, and wraps. The held demo checks a folder by
+            // its text alone, so the refusal a live core gives on Enter is set as it would stand.
+            set_up_file_refused(repos);
         },
     },
     Shot { name: "add repository hovered", over: Over::MainHovered, set_up: |_| {} },
@@ -845,11 +846,11 @@ const SHOTS: [Shot; 36] = [
     },
     Shot {
         name: "move refused",
-        over: Over::Entered,
+        over: Over::Dialog,
         set_up: |repos| {
             demo::show(repos, "move").unwrap();
-            // A file: the held core tells the rows by the text, then refuses the folder when Enter moves.
-            repos.set_path_input(&std::env::current_exe().unwrap().display().to_string());
+            // A file: the held core tells the rows by the text; the refusal a live core gives on Enter is set.
+            set_up_file_refused(repos);
         },
     },
     Shot { name: "push", over: Over::Dialog, set_up: |repos| demo::show(repos, "push").unwrap() },
@@ -877,6 +878,16 @@ const SHOTS: [Shot; 36] = [
     Shot { name: "import folder rows lit", over: Over::Rows(RowsShot::Lit), set_up: set_up_import_rows },
     Shot { name: "import folder rows hovered", over: Over::Rows(RowsShot::Hovered), set_up: set_up_import_rows },
 ];
+
+/// The open folder question with this test's program typed, a file with a long path, and the core's refusal of it as
+/// a live core gives it when Enter is pressed (`prompt::resolve`'s own words, asked of the disk here, by the test, not
+/// by the held demo, which checks the text alone).
+fn set_up_file_refused(repos: &mut Repos) {
+    let file = std::env::current_exe().unwrap().display().to_string();
+    repos.set_path_input(&file);
+    let refused = devassist_core::prompt::resolve(&file).unwrap_err();
+    repos.prompt.as_mut().unwrap().error = Some(refused);
+}
 
 /// The demo's Import dialog with its field in the demo's made-up folder, so it suggests the demo's four folders.
 fn set_up_import_rows(repos: &mut Repos) {
@@ -1027,8 +1038,24 @@ type Inside = Box<dyn Fn(Pos2) -> bool>;
 /// A graphic of the overlay that is measured, as the progress dialog and a dialog's button paint it: the progress
 /// bar's fill against its track (it says how far a task is: held to 3.0), the track against the inset (reported, not
 /// held: the fill carries how far, the track only shows where the bar would end), and the focus ring against the
-/// dialog's glass (3.0). Gives its name, the contrast it needs, its colour, its rectangle and which pixels count.
+/// dialog's glass (3.0), and the cue that says the Push dialog's facts go on out of view against their field (3.0).
+/// Gives its name, the contrast it needs, its colour, its rectangle and which pixels count.
 fn graphic(shape: &RectShape, palette: Palette) -> Option<(&'static str, f64, Color32, Rect, Inside)> {
+    if shape.fill == palette.quiet && (shape.rect.width() - PUSH_SCROLL_CUE).abs() < 1e-3 {
+        // The bar's straight part, a pixel in from its long edges: its edges and round ends are antialiased thin.
+        let rect = shape.rect;
+        let inner = Rect::from_min_max(
+            pos2(rect.left() + 1.0, rect.top() + PUSH_SCROLL_CUE / 2.0),
+            pos2(rect.right() - 1.0, rect.bottom() - PUSH_SCROLL_CUE / 2.0),
+        );
+        return Some((
+            "graphic: the Push facts' scroll cue on the field",
+            LEAST_GRAPHIC,
+            shape.fill,
+            rect,
+            Box::new(move |at: Pos2| inner.contains(at)),
+        ));
+    }
     let bar = (shape.rect.height() - PROGRESS_HEIGHT).abs() < 1e-3;
     if bar && shape.fill == palette.progress {
         return Some(("graphic: progress bar's fill on its track", LEAST_GRAPHIC, shape.fill, shape.rect, Box::new(|_| true)));

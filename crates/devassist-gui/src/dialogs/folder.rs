@@ -32,13 +32,14 @@ use devassist_core::repos::state::{Action, MoveLine, Purpose, Repos};
 use egui::text::LayoutJob;
 use egui::{Align2, Color32, FontFamily, FontId, Galley, Id, Key, Painter, Rect, Sense, Stroke, Ui, pos2, vec2};
 
-use super::{Dialogs, Header, Parts, Plan, folder_suggestions, inset, list_height, main_id, most_scroll, remove, rows as count_rows, take_press};
+use super::{
+    Dialogs, Header, Parts, Plan, folder_suggestions, inset, list_height, main_id, most_scroll, remove, rows as count_rows, take_press, under_galley,
+};
 use crate::assets::{self, Icon};
 use crate::overlay::{self, Kind};
 use crate::theme::{
     ADD_FOLDER_GAP, BUTTON_HEIGHT, DIALOG_FIELD_HEIGHT, DIALOG_GAP, DIALOG_MARGIN, DIALOG_PAD, FOLDER_DIALOG_WIDTH, HAIRLINE, HEADER_LINE_HEIGHT,
     ICON, LINE_OPACITY, LIST_GAP, LIST_PAD, LIST_ROW, MOVE_LEAST_ROWS, MOVE_NOTE_LINE_HEIGHT, MOVE_NOTE_WIDTH, MOVE_ROWS, Palette, TEXT, TEXT_SMALL,
-    UNDER_LINES,
 };
 use crate::widgets::{self, font};
 
@@ -170,18 +171,6 @@ fn under_words(error: Option<&str>, reason: Option<&str>, moving: bool) -> Optio
         (None, true) => Some((reason.unwrap_or(MOVE_HINT).to_owned(), Tone::Quiet)),
         (None, false) => None,
     }
-}
-
-/// The line under the field, `text`, laid out with `painter`'s faces in `width`: 12-point text at the header's line
-/// height, wrapped to [`UNDER_LINES`] lines at most (a reason is never cut short of that). The Push dialog's line under
-/// its field is laid out the same way.
-pub(super) fn under_galley(painter: &Painter, text: &str, width: f32) -> Arc<Galley> {
-    let mut job = LayoutJob::simple(text.to_owned(), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, width);
-    job.wrap.max_rows = UNDER_LINES;
-    for section in &mut job.sections {
-        section.format.line_height = Some(line_height(TEXT_SMALL));
-    }
-    painter.layout_job(job)
 }
 
 /// The id of the folder field, which has the focus when the dialog opens.

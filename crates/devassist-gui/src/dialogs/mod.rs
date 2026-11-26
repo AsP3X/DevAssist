@@ -56,7 +56,9 @@ use crate::baker::{Drawn, Want};
 use crate::menu;
 use crate::overlay;
 use crate::shell::Page;
-use crate::theme::{self, DIALOG_TITLE, HEADER_GAP, HEADER_LINE_HEIGHT, HEADER_LINES, INSET_RADIUS, LIST_PAD, LIST_ROW, Mode, Palette, TEXT};
+use crate::theme::{
+    self, DIALOG_TITLE, HEADER_GAP, HEADER_LINE_HEIGHT, HEADER_LINES, INSET_RADIUS, LIST_PAD, LIST_ROW, Mode, Palette, TEXT, TEXT_SMALL, UNDER_LINES,
+};
 use crate::widgets::font;
 
 /// A dialog the core's mode asks for.
@@ -264,6 +266,18 @@ fn list_height(count: usize) -> f32 {
 /// How far a dialog's list of `count` rows can be moved up in a box `height` points tall.
 fn most_scroll(count: usize, height: f32) -> f32 {
     (list_height(count) - height).max(0.0)
+}
+
+/// The line under a dialog's field, `text`, laid out with `painter`'s faces in `width`: 12-point text at the header's
+/// line height, wrapped to [`UNDER_LINES`] lines at most (a reason is never cut short of that). The folder dialog's
+/// and the Push dialog's lines under their fields are laid out this way.
+fn under_galley(painter: &Painter, text: &str, width: f32) -> Arc<Galley> {
+    let mut job = LayoutJob::simple(text.to_owned(), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, width);
+    job.wrap.max_rows = UNDER_LINES;
+    for section in &mut job.sections {
+        section.format.line_height = Some(TEXT_SMALL * HEADER_LINE_HEIGHT);
+    }
+    painter.layout_job(job)
 }
 
 /// Where a dialog's or the menu's parts are, decided before the bake: its pane is baked there.
