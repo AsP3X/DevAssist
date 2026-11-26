@@ -1731,7 +1731,7 @@ impl Repos {
         vec![
             fact(
                 true,
-                "Every branch and tag goes over; where origin's branch is newer, or missing here, origin's goes.",
+                "Every branch and tag goes over; a branch goes as origin has it where the one here is behind it or missing, otherwise as it is here.",
             ),
             fact(
                 true,
@@ -1743,16 +1743,16 @@ impl Repos {
             ),
             fact(
                 false,
-                "Apart from those pull-request branches, nothing there is overwritten or deleted.",
+                "Apart from those pull-request branches, nothing there is overwritten or deleted: a branch there only moves forward, so no commit there is lost.",
             ),
             fact(
                 false,
-                "A branch or tag there that went another way stops the push part-way with an error, before the address is kept.",
+                "A branch there that has commits the pushed branch lacks, or a tag there that differs from the pushed one, stops the push part-way with an error, before the address is kept.",
             ),
             Fact {
                 goes: false,
                 words: format!(
-                    "No pull request, issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as {remote}."
+                    "No pull request is opened there, and no issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as {remote}."
                 ),
             },
         ]
@@ -6740,6 +6740,8 @@ mod tests {
         git(&upstream, &["checkout", "-q", "-b", "dev"]);
         commit(&upstream, "dev-work");
         git(&upstream, &["checkout", "-q", "-b", "old"]);
+        git(&upstream, &["checkout", "-q", "-b", "split", "main"]);
+        commit(&upstream, "split-work");
         git(&upstream, &["checkout", "-q", "main"]);
         git(&root, &["clone", "-q", "upstream", "clone"]);
         git(&root, &["init", "-q", "--bare", "target.git"]);
@@ -6750,6 +6752,10 @@ mod tests {
         commit(&clone, "local");
         git(&clone, &["branch", "-q", "old", "origin/old~1"]);
         git(&clone, &["branch", "-q", "mine"]);
+        // split here went another way from origin's.
+        git(&clone, &["checkout", "-q", "-b", "split", "origin/split~1"]);
+        commit(&clone, "split-here");
+        git(&clone, &["checkout", "-q", "main"]);
         git(&upstream, &["checkout", "-q", "-b", "late"]);
         commit(&upstream, "late-work");
         git(&upstream, &["checkout", "-q", "--detach", "main"]);
@@ -6790,7 +6796,7 @@ mod tests {
             [
                 (
                     true,
-                    "Every branch and tag goes over; where origin's branch is newer, or missing here, origin's goes."
+                    "Every branch and tag goes over; a branch goes as origin has it where the one here is behind it or missing, otherwise as it is here."
                 ),
                 (
                     true,
@@ -6802,15 +6808,15 @@ mod tests {
                 ),
                 (
                     false,
-                    "Apart from those pull-request branches, nothing there is overwritten or deleted."
+                    "Apart from those pull-request branches, nothing there is overwritten or deleted: a branch there only moves forward, so no commit there is lost."
                 ),
                 (
                     false,
-                    "A branch or tag there that went another way stops the push part-way with an error, before the address is kept."
+                    "A branch there that has commits the pushed branch lacks, or a tag there that differs from the pushed one, stops the push part-way with an error, before the address is kept."
                 ),
                 (
                     false,
-                    "No pull request, issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as the remote mirror."
+                    "No pull request is opened there, and no issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as the remote mirror."
                 ),
             ]
         );
@@ -6818,15 +6824,24 @@ mod tests {
         app.service_prompt.as_mut().unwrap().input = "nowhere".into();
         assert_eq!(
             app.service_facts().last().unwrap().words,
-            "No pull request, issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as one more remote, named after its host."
+            "No pull request is opened there, and no issue, comment or release goes over. This checkout keeps its files and origin, and keeps the address as one more remote, named after its host."
         );
 
         // The push the dialog's Enter runs.
         let done = gitops::migrate_to(&clone, &address, None, |_, _| {}).unwrap();
-        // 1. Every branch and tag; origin's where it is newer or missing here.
+        // 1. Every branch and tag; origin's where the one here is behind it or
+        // missing, else the one here: ahead (main) or gone another way (split).
         assert_eq!(
             tip(&target, "refs/heads/main"),
             tip(&clone, "refs/heads/main")
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/split"),
+            tip(&clone, "refs/heads/split")
+        );
+        assert_ne!(
+            tip(&clone, "refs/heads/split"),
+            tip(&clone, "refs/remotes/origin/split")
         );
         assert_eq!(
             tip(&target, "refs/heads/mine"),
@@ -6932,6 +6947,29 @@ mod tests {
         let moved = tip(&target, "refs/heads/dev");
         assert!(gitops::migrate_to(&clone, &address, None, |_, _| {}).is_err());
         assert_eq!(tip(&target, "refs/heads/dev"), moved);
+        assert!(!config().contains("[remote \"mirror\"]"), "{}", config());
+
+        // 4, 5. A branch there that is only ahead of the pushed one stops the
+        // push too; it only moves forward, so it keeps its commits.
+        git(
+            &clone,
+            &[
+                "push",
+                "-q",
+                "--force",
+                &address,
+                "refs/remotes/origin/dev:refs/heads/dev",
+            ],
+        );
+        git(&clone, &["checkout", "-q", "-b", "further", "main"]);
+        commit(&clone, "there-only");
+        git(&clone, &["push", "-q", &address, "further:refs/heads/main"]);
+        git(&clone, &["checkout", "-q", "main"]);
+        git(&clone, &["branch", "-q", "-D", "further"]);
+        let ahead = tip(&target, "refs/heads/main");
+        assert_ne!(ahead, tip(&clone, "refs/heads/main"));
+        assert!(gitops::migrate_to(&clone, &address, None, |_, _| {}).is_err());
+        assert_eq!(tip(&target, "refs/heads/main"), ahead);
         assert!(!config().contains("[remote \"mirror\"]"), "{}", config());
     }
 }
