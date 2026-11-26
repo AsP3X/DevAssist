@@ -56,7 +56,7 @@ frosted instead.
 | `--backdrop KEY` | The backdrop: `lake`, `midday`, `golden`, `dusk`, `night` or `forest` |
 | `--no-blur` | Does not blur the backdrop |
 | `--no-sidebar` | Opens with the sidebar hidden |
-| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder, no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. All work is held (see below). |
+| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder (a folder typed into a dialog is checked by its text alone), no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. All work is held (see below). |
 | `--show NAME` | With `--demo` only: opens one menu or dialog at start, so a picture can show it. The names are `progress`, `remove`, `group`, `menu`, `migrate` (the menu with its side menu), `add`, `add-folder` (Add with the folder field's suggestions showing), `import`, `move` and `push` |
 
 At start the window reads `theme`, `backdrop` and `blur` from the settings

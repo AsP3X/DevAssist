@@ -43,6 +43,31 @@ pub fn reached(reach: Reach) -> usize {
     REACHED[reach as usize].load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[cfg(feature = "testing")]
+thread_local! {
+    /// How often the core looked at the disk on this thread (`note_read`).
+    static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Notes that the core is about to look at the disk on the caller's
+/// thread: a folder read, or a path asked whether it is a file, a folder
+/// or there at all. Counted under the `testing` feature only
+/// (`disk_reads_here`); a normal build does nothing here.
+#[inline]
+pub(crate) fn note_read() {
+    #[cfg(feature = "testing")]
+    READS.with(|reads| reads.set(reads.get() + 1));
+}
+
+/// How often the core looked at the disk on this thread so far
+/// (`note_read`): what a window's dialogs ask it on the window's thread.
+/// Other threads' reads, a worker's among them, are not counted here.
+/// Only grows.
+#[cfg(feature = "testing")]
+pub fn disk_reads_here() -> usize {
+    READS.with(std::cell::Cell::get)
+}
+
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;

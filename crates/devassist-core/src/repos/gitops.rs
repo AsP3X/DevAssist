@@ -646,20 +646,24 @@ fn pull_prefix(branches: &[String]) -> &'static str {
 pub fn push_address(input: &str, checkout: &Path) -> Result<String, String> {
     match read_push_address(input, checkout)? {
         PushAddress::Remote(url) => Ok(url),
-        PushAddress::Folder(url, folder) if folder.is_dir() => Ok(url),
-        PushAddress::Folder(..) => Err(NOT_AN_ADDRESS.into()),
+        PushAddress::Folder(url, folder) => {
+            crate::sys::note_read();
+            if folder.is_dir() {
+                Ok(url)
+            } else {
+                Err(NOT_AN_ADDRESS.into())
+            }
+        }
     }
 }
 
-/// The name the remote of an address typed for the checkout at `checkout`
-/// would get (`remote_name_for`), once the text can be an address: told
-/// by the text alone, so a folder named is not looked for. None while
-/// `push_address` would refuse it for its text.
-pub fn push_remote_name(input: &str, checkout: &Path) -> Option<(String, String)> {
-    let url = match read_push_address(input, checkout).ok()? {
-        PushAddress::Remote(url) | PushAddress::Folder(url, _) => url,
-    };
-    Some((remote_name_for(&url), url))
+/// `push_address` by the text alone: the same address and the same
+/// refusals, except that a folder it names is not looked for. Reads
+/// nothing, so it can be asked as the text changes.
+pub fn push_address_text(input: &str, checkout: &Path) -> Result<String, String> {
+    match read_push_address(input, checkout)? {
+        PushAddress::Remote(url) | PushAddress::Folder(url, _) => Ok(url),
+    }
 }
 
 const NOT_AN_ADDRESS: &str = "That is not an address Git can push to. It looks like https://host/you/name.git or git@host:you/name.git.";
@@ -1098,6 +1102,7 @@ pub fn move_checkout(
 /// Unix the devices are compared. It asks the disk, which for a network
 /// share can take seconds.
 pub fn same_volume(a: &Path, b: &Path) -> Option<bool> {
+    crate::sys::note_read();
     let nearest = |path: &Path| {
         std::path::absolute(path)
             .ok()?
@@ -1368,6 +1373,7 @@ pub fn forks_folder(path: &Path) -> Option<PathBuf> {
 
 /// Whether the forks of a checkout have been cloned beside it.
 pub fn forks_cloned(path: &Path) -> bool {
+    crate::sys::note_read();
     forks_folder(path).is_some_and(|dest| dest.join(".git").is_dir())
 }
 

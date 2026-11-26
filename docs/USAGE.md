@@ -833,7 +833,9 @@ run or changed." With `--demo --show NAME` the window opens with one of them
 already open: `progress`, `remove`, `group`, `menu`, `migrate` (the menu with
 its side menu), `add`, `add-folder` (Add with the folder field's suggestions
 showing), `import`, `move` or `push`. The demo reads no folder and runs no
-Git, so its folders are made up and its move changes nothing.
+Git, so its folders are made up and its move changes nothing. A folder or an
+address you type into one of its dialogs is checked by its text alone: the
+demo does not look whether it is there.
 
 ## Docker
 

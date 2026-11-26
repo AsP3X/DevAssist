@@ -161,16 +161,12 @@ pub fn sync(ctx: &Context, repos: Option<&Repos>, dialogs: &mut Dialogs) {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    /// How often this thread's dialogs asked the disk for folders.
-    static DISK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// How often this thread's dialogs asked the disk for folders so far.
+/// How often the core looked at the disk on this thread so far, for this thread's window and its dialogs: a folder
+/// read for suggestions, a typed folder checked (Import's and Move's Confirm, Add's Clone), Push's look at a folder
+/// address, the row menu's look for a forks folder, and the rest the core counts (`devassist_core::sys::note_read`).
 #[cfg(test)]
 pub(crate) fn disk_reads() -> usize {
-    DISK_READS.with(std::cell::Cell::get)
+    devassist_core::sys::disk_reads_here()
 }
 
 /// The folders that match `text`, for a dialog's folder field (Add's and the folder dialog's): on disk
@@ -181,8 +177,6 @@ fn folder_suggestions(repos: &Repos, text: &str) -> Vec<String> {
     if repos.work_held() {
         return crate::demo::folders_matching(text);
     }
-    #[cfg(test)]
-    DISK_READS.with(|reads| reads.set(reads.get() + 1));
     devassist_core::prompt::suggest(text)
 }
 

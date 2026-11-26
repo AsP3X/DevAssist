@@ -53,7 +53,10 @@ impl<P> PathPrompt<P> {
     /// The folder that is typed, checked.
     pub fn folder(&self) -> Result<PathBuf, String> {
         let folder = resolve(&self.input)?;
-        if self.must_exist && !folder.is_dir() {
+        if self.must_exist && {
+            crate::sys::note_read();
+            !folder.is_dir()
+        } {
             return Err(format!("{} is not a folder.", folder.display()));
         }
         Ok(folder)
@@ -108,6 +111,7 @@ pub fn suggest(text: &str) -> Vec<String> {
 /// Turns what was typed into a full path. `~` is the home folder.
 pub fn resolve(input: &str) -> Result<PathBuf, String> {
     let path = resolve_text(input)?;
+    crate::sys::note_read();
     if path.is_file() {
         return Err(format!("{} is a file, not a folder.", path.display()));
     }
@@ -183,6 +187,7 @@ fn split_last(input: &str) -> Option<(&str, &str)> {
 /// None when `head` cannot be read.
 fn folder_names(head: &str, typed: &str) -> Option<Vec<String>> {
     let wanted = typed.to_lowercase();
+    crate::sys::note_read();
     // Each name is lowered once: what does not fit is dropped before the
     // sort, and the sort does not lower again.
     let mut names: Vec<(String, String)> = std::fs::read_dir(expand_home(head))

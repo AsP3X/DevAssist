@@ -1590,11 +1590,13 @@ impl Repos {
             self.notice("Select a repository first.", true);
             return;
         }
-        let forks_cloned = self
-            .installed
-            .iter()
-            .filter(|repo| repos.contains(&repo.folder))
-            .all(|repo| gitops::forks_cloned(&repo.path));
+        // Held (a demo), no folder is looked for: the forks are not cloned.
+        let forks_cloned = !self.work_held
+            && self
+                .installed
+                .iter()
+                .filter(|repo| repos.contains(&repo.folder))
+                .all(|repo| gitops::forks_cloned(&repo.path));
         self.menu = Some(Menu {
             repos,
             selected: 0,
@@ -1714,7 +1716,13 @@ impl Repos {
         let Some(prompt) = self.service_prompt.as_mut() else {
             return;
         };
-        let url = match gitops::push_address(&prompt.input, &prompt.path) {
+        // Held, the text alone is checked: no folder it names is looked for.
+        let checked = if self.work_held {
+            gitops::push_address_text(&prompt.input, &prompt.path)
+        } else {
+            gitops::push_address(&prompt.input, &prompt.path)
+        };
+        let url = match checked {
             Ok(url) => url,
             Err(err) => {
                 prompt.error = Some(err);
@@ -1737,12 +1745,15 @@ impl Repos {
     /// it leaves as it is or does not do, as `gitops::migrate_to` works.
     /// The fourth names the remote the address is kept as once the service
     /// dialog has an address a push can use, and says when a remote of
-    /// that name this checkout has already is pointed at it.
+    /// that name this checkout has already is pointed at it. Told by the
+    /// text alone (`gitops::push_address_text`): it reads nothing, so it
+    /// can be asked on every keystroke. Whether a folder named is there is
+    /// looked at by Push (`accept_service`) and by the push itself.
     pub fn service_facts(&self) -> Vec<Fact> {
         let url = self
             .service_prompt
             .as_ref()
-            .and_then(|prompt| gitops::push_address(&prompt.input, &prompt.path).ok());
+            .and_then(|prompt| gitops::push_address_text(&prompt.input, &prompt.path).ok());
         let kept = url.as_ref().map_or_else(
             || "This checkout keeps its files and origin, and keeps the address as one more remote, named after its host.".to_string(),
             |url| {
@@ -2301,12 +2312,20 @@ impl Repos {
         self.mode = Mode::Path;
     }
 
-    /// The Clone or Import button of the folder dialog.
+    /// The Clone or Import button of the folder dialog. Held, only the
+    /// text is checked: no folder is looked at, and the held notice says
+    /// that nothing was done.
     fn accept_path(&mut self) {
+        let held = self.work_held;
         let Some(prompt) = self.prompt.as_mut() else {
             return;
         };
-        match prompt.folder() {
+        let checked = if held {
+            pathprompt::resolve_text(&prompt.input)
+        } else {
+            prompt.folder()
+        };
+        match checked {
             Ok(folder) => self.use_folder(folder),
             Err(err) => {
                 prompt.matches.clear();
@@ -3819,7 +3838,8 @@ impl Repos {
     /// `Ok` too when nothing is listed and a plain word is typed: that
     /// account is listed, as Enter in Add does, and the mode stays Add.
     /// Held, it is `Ok` with the mode the list, `HELD` on the status line,
-    /// the ticks and `clone_dir` kept, and nothing made or started.
+    /// the ticks and `clone_dir` kept, and nothing made or started; the
+    /// folder is then checked by its text alone, not looked at.
     /// `Err` holds Add's words or the question's; nothing changed and the
     /// mode is still Add. Outside Add it is `Err("Add is not open.")` and
     /// changes nothing, whatever else is open.
@@ -3836,7 +3856,12 @@ impl Repos {
         };
         let mut prompt = Purpose::Clone(remotes).prompt(&self.clone_dir);
         prompt.set_input(folder);
-        let folder = prompt.folder()?;
+        // Held, the text alone: no folder is looked at.
+        let folder = if self.work_held {
+            pathprompt::resolve_text(&prompt.input)?
+        } else {
+            prompt.folder()?
+        };
         self.answer_path(prompt.purpose, folder);
         Ok(())
     }
@@ -6744,6 +6769,67 @@ mod tests {
         assert!(app.checkouts.contains(&there.join("api")));
         assert!(!app.checkouts.contains(&old));
         assert!(there.join("api").join("readme").is_file());
+    }
+
+    /// The dialogs' checks of a held session look at no folder; live, the
+    /// same checks do, and are counted.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_held_session_checks_its_dialogs_by_the_text_alone() {
+        let reads = crate::sys::disk_reads_here;
+        // A full path that is nowhere: live, nothing is pushed to it.
+        let folder = std::env::temp_dir()
+            .join(format!("devassist-nowhere-{}", std::process::id()))
+            .display()
+            .to_string();
+        let walk = |app: &mut Repos| {
+            app.selected = Some("api".into());
+            app.enter_row();
+            assert!(app.menu.is_some());
+            app.close_menu();
+            app.run_migrate(MigrateItem::Service);
+            app.set_service_input(&folder);
+            let facts = app.service_facts();
+            assert!(facts[3].words.contains("the remote mirror"), "{}", facts[3].words);
+            app.accept_service();
+            app.close_service();
+            app.open_import();
+            app.set_path_input(&folder);
+            app.run(Action::Confirm);
+            app.close_path();
+            app.run_migrate(MigrateItem::Folder);
+            app.set_path_input(&folder);
+            app.run(Action::Confirm);
+            app.close_path();
+            app.remotes_state = RemoteState::Ready;
+            app.remotes = vec![remote("storytold", "tool")];
+            app.open_add();
+            app.add_selected = Some("storytold/tool".into());
+            let _ = app.clone_marked_into(&folder);
+        };
+        let mut held = grouped_app();
+        held.hold_work();
+        let before = reads();
+        walk(&mut held);
+        assert_eq!(reads(), before, "the held session looked at the disk");
+        assert_eq!(held.status, HELD);
+        assert!(held.queue.is_empty() && !held.busy);
+
+        // Live, the facts still read nothing; the other checks look.
+        let mut live = grouped_app();
+        testing::hold_github(&mut live);
+        live.run_migrate(MigrateItem::Service);
+        live.set_service_input(&folder);
+        let before = reads();
+        let _ = live.service_facts();
+        assert_eq!(reads(), before, "the facts looked at the disk");
+        live.accept_service();
+        assert!(reads() > before, "Push did not look");
+        live.close_service();
+        let before = reads();
+        live.selected = Some("api".into());
+        live.enter_row();
+        assert!(reads() > before, "the menu did not look for the forks");
     }
 
     #[test]

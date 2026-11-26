@@ -521,12 +521,10 @@ mod tests {
     }
 
     /// How often the process has reached out so far: programs, the clipboard, the network, folders deleted; and how
-    /// often this thread's dialogs asked the disk for the folders a folder field suggests (`prompt::suggest`, through
-    /// `dialogs::folder_suggestions`), which a held session never does: it suggests the demo's own folders. Not
-    /// counted, and the reads that remain in a held session: the checks of a typed folder when Import's or Move's
-    /// Confirm or Add's Clone is pressed (`prompt::resolve`'s `is_file`, and `is_dir` for Import and Move), and the
-    /// Push dialog's `is_dir` of an address that is a plain full path (`gitops::push_address`, asked for its facts as
-    /// the text changes, and on Push).
+    /// often the core looked at the disk on this thread (`dialogs::disk_reads`): every read it makes for a dialog,
+    /// the folders a folder field suggests, the checks of a typed folder when Import's or Move's Confirm or Add's
+    /// Clone is pressed, Push's look at a folder address, the row menu's look for a forks folder. A held session
+    /// makes none of them: it suggests the demo's own folders and checks what is typed by its text alone.
     fn reached_now() -> [usize; 5] {
         use devassist_core::sys::{Reach, reached};
         let [program, clipboard, network, disk] = [Reach::Program, Reach::Clipboard, Reach::Network, Reach::Disk].map(reached);
