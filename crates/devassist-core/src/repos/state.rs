@@ -2929,6 +2929,9 @@ impl Repos {
     }
 
     fn retry_add(&mut self) {
+        if self.held() {
+            return;
+        }
         match self.add_query() {
             Some(query) if !self.in_catalog(&query.owner) => {
                 let key = query.owner.to_ascii_lowercase();
@@ -5995,7 +5998,11 @@ mod tests {
         app.open_add();
         app.add_filter = "someone/".into();
         app.note_add_filter_changed();
+        // Retry is refused as every held action is, and says so.
+        app.notice("before", false);
         app.retry_add();
+        assert_eq!(app.status, HELD, "retry");
+        assert!(!app.status_error, "retry");
         idle(&app, "add");
         assert!(app.installed[0].path.exists(), "the folder is still there");
         assert!(app.job.is_none());
