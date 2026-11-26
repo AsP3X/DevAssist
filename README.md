@@ -9,9 +9,9 @@ overview. It shows which ones have something new, updates them on every
 branch, clones new ones where you want them, and lets you sort them into
 groups. A second tool manages Docker: containers, Compose projects, images
 and volumes, with live logs. It works with the keyboard and with the mouse.
-A window is being built; it shows your repositories. You cannot change
-anything from it yet, but repositories set to watch are still pulled when
-their interval is over. It is not part of the downloads.
+A window is being built; it shows your repositories and can update, watch,
+open, group and remove them. Adding, importing, the forks and the settings
+are still done in the terminal app. It is not part of the downloads.
 
 ```
  DevAssist   in 3 folders

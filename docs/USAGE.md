@@ -489,13 +489,14 @@ branch, changes (`Clean` or `Uncommitted`), pull requests, and how far it is
 behind and ahead. Above the table are a filter, the sort and, once something
 is ticked, how many are ticked, with a button that clears the ticks.
 
-You cannot change a repository from the window yet. Folding a group is saved
-to the settings file, as in the terminal app, and so are clones it takes over
-from an older place at start. What the program does by itself it also does
-here: it fetches when it starts, and it pulls the repositories you watch when
-their interval is over, as in the terminal app. With no repositories it says so
-and points to the terminal app. With a settings file that has a mistake it
-shows the mistake and loads nothing. In `--demo`, refresh does nothing.
+From the window you can update, watch, open, group and remove the repositories
+that are on the list. Add, Import, the forks, Migrate and Settings are still
+done in the terminal app. Folding a group is saved to the settings file, as in
+the terminal app, and so are clones it takes over from an older place at
+start. What the program does by itself it also does here: it fetches when it
+starts, and it pulls the repositories you watch when their interval is over.
+With no repositories it says so and points to the terminal app. With a
+settings file that has a mistake it shows the mistake and loads nothing.
 
 | Key | What it does |
 |---|---|
@@ -505,22 +506,97 @@ shows the mistake and loads nothing. In `--demo`, refresh does nothing.
 | `←` `→` | Fold or unfold the highlighted group |
 | `Space` | Tick or untick the highlighted row and move down |
 | `Ctrl-A` | Tick every row shown |
+| `Enter` | Open the menu of the highlighted row, or fold the highlighted group |
+| `u` | Update the ticked rows, or the highlighted row (all of a highlighted group) |
+| `U` | Update every repository |
+| `w` | Turn the automatic pull on or off for the ticked rows, or the highlighted row |
+| `o` | Open the folders of the ticked rows, or the highlighted row |
+| `m` | Move the ticked rows, or the highlighted row, into a group; on a group's header, rename the group |
+| `d`, `Delete` | Ask before removing the ticked rows, or the highlighted row |
+| `l` | Show the progress of the run again after it was hidden |
 | `s` | Change the sort |
 | `/` | Type in the filter |
 | `r`, `F5` | Fetch and read again |
 | `Esc` | Clear the filter when it lets nothing through, otherwise clear the ticks |
 
+`U` is a capital letter. With Caps Lock on, `u` types `U` and updates every
+repository, as it does in the terminal app. A key that acts, such as `u`, `w`
+or `d`, acts once when it is held down. `w`, `o`, `m`, `l` and `s` also take
+their capital letter; `d` only the small one.
+
 A click on a row highlights it, on its box ticks it, on a group's header
-highlights and folds it, and on the box in the head ticks every row shown.
+highlights and folds it, and on the box in the head ticks every row shown. A
+row's "…" opens its menu. If the row is not ticked, the menu is for that row
+alone and the other ticks are cleared; if it is ticked, the menu is for every
+ticked row. Above the table, "Update all" updates every repository. Once
+something is ticked, a bar there says how many, with Update, Move to group,
+Open folder and Remove, and a button that clears the ticks. A double click
+does not update, as it does in the terminal app.
 
 While the filter has the keyboard, `↑` `↓` and `PgUp` `PgDn` still move the
 highlight. `Home` and `End` belong to the text. `Tab` keeps the keyboard in the
-filter. `Esc` clears the filter. The other keys of the table, such as `r` and
-`F5`, act only when the filter does not have the keyboard: there `r` is typed
-into the filter and `F5` does nothing.
+filter. `Esc` clears the filter. The other keys of the table, such as `r`,
+`u` and `d`, act only when the filter does not have the keyboard: there they
+are typed into the filter, and `F5` does nothing.
 
-Everything else, such as adding, updating, moving and removing, is still done
-in the terminal app.
+### The menu
+
+The menu has these lines, in the words and with the keys of the terminal app's
+menu:
+
+| Line | Key |
+|---|---|
+| Update | `u` |
+| Open the folder (the folders) | `o` |
+| Open on GitHub | `g` |
+| Move to a group… | `m` |
+| Copy the path (the paths) | `c` |
+| Auto-pull on or off | `w` |
+| Fetch the pull requests | `p` |
+| Remove… | `d` |
+
+`↑` `↓` (or `k` `j`) move the highlight and stop at the ends. `Home` and `End`
+go to the first and the last line. `Enter` runs the highlighted line, a line's
+key runs that line, and `Esc` or `q` closes the menu. A click on a line runs
+it; a click outside the menu closes it and goes no further. The menu leaves
+out the forks' three lines and Migrate.
+
+### The dialogs
+
+While a menu or a dialog is open, it takes every key and click, and the table
+under it takes none. `Esc` closes it. `Tab` and `Shift-Tab` walk a dialog's
+buttons, and `Enter` presses the main one.
+
+- **Progress.** A run, such as an update, shows its tasks, each with a bar,
+  and the output of the one you pick. While the run goes on,
+  Cancel stops it and Hide closes the dialog and lets the run go on; `Esc`
+  hides it too, it does not cancel. A hidden run is said in the status bar.
+  `l`, or a click on the status bar, brings it back. When the run has ended
+  the button is Close. A run that went well closes the dialog by itself a
+  moment after it ended; one that failed stays until you close it.
+- **Remove.** It names the repositories, up to three, then counts them, and
+  says for each folder whether it is clean or has uncommitted changes. Cancel
+  leaves everything. Forget takes the repositories off the list and leaves
+  their folders. Delete from disk deletes the folders, and the status line
+  says how it went; the repositories on GitHub are never touched. No button is the main one: `Enter` does nothing
+  until `Tab` has picked a button, and `Esc` cancels. On a group's header with
+  nothing ticked, `d` does not dissolve the group as in the terminal app. It
+  says "Pick repositories to remove."
+- **Group.** It asks for a group name, with the group of the first repository
+  in the field. `Up` and `Down` in the field walk through the groups there
+  are, and a click on a group puts its name in the field. A new name makes a
+  new group, and an empty name takes the repositories out of their group. A
+  name is 40 characters at most. On a group's header (`m`) the same dialog
+  renames the group.
+
+`Esc` does not cancel a run; the Cancel button does.
+
+### The demo
+
+`--demo` holds all work. Every menu and dialog opens, but nothing is run,
+opened, copied or written, and the status line says "This is a demo. Nothing is
+run or changed." With `--demo --show NAME` the window opens with one of them
+already open: `progress`, `remove`, `group` or `menu`.
 
 ## Docker
 

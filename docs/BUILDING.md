@@ -30,11 +30,11 @@ cargo run -- --config scratch.toml
 ## The window
 
 `devassist-gui` is a second program, a window in a "liquid glass" design. It
-shows your repositories. You cannot change anything from it yet, but what the
-program does by itself it also does here: it fetches every repository when it
-starts, and it pulls the repositories you watch when their interval is over,
-as the terminal app does (see the window in [USAGE.md](USAGE.md)). It is not
-in the installers or the release downloads.
+shows your repositories and acts on them: update, watch, open, group and
+remove. What the program does by itself it also does here: it fetches every
+repository when it starts, and it pulls the repositories you watch when their
+interval is over, as the terminal app does (see the window in
+[USAGE.md](USAGE.md)). It is not in the installers or the release downloads.
 
 ```
 cargo run -p devassist-gui
@@ -55,7 +55,8 @@ frosted instead.
 | `--backdrop KEY` | The backdrop: `lake`, `midday`, `golden`, `dusk`, `night` or `forest` |
 | `--no-blur` | Does not blur the backdrop |
 | `--no-sidebar` | Opens with the sidebar hidden |
-| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder, no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. Refresh does nothing in it. Folding a group writes only to a settings file of its own in a folder under the system's temporary folder, which is removed when the window closes |
+| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder, no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. All work is held (see below). Folding a group writes only to a settings file of its own in a folder under the system's temporary folder, which is removed when the window closes |
+| `--show NAME` | With `--demo` only: opens `progress`, `remove`, `group` or `menu` at start, so a picture can show it |
 
 At start the window reads `theme`, `backdrop` and `blur` from the settings
 file. It cannot change them yet. A settings file with a mistake makes the
@@ -66,6 +67,13 @@ standard error. Set `DEVASSIST_LOG=info` to see the info lines too, such as
 how long each bake of the glass took. A release build on Windows has no
 console, so there the settings warning is also said in the status bar for its
 first seconds.
+
+The demo holds its work: the core's `Repos::hold_work` makes every action
+stop at its start. Every menu and dialog opens, but nothing runs git, opens a
+folder or a browser, writes the clipboard, reaches the network or writes
+settings, and the status line says "This is a demo. Nothing is run or
+changed." The core's `testing` feature counts the processes started and the
+side effects made; the tests of the demo use it to prove that none were.
 
 Glass panes and frosted panes are made differently. A glass pane is baked: it
 is drawn once into a picture and kept until something it depends on changes.
@@ -257,11 +265,23 @@ use. The root package turns it on as a dev-dependency.
 | `src/table.rs` | Draws the table and says what was clicked |
 | `src/widgets.rs` | The small pieces the screens are drawn with: checkbox, cut-off text, capsule of actions, text field |
 | `src/repos_screen.rs` | The Repositories screen: its toolbar, its keys and what it shows when there is no table |
+| `src/overlay.rs` | What every menu and dialog shares: the shield, the scrim, the pane's glass, the buttons and how Tab walks them |
+| `src/menu.rs` | The row's menu: its lines, in the core's words and keys |
+| `src/dialogs/mod.rs` | The bridge from the core's mode to the overlay, and the parts the dialogs share |
+| `src/dialogs/progress.rs` | The progress of a run |
+| `src/dialogs/remove.rs` | The question before repositories are forgotten or deleted |
+| `src/dialogs/group.rs` | Moving repositories into a group, and renaming a group |
 | `src/app.rs` | The window and its drawing loop |
 | `src/screenshot.rs` | `--screenshot`: saves a picture of the window |
 | `src/contrast.rs` | A test-only module that checks every text's contrast on all six backdrops |
 | `src/picture.rs` | A test-only module that paints what egui draws into a picture on the CPU, for `contrast.rs` and the table's tests |
 | `assets/` | The shipped fonts, icon font and backdrops, with a `README.md` on where each comes from |
+
+An overlay is opened only through `overlay::open`, which keeps the key or click
+that opened it from acting in it. A control on an overlay asks
+`overlay::fresh_click`, never `clicked` alone. The dialogs follow the core's
+mode through the bridge in `dialogs/mod.rs`: the core decides when one is open,
+and the window opens and closes the overlay to match.
 
 ### Elsewhere
 
