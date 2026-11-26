@@ -69,6 +69,36 @@ impl<P> PathPrompt<P> {
             None => self.matches.clear(),
         }
     }
+
+    /// The folders Tab would choose from for what is typed, as full
+    /// paths. The text, the error and `matches` stay as they are. See
+    /// `suggest`.
+    pub fn suggestions(&self) -> Vec<String> {
+        suggest(&self.input)
+    }
+}
+
+/// Up to 40 folders whose names start with the last part of `text`, ignoring
+/// case, as full paths and sorted as Tab sorts them: the same matching as
+/// Tab completion, without changing anything. Empty for an empty or a
+/// relative text, or one whose folder cannot be read.
+///
+/// It reads the disk on every call: ask again only when the text changed.
+pub fn suggest(text: &str) -> Vec<String> {
+    let Some((head, typed)) = split_last(text) else {
+        return Vec::new();
+    };
+    let folder = expand_home(head);
+    // A relative text would be read against wherever the program runs.
+    if !folder.is_absolute() {
+        return Vec::new();
+    }
+    folder_names(head, typed)
+        .unwrap_or_default()
+        .iter()
+        .take(MATCH_LIMIT)
+        .map(|name| folder.join(name).display().to_string())
+        .collect()
 }
 
 /// Turns what was typed into a full path. `~` is the home folder.
@@ -112,19 +142,8 @@ pub fn delete_segment(input: &mut String) {
 /// Returns the new input and the folders that still fit. None when the
 /// input has no folder to look in yet.
 fn complete(input: &str) -> Option<(String, Vec<String>)> {
-    let split = input.rfind(['/', '\\'])? + 1;
-    let (head, typed) = input.split_at(split);
-    let wanted = typed.to_lowercase();
-    let mut names: Vec<String> = std::fs::read_dir(expand_home(head))
-        .ok()?
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .filter(|name| name.to_lowercase().starts_with(&wanted))
-        // Hidden folders only when asked for.
-        .filter(|name| wanted.starts_with('.') || !name.starts_with('.'))
-        .collect();
-    names.sort_by_key(|name| name.to_lowercase());
+    let (head, typed) = split_last(input)?;
+    let mut names = folder_names(head, typed)?;
     match names.as_slice() {
         [] => Some((input.to_string(), Vec::new())),
         [only] => Some((format!("{head}{only}{MAIN_SEPARATOR}"), Vec::new())),
@@ -139,6 +158,31 @@ fn complete(input: &str) -> Option<(String, Vec<String>)> {
             Some((format!("{head}{typed}"), names))
         }
     }
+}
+
+/// The text up to and with its last separator, and the part typed after
+/// it. None without a separator: there is no folder to look in yet.
+fn split_last(input: &str) -> Option<(&str, &str)> {
+    let split = input.rfind(['/', '\\'])? + 1;
+    Some(input.split_at(split))
+}
+
+/// The folders in `head` whose names start with `typed`, ignoring case,
+/// sorted the same way. Hidden ones only when `typed` starts with a dot.
+/// None when `head` cannot be read.
+fn folder_names(head: &str, typed: &str) -> Option<Vec<String>> {
+    let wanted = typed.to_lowercase();
+    let mut names: Vec<String> = std::fs::read_dir(expand_home(head))
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.to_lowercase().starts_with(&wanted))
+        // Hidden folders only when asked for.
+        .filter(|name| wanted.starts_with('.') || !name.starts_with('.'))
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    Some(names)
 }
 
 /// What all names start with, ignoring case, in the first name's spelling.
@@ -222,6 +266,62 @@ mod tests {
         assert_eq!(input, format!("{base}nope"));
         assert!(matches.is_empty());
         assert!(complete("no-separator").is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn suggestions_list_matching_folders_and_leave_the_text() {
+        let root = temp("suggest");
+        for name in ["apps", "api-old", "Api-new", ".hidden", "zeta"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        fs::write(root.join("apple.txt"), "x").unwrap();
+        let sep = MAIN_SEPARATOR;
+        let base = format!("{}{sep}", root.display());
+        let full = |name: &str| root.join(name).display().to_string();
+
+        // Folders that start with what is typed, any case, as full paths,
+        // sorted as Tab sorts them. The text stays as it was typed.
+        let mut prompt = PathPrompt::new((), &root, false);
+        prompt.set_input(&format!("{base}a"));
+        prompt.error = Some("kept".into());
+        assert_eq!(
+            prompt.suggestions(),
+            [full("Api-new"), full("api-old"), full("apps")]
+        );
+        assert_eq!(prompt.input, format!("{base}a"));
+        assert_eq!(prompt.error.as_deref(), Some("kept"));
+        assert!(prompt.matches.is_empty());
+        assert_eq!(
+            suggest(&format!("{base}API")),
+            [full("Api-new"), full("api-old")]
+        );
+
+        // A folder typed whole is among them; files and hidden folders
+        // are not, unless a dot is typed.
+        assert_eq!(suggest(&format!("{base}zeta")), [full("zeta")]);
+        assert_eq!(
+            suggest(&base),
+            [full("Api-new"), full("api-old"), full("apps"), full("zeta")]
+        );
+        assert_eq!(suggest(&format!("{base}.")), [full(".hidden")]);
+        assert!(suggest(&format!("{base}nope")).is_empty());
+
+        // Nothing for an empty or a relative text, or one with no folder.
+        assert!(suggest("").is_empty());
+        assert!(suggest("dev").is_empty());
+        assert!(suggest(&format!("dev{sep}a")).is_empty());
+        assert!(suggest(&format!("{base}nope{sep}")).is_empty());
+
+        // No more than Tab keeps.
+        let many = temp("suggest-many");
+        for index in 0..MATCH_LIMIT + 5 {
+            fs::create_dir_all(many.join(format!("d{index:02}"))).unwrap();
+        }
+        let listed = suggest(&format!("{}{sep}d", many.display()));
+        assert_eq!(listed.len(), MATCH_LIMIT);
+        assert_eq!(listed[0], many.join("d00").display().to_string());
+        let _ = fs::remove_dir_all(&many);
         let _ = fs::remove_dir_all(&root);
     }
 }

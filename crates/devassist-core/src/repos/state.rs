@@ -105,6 +105,43 @@ pub enum RemoveState {
     Gone,
 }
 
+/// One checkout the move question asks about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveLine {
+    /// Its name on the list.
+    pub name: String,
+    /// Where it is now.
+    pub from: PathBuf,
+    /// Where the move puts it: the typed folder and its folder name. None
+    /// while the typed folder is not one a move can use.
+    pub to: Option<PathBuf>,
+    /// It is in that folder already: the move leaves it where it is.
+    pub there: bool,
+}
+
+/// One thing a push to another service does or leaves, in a sentence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fact {
+    /// It goes over or is done there; false for what stays as it is or is
+    /// not done.
+    pub goes: bool,
+    pub words: String,
+}
+
+/// What Enter in Add asks for, before a folder is given.
+enum AddChoice {
+    /// Clone these.
+    Clone(Vec<RemoteRepo>),
+    /// Nothing is listed and a plain word is typed: list that account.
+    ListAccount,
+}
+
+/// Where a move into `dir` puts the checkout at `from`: under the folder
+/// name it has now. None for a path without one.
+fn move_target(dir: &Path, from: &Path) -> Option<PathBuf> {
+    Some(dir.join(from.file_name()?))
+}
+
 /// The line under the Add search box.
 pub struct AddStatus {
     pub text: String,
@@ -194,11 +231,9 @@ pub fn clone_target(prompt: &PathPrompt<Purpose>) -> Option<PathBuf> {
                 .ok()?
                 .join(&remotes[0].name),
         ),
-        Purpose::Move(repos) if repos.len() == 1 => Some(
-            pathprompt::resolve(&prompt.input)
-                .ok()?
-                .join(repos[0].1.file_name()?),
-        ),
+        Purpose::Move(repos) if repos.len() == 1 => {
+            move_target(&pathprompt::resolve(&prompt.input).ok()?, &repos[0].1)
+        }
         _ => None,
     }
 }
@@ -1649,6 +1684,62 @@ impl Repos {
         self.submit(Queued::Service(prompt.repo, prompt.path, url));
     }
 
+    /// What a push to another service takes over (`goes`) and what it
+    /// leaves as it is or does not do, as `gitops::migrate_to` works. The
+    /// last line names the remote the address is kept as, once the
+    /// service dialog has an address a push can use.
+    pub fn service_facts(&self) -> Vec<Fact> {
+        let remote = self
+            .service_prompt
+            .as_ref()
+            .and_then(|prompt| gitops::push_address(&prompt.input).ok())
+            .map_or_else(
+                || "one more remote, named after its host".to_string(),
+                |url| format!("the remote {}", gitops::remote_name_for(&url)),
+            );
+        let fact = |goes: bool, words: &str| Fact {
+            goes,
+            words: words.to_string(),
+        };
+        vec![
+            fact(
+                true,
+                "Every branch goes over; origin's where the one here is missing or behind.",
+            ),
+            fact(true, "Every tag goes over."),
+            fact(
+                true,
+                "Every pull request goes over as a branch, pull/<number>, or under another prefix when a branch here already uses pull.",
+            ),
+            fact(
+                true,
+                "Origin is fetched first, so what goes over is what it has now. When it cannot be reached, what is saved here goes over.",
+            ),
+            fact(
+                true,
+                "The pull request branches there are replaced by what each pull request is now.",
+            ),
+            fact(
+                false,
+                "No branch or tag already there is overwritten. A branch only moves forward; where it cannot, the push stops with an error.",
+            ),
+            fact(
+                false,
+                "Nothing there is deleted: branches it has that are not here stay.",
+            ),
+            fact(
+                false,
+                "No pull request is opened there. Comments, issues and releases do not go over.",
+            ),
+            Fact {
+                goes: false,
+                words: format!(
+                    "The repository here keeps its files and its origin. The address is kept as {remote}."
+                ),
+            },
+        ]
+    }
+
     /// Pushes every branch, tag and pull request of one checkout to
     /// another service, in the progress dialog, after fetching what origin
     /// has now. The checkout keeps its files and its origin.
@@ -1711,12 +1802,11 @@ impl Repos {
                     return Err("cancelled".into());
                 }
                 send(tx, JobEvent::Start(index));
-                let Some(folder) = from.file_name() else {
+                let Some(to) = move_target(&dir, from) else {
                     failed.push(name.clone());
                     send(tx, JobEvent::Failed(index, "has no folder name".into()));
                     continue;
                 };
-                let to = dir.join(folder);
                 if paths::same_path(from, &to) {
                     stayed += 1;
                     send(tx, JobEvent::Done(index, "is there already".into()));
@@ -2163,12 +2253,19 @@ impl Repos {
         let Some(prompt) = self.prompt.take() else {
             return;
         };
+        self.answer_path(prompt.purpose, folder);
+    }
+
+    /// Does what the folder question asked for with `folder`, a folder
+    /// that passed its checks, and goes back to the list.
+    fn answer_path(&mut self, purpose: Purpose, folder: PathBuf) {
         self.mode = Mode::List;
         // Held, the dialog closes and the ticks and the clone folder stay.
+        // Nothing is made on disk either: that happens when the task runs.
         if self.held() {
             return;
         }
-        match prompt.purpose {
+        match purpose {
             Purpose::Clone(remotes) => {
                 self.add_marked.clear();
                 // The next clone is offered the same folder.
@@ -2184,6 +2281,67 @@ impl Repos {
                 self.submit(Queued::Move(repos, folder));
             }
         }
+    }
+
+    /// The folders that fit what the open folder question has typed, as
+    /// `PathPrompt::suggestions` finds them; empty while none is open. It
+    /// reads the disk on every call: ask again only when the text changed.
+    pub fn path_suggestions(&self) -> Vec<String> {
+        self.prompt
+            .as_ref()
+            .map(PathPrompt::suggestions)
+            .unwrap_or_default()
+    }
+
+    /// Each checkout of the open move question, with where a move into the
+    /// typed folder puts it, as the move itself works that out. Empty
+    /// while no move question is open.
+    pub fn move_lines(&self) -> Vec<MoveLine> {
+        let Some(prompt) = &self.prompt else {
+            return Vec::new();
+        };
+        let Purpose::Move(repos) = &prompt.purpose else {
+            return Vec::new();
+        };
+        let dir = prompt.folder().ok();
+        repos
+            .iter()
+            .map(|(name, from)| {
+                let to = dir.as_deref().and_then(|dir| move_target(dir, from));
+                let there = to.as_deref().is_some_and(|to| paths::same_path(from, to));
+                MoveLine {
+                    name: name.clone(),
+                    from: from.clone(),
+                    to,
+                    there,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether the open move question would take a checkout onto another
+    /// volume, where a move copies everything and then deletes the old
+    /// folder. True when one is known to; None while no move question is
+    /// open, its folder is not usable, or a checkout's volume cannot be
+    /// told. Checkouts that are there already do not count.
+    pub fn move_crosses_volumes(&self) -> Option<bool> {
+        let lines = self.move_lines();
+        if lines.is_empty() {
+            return None;
+        }
+        let mut known = true;
+        for line in lines.iter().filter(|line| !line.there) {
+            match line
+                .to
+                .as_deref()
+                .and_then(|to| gitops::same_volume(&line.from, to))
+            {
+                Some(false) => return Some(true),
+                Some(true) => {}
+                None => known = false,
+            }
+        }
+        known.then_some(false)
     }
 
     /// Esc in the folder dialog. It goes back to Add when it asked where
@@ -3521,6 +3679,50 @@ impl Repos {
 
     /// Enter in Add: asks where the chosen repositories should go.
     pub fn clone_selected(&mut self) {
+        match self.add_choice() {
+            Ok(AddChoice::Clone(remotes)) => {
+                self.prompt = Some(Purpose::Clone(remotes).prompt(&self.clone_dir));
+                self.mode = Mode::Path;
+            }
+            Ok(AddChoice::ListAccount) => self.list_typed_account(),
+            Err(err) => self.notice(err, true),
+        }
+    }
+
+    /// Enter in Add and then in the folder question, in one step, with
+    /// `folder` as the question's text: the ticked repositories, or the
+    /// highlighted one when none is ticked, are cloned into it. The
+    /// question is never open.
+    ///
+    /// `Ok` when the clone was submitted: the ticks are gone, `clone_dir`
+    /// is the folder (saved when it changed) and the mode is what the
+    /// question's Enter leaves: the list, under the run's progress dialog
+    /// when the clone starts at once. The folder is made when it runs.
+    /// `Ok` too when nothing is listed and a plain word is typed: that
+    /// account is listed, as Enter in Add does, and the mode stays Add.
+    /// Held, it is `Ok` with the mode the list, `HELD` on the status line,
+    /// the ticks and `clone_dir` kept, and nothing made or started.
+    /// `Err` holds Add's words or the question's; nothing changed and the
+    /// mode is still Add.
+    pub fn clone_marked_into(&mut self, folder: &str) -> Result<(), String> {
+        let remotes = match self.add_choice()? {
+            AddChoice::Clone(remotes) => remotes,
+            AddChoice::ListAccount => {
+                self.list_typed_account();
+                return Ok(());
+            }
+        };
+        let mut prompt = Purpose::Clone(remotes).prompt(&self.clone_dir);
+        prompt.set_input(folder);
+        let folder = prompt.folder()?;
+        self.answer_path(prompt.purpose, folder);
+        Ok(())
+    }
+
+    /// What Enter in Add asks for: the ticked repositories that are not on
+    /// the list yet, or else the highlighted one. `Err` says why there is
+    /// nothing to clone.
+    fn add_choice(&self) -> Result<AddChoice, String> {
         if !self.add_marked.is_empty() {
             let remotes: Vec<RemoteRepo> = self
                 .add_marked
@@ -3529,35 +3731,24 @@ impl Repos {
                 .cloned()
                 .collect();
             if remotes.is_empty() {
-                self.notice("Those repositories are on the list already.", true);
-                return;
+                return Err("Those repositories are on the list already.".into());
             }
-            self.prompt = Some(Purpose::Clone(remotes).prompt(&self.clone_dir));
-            self.mode = Mode::Path;
-            return;
+            return Ok(AddChoice::Clone(remotes));
         }
         if self.add_list().is_empty() && self.add_word().is_some() {
-            self.list_typed_account();
-            return;
+            return Ok(AddChoice::ListAccount);
         }
-        let Some(id) = self.add_selected.clone() else {
-            self.notice("Select a repository to add.", true);
-            return;
-        };
-        let Some(remote) = self
+        let missing = || "Select a repository to add.".to_string();
+        let id = self.add_selected.as_ref().ok_or_else(missing)?;
+        let remote = self
             .add_list()
             .into_iter()
-            .find(|repo| repo.id().eq_ignore_ascii_case(&id))
-        else {
-            self.notice("Select a repository to add.", true);
-            return;
-        };
+            .find(|repo| repo.id().eq_ignore_ascii_case(id))
+            .ok_or_else(missing)?;
         if self.is_installed(&remote) {
-            self.notice(format!("{} is on the list already.", remote.id()), true);
-            return;
+            return Err(format!("{} is on the list already.", remote.id()));
         }
-        self.prompt = Some(Purpose::Clone(vec![remote]).prompt(&self.clone_dir));
-        self.mode = Mode::Path;
+        Ok(AddChoice::Clone(vec![remote]))
     }
 
     /// Clones `remotes` into `dir`, one after another. One failure does
@@ -5559,6 +5750,17 @@ mod tests {
                     Some(Purpose::Clone(vec![remote("acme", "new")]).prompt(&app.clone_dir));
                 app.use_folder(std::env::temp_dir().join("devassist-held-clone"));
             }),
+            ("clone from add", |app| {
+                app.mode = Mode::Add;
+                let folder = std::env::temp_dir()
+                    .join(format!("devassist-held-add-{}", std::process::id()))
+                    .join("new");
+                assert_eq!(app.clone_marked_into(&folder.display().to_string()), Ok(()));
+                assert!(
+                    !folder.exists() && !folder.parent().unwrap().exists(),
+                    "no folder is made"
+                );
+            }),
             ("service", |app| {
                 app.run_migrate(MigrateItem::Service);
                 assert!(app.mode == Mode::Service);
@@ -5913,5 +6115,459 @@ mod tests {
             "the settings file is not written"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file URL Git clones from, for a folder on this disk.
+    fn file_url(path: &Path) -> String {
+        let text = path.display().to_string().replace('\\', "/");
+        if text.starts_with('/') {
+            format!("file://{text}")
+        } else {
+            format!("file:///{text}")
+        }
+    }
+
+    /// A bare repository with one commit, standing in for one on GitHub.
+    fn bare_origin(root: &Path, name: &str) -> PathBuf {
+        let work = root.join(format!("{name}-work"));
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        std::fs::write(work.join("readme"), name).unwrap();
+        git(&work, &["add", "readme"]);
+        git(&work, &["commit", "-q", "-m", "one"]);
+        let bare = root.join(format!("{name}.git"));
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        );
+        bare
+    }
+
+    /// Waits for the running task to end and its rows to be read.
+    fn finish(app: &mut Repos) {
+        let until = Instant::now() + Duration::from_secs(60);
+        while app.busy || app.status_pending > 0 {
+            assert!(Instant::now() < until, "the task did not finish");
+            app.drain();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn cloning_into_a_folder_from_add_is_one_step() {
+        let root = scratch("clone-from-add");
+        let settings = Settings {
+            config_path: root.join("devassist.toml"),
+            ..test_settings()
+        };
+        let mut app = Repos::empty(settings);
+        app.remotes_state = RemoteState::Ready;
+        let mut tool = remote("storytold", "tool");
+        tool.clone_url = file_url(&bare_origin(&root, "tool"));
+        let mut other = remote("storytold", "other");
+        other.clone_url = file_url(&bare_origin(&root, "other"));
+        app.remotes = vec![tool, other.clone()];
+        app.open_add();
+        app.add_selected = Some("storytold/tool".into());
+        let code = root.join("code");
+
+        // The highlighted one, nothing ticked.
+        assert_eq!(app.clone_marked_into(&code.display().to_string()), Ok(()));
+        // As after the question's Enter: the list, under the run's dialog.
+        assert!(app.busy && app.mode == Mode::Progress, "the run is shown");
+        assert!(app.prompt.is_none(), "the folder question never opened");
+        assert_eq!(app.clone_dir, code, "the next clone is offered it");
+        let saved = std::fs::read_to_string(root.join("devassist.toml")).unwrap();
+        assert!(
+            saved.contains(&format!("clone_dir = {}\n", code.display())),
+            "{saved}"
+        );
+        finish(&mut app);
+        assert!(!app.status_error, "{}", app.status);
+        assert!(app.status.starts_with("Cloned tool into"), "{}", app.status);
+        assert!(code.join("tool").join(".git").is_dir());
+        assert!(
+            app.checkouts
+                .iter()
+                .any(|path| paths::same_path(path, &code.join("tool")))
+        );
+
+        // The ticked ones, whatever is highlighted; the ticks go.
+        app.open_add();
+        app.add_selected = Some("storytold/tool".into());
+        app.add_marked = vec![other];
+        assert_eq!(app.clone_marked_into(&code.display().to_string()), Ok(()));
+        assert!(app.add_marked.is_empty());
+        finish(&mut app);
+        assert!(
+            app.status.starts_with("Cloned other into"),
+            "{}",
+            app.status
+        );
+        assert!(code.join("other").join(".git").is_dir());
+        let _ = gitops::remove_tree(&root);
+    }
+
+    #[test]
+    fn a_bad_folder_leaves_add_as_it_was() {
+        let root = scratch("bad-add-folder");
+        let mut app = Repos::empty(test_settings());
+        app.remotes_state = RemoteState::Ready;
+        app.remotes = vec![remote("storytold", "tool"), remote("storytold", "web")];
+        app.open_add();
+        app.add_selected = Some("storytold/tool".into());
+        app.add_marked = vec![remote("storytold", "web")];
+        app.notice("before", false);
+        let clone_dir = app.clone_dir.clone();
+        let file = root.join("file.txt");
+        std::fs::write(&file, "x").unwrap();
+        let unchanged = |app: &Repos, what: &str| {
+            assert!(app.mode == Mode::Add, "{what}: still Add");
+            assert!(app.prompt.is_none(), "{what}: no question");
+            assert_eq!(app.add_marked.len(), 1, "{what}: the tick stays");
+            assert_eq!(
+                app.add_selected.as_deref(),
+                Some("storytold/tool"),
+                "{what}"
+            );
+            assert_eq!(app.clone_dir, clone_dir, "{what}: the clone folder");
+            assert_eq!(app.status, "before", "{what}: the status line");
+            assert!(!app.busy && app.queue.is_empty(), "{what}: nothing runs");
+        };
+
+        // The question's own words.
+        let file_text = file.display().to_string();
+        assert_eq!(
+            app.clone_marked_into(&file_text),
+            Err(format!("{file_text} is a file, not a folder."))
+        );
+        unchanged(&app, "a file");
+        let relative = app.clone_marked_into("dev").unwrap_err();
+        assert!(
+            relative.starts_with("Use a full path, such as "),
+            "{relative}"
+        );
+        assert_eq!(Err(relative), pathprompt::resolve("dev"));
+        unchanged(&app, "a relative path");
+        assert_eq!(app.clone_marked_into("  "), Err("Type the folder.".into()));
+        unchanged(&app, "nothing typed");
+
+        // Add's own words, before the folder is looked at.
+        app.installed.push(installed("storytold", "web"));
+        assert_eq!(
+            app.clone_marked_into(&root.display().to_string()),
+            Err("Those repositories are on the list already.".into())
+        );
+        unchanged(&app, "ticked ones on the list");
+        app.add_marked.clear();
+        app.installed.push(installed("storytold", "tool"));
+        assert_eq!(
+            app.clone_marked_into(&root.display().to_string()),
+            Err("storytold/tool is on the list already.".into())
+        );
+        app.add_selected = None;
+        assert_eq!(
+            app.clone_marked_into(&root.display().to_string()),
+            Err("Select a repository to add.".into())
+        );
+        assert!(app.mode == Mode::Add && app.status == "before");
+
+        // An empty list and a plain word: that account is listed, and
+        // Add stays open. Held, so nobody asks GitHub.
+        app.hold_work();
+        app.add_filter = "someone".into();
+        assert!(app.add_list().is_empty());
+        assert_eq!(app.clone_marked_into(&root.display().to_string()), Ok(()));
+        assert!(app.mode == Mode::Add);
+        assert_eq!(app.add_filter, "someone/");
+        assert_eq!(app.clone_dir, clone_dir);
+        assert!(!app.busy && app.queue.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_lines_say_from_and_to_and_what_is_there_already() {
+        let root = scratch("move-lines");
+        let here = root.join("here");
+        let there = root.join("there");
+        std::fs::create_dir_all(&there).unwrap();
+        let mut app = Repos::empty(test_settings());
+        for name in ["api", "docs", "web"] {
+            let mut repo = installed("acme", name);
+            repo.path = here.join(name);
+            std::fs::create_dir_all(&repo.path).unwrap();
+            app.checkouts.push(repo.path.clone());
+            app.installed.push(repo);
+        }
+        assert!(app.move_lines().is_empty(), "no question is open");
+        assert_eq!(app.move_crosses_volumes(), None);
+        app.selected = Some("api".into());
+        app.marked = vec!["api".into(), "docs".into()];
+        app.run_migrate(MigrateItem::Folder);
+        assert!(app.mode == Mode::Path);
+        let line = |name: &str, to: Option<PathBuf>, there: bool| MoveLine {
+            name: name.into(),
+            from: here.join(name),
+            to,
+            there,
+        };
+
+        // It starts where the first one is: both are there already.
+        assert_eq!(
+            app.move_lines(),
+            [
+                line("api", Some(here.join("api")), true),
+                line("docs", Some(here.join("docs")), true),
+            ]
+        );
+        app.set_path_input(&there.display().to_string());
+        assert_eq!(
+            app.move_lines(),
+            [
+                line("api", Some(there.join("api")), false),
+                line("docs", Some(there.join("docs")), false),
+            ]
+        );
+        assert_eq!(app.move_crosses_volumes(), Some(false));
+        // A folder that is not there yet is made by the move.
+        let later = root.join("later");
+        app.set_path_input(&later.display().to_string());
+        assert_eq!(app.move_lines()[0].to, Some(later.join("api")));
+        assert_eq!(app.move_crosses_volumes(), Some(false));
+
+        // Not a usable folder: nowhere to go yet.
+        for bad in ["", "dev"] {
+            app.set_path_input(bad);
+            assert_eq!(
+                app.move_lines(),
+                [line("api", None, false), line("docs", None, false)],
+                "{bad:?}"
+            );
+            assert_eq!(app.move_crosses_volumes(), None, "{bad:?}");
+        }
+
+        // The question's folders, and the text stays.
+        let typed = format!("{}{}th", root.display(), std::path::MAIN_SEPARATOR);
+        app.set_path_input(&typed);
+        assert_eq!(app.path_suggestions(), [there.display().to_string()]);
+        assert_eq!(app.prompt.as_ref().unwrap().input, typed);
+        app.close_path();
+        assert!(app.path_suggestions().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_push_facts_match_what_a_push_does() {
+        let root = scratch("push-facts");
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        let target = root.join("target.git");
+        let commit = |dir: &Path, name: &str| {
+            std::fs::write(dir.join(name), name).unwrap();
+            git(dir, &["add", name]);
+            git(dir, &["commit", "-q", "-m", name]);
+        };
+        let tip = |dir: &Path, name: &str| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--verify", "-q", name])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let refs = |dir: &Path| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["for-each-ref", "--format=%(refname)"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        std::fs::create_dir_all(&upstream).unwrap();
+        git(&upstream, &["init", "-q", "-b", "main"]);
+        commit(&upstream, "one");
+        git(&upstream, &["tag", "v1"]);
+        git(&upstream, &["checkout", "-q", "-b", "dev"]);
+        commit(&upstream, "dev-work");
+        git(&upstream, &["checkout", "-q", "-b", "old"]);
+        git(&upstream, &["checkout", "-q", "main"]);
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+        git(&root, &["init", "-q", "--bare", "target.git"]);
+        // Here: main has a commit of its own, old is behind origin's, mine
+        // is here only. Origin gets a branch and a pull request after the
+        // clone; the other service has a branch of its own.
+        commit(&clone, "local");
+        git(&clone, &["branch", "-q", "old", "origin/old~1"]);
+        git(&clone, &["branch", "-q", "mine"]);
+        git(&upstream, &["checkout", "-q", "-b", "late"]);
+        commit(&upstream, "late-work");
+        git(&upstream, &["checkout", "-q", "--detach", "main"]);
+        commit(&upstream, "pull-1");
+        git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
+        git(&upstream, &["checkout", "-q", "main"]);
+        let address = target.display().to_string();
+        git(
+            &upstream,
+            &["push", "-q", &address, "main:refs/heads/theirs"],
+        );
+        let theirs = tip(&target, "refs/heads/theirs");
+
+        let mut app = Repos::empty(test_settings());
+        app.service_prompt = Some(ServicePrompt {
+            repo: "tool".into(),
+            path: clone.clone(),
+            input: address.clone(),
+            error: None,
+        });
+        let facts = app.service_facts();
+        let words: Vec<(bool, &str)> = facts
+            .iter()
+            .map(|fact| (fact.goes, fact.words.as_str()))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                (
+                    true,
+                    "Every branch goes over; origin's where the one here is missing or behind."
+                ),
+                (true, "Every tag goes over."),
+                (
+                    true,
+                    "Every pull request goes over as a branch, pull/<number>, or under another prefix when a branch here already uses pull."
+                ),
+                (
+                    true,
+                    "Origin is fetched first, so what goes over is what it has now. When it cannot be reached, what is saved here goes over."
+                ),
+                (
+                    true,
+                    "The pull request branches there are replaced by what each pull request is now."
+                ),
+                (
+                    false,
+                    "No branch or tag already there is overwritten. A branch only moves forward; where it cannot, the push stops with an error."
+                ),
+                (
+                    false,
+                    "Nothing there is deleted: branches it has that are not here stay."
+                ),
+                (
+                    false,
+                    "No pull request is opened there. Comments, issues and releases do not go over."
+                ),
+                (
+                    false,
+                    "The repository here keeps its files and its origin. The address is kept as the remote mirror."
+                ),
+            ]
+        );
+        // Without a usable address, the remote is not named yet.
+        app.service_prompt.as_mut().unwrap().input = "nowhere".into();
+        assert_eq!(
+            app.service_facts().last().unwrap().words,
+            "The repository here keeps its files and its origin. The address is kept as one more remote, named after its host."
+        );
+
+        // The push the dialog's Enter runs.
+        let done = gitops::migrate_to(&clone, &address, None, |_, _| {}).unwrap();
+        assert!(done.stale.is_none());
+        // Every branch; origin's where the one here is missing or behind.
+        assert_eq!(
+            tip(&target, "refs/heads/main"),
+            tip(&clone, "refs/heads/main")
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/mine"),
+            tip(&clone, "refs/heads/mine")
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/dev"),
+            tip(&clone, "refs/remotes/origin/dev")
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/old"),
+            tip(&clone, "refs/remotes/origin/old")
+        );
+        // Every tag.
+        assert_eq!(tip(&target, "refs/tags/v1"), tip(&clone, "refs/tags/v1"));
+        // Pull requests as branches pull/<number>.
+        assert_eq!(done.pull_prefix, "pull");
+        assert_eq!(
+            tip(&target, "refs/heads/pull/1"),
+            tip(&upstream, "refs/pull/1/head")
+        );
+        // Origin was fetched first: what it got after the clone went too.
+        assert_eq!(
+            tip(&target, "refs/heads/late"),
+            tip(&upstream, "refs/heads/late")
+        );
+        // Nothing there was deleted.
+        assert_eq!(tip(&target, "refs/heads/theirs"), theirs);
+        // Only branches and tags went over: no pull request, nothing else.
+        for name in refs(&target) {
+            assert!(
+                name.starts_with("refs/heads/") || name.starts_with("refs/tags/"),
+                "{name}"
+            );
+        }
+        // Here: the files, the branch, origin, and the address as "mirror".
+        assert!(clone.join("local").is_file() && clone.join("one").is_file());
+        assert_eq!(tip(&clone, "HEAD"), tip(&clone, "refs/heads/main"));
+        let config = std::fs::read_to_string(clone.join(".git").join("config")).unwrap();
+        assert!(
+            config.contains("[remote \"origin\"]") && config.contains("upstream"),
+            "{config}"
+        );
+        assert_eq!(done.remote, "mirror");
+        assert!(config.contains("[remote \"mirror\"]"), "{config}");
+
+        // A pull request that changed is replaced there, though that is
+        // no fast-forward.
+        git(&upstream, &["checkout", "-q", "--detach", "main"]);
+        commit(&upstream, "pull-1-again");
+        git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
+        git(&upstream, &["checkout", "-q", "main"]);
+        gitops::migrate_to(&clone, &address, None, |_, _| {}).unwrap();
+        assert_eq!(
+            tip(&target, "refs/heads/pull/1"),
+            tip(&upstream, "refs/pull/1/head")
+        );
+
+        // Origin cannot be reached: what is saved here goes over.
+        gitops::remove_tree(&upstream).unwrap();
+        commit(&clone, "offline");
+        let done = gitops::migrate_to(&clone, &address, None, |_, _| {}).unwrap();
+        assert!(done.stale.is_some());
+        assert_eq!(
+            tip(&target, "refs/heads/main"),
+            tip(&clone, "refs/heads/main")
+        );
+
+        // A branch there that went another way is not overwritten: the
+        // push stops with an error, and the branch stays as it was.
+        git(&clone, &["checkout", "-q", "-b", "side", "v1"]);
+        commit(&clone, "elsewhere");
+        git(
+            &clone,
+            &["push", "-q", "--force", &address, "side:refs/heads/dev"],
+        );
+        git(&clone, &["checkout", "-q", "main"]);
+        git(&clone, &["branch", "-q", "-D", "side"]);
+        let moved = tip(&target, "refs/heads/dev");
+        assert!(gitops::migrate_to(&clone, &address, None, |_, _| {}).is_err());
+        assert_eq!(tip(&target, "refs/heads/dev"), moved);
+        let _ = gitops::remove_tree(&root);
     }
 }

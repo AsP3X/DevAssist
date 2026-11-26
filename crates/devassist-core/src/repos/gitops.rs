@@ -405,6 +405,12 @@ pub fn clone_url(
     locals: &[LocalRepo],
     api_url: &str,
 ) -> String {
+    // A test's catalog may name a repository on this disk, so a clone
+    // runs without the network. A normal build never takes this way.
+    #[cfg(any(test, feature = "testing"))]
+    if api_url.starts_with("file://") {
+        return api_url.to_string();
+    }
     let ssh = match protocol {
         Protocol::Https => false,
         Protocol::Ssh => true,
@@ -929,6 +935,60 @@ pub fn move_checkout(
         Err(err) => return Err(format!("could not move {}: {err}", from.display())),
     }
     copy_then_delete(from, to, &mut on_line)
+}
+
+/// Whether two paths are on one volume, so that `move_checkout` between
+/// them is a rename and not a copy. A path that does not exist yet is
+/// judged by the nearest folder above it that does. None when it cannot
+/// be told: nothing of a path exists, or it cannot be read.
+///
+/// On Windows the drive letters or network shares are compared once the
+/// paths are made full; a volume mounted into a folder, or a drive made
+/// with `subst`, is not seen. On Unix the devices of the nearest existing
+/// folders are compared.
+pub fn same_volume(a: &Path, b: &Path) -> Option<bool> {
+    let nearest = |path: &Path| {
+        std::path::absolute(path)
+            .ok()?
+            .ancestors()
+            .find(|part| part.exists())
+            .map(Path::to_path_buf)
+    };
+    same_device(&nearest(a)?, &nearest(b)?)
+}
+
+#[cfg(windows)]
+fn same_device(a: &Path, b: &Path) -> Option<bool> {
+    use std::path::{Component, Prefix};
+    let volume = |path: &Path| match path.components().next()? {
+        Component::Prefix(prefix) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                Some(format!("{}:", char::from(letter).to_ascii_uppercase()))
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => Some(
+                format!(
+                    "\\\\{}\\{}",
+                    server.to_string_lossy(),
+                    share.to_string_lossy()
+                )
+                .to_lowercase(),
+            ),
+            _ => None,
+        },
+        _ => None,
+    };
+    Some(volume(a)? == volume(b)?)
+}
+
+#[cfg(unix)]
+fn same_device(a: &Path, b: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    Some(fs::metadata(a).ok()?.dev() == fs::metadata(b).ok()?.dev())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn same_device(_: &Path, _: &Path) -> Option<bool> {
+    None
 }
 
 /// The slow way to move a folder: copies everything to `to`, a path that
@@ -2888,7 +2948,7 @@ fn run_git(
     })
 }
 
-fn remove_tree(path: &Path) -> Result<(), String> {
+pub(crate) fn remove_tree(path: &Path) -> Result<(), String> {
     fn clear_readonly(path: &Path) {
         #[cfg(windows)]
         {
@@ -3580,6 +3640,43 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(pull_prefix(&names(&["main", "pulley"])), "pull");
         assert_eq!(pull_prefix(&names(&["main", "pull"])), "pull-request");
         assert_eq!(pull_prefix(&names(&["pull/7", "Pull-Request/x"])), "pr");
+    }
+
+    #[test]
+    fn two_folders_on_one_volume_are_told() {
+        let root = std::env::temp_dir().join(format!("devassist-volume-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("one")).unwrap();
+        fs::create_dir_all(root.join("two")).unwrap();
+        assert_eq!(
+            same_volume(&root.join("one"), &root.join("two")),
+            Some(true)
+        );
+        // A folder that is not there yet is judged by the nearest one that is.
+        let later = root.join("two").join("not").join("yet");
+        assert_eq!(same_volume(&root.join("one"), &later), Some(true));
+        if cfg!(windows) {
+            // Another drive letter is another volume, whether it exists or
+            // not; one that no folder of it can be found on is not known.
+            let here = root.display().to_string();
+            let drive = here.chars().next().unwrap().to_ascii_uppercase();
+            let other = if drive == 'C' { 'D' } else { 'C' };
+            let elsewhere = PathBuf::from(format!("{other}:\\"));
+            let told = same_volume(&root, &elsewhere.join("devassist-nowhere"));
+            if elsewhere.exists() {
+                assert_eq!(told, Some(false));
+            } else {
+                assert_eq!(told, None);
+            }
+            // Case does not matter, and a relative path is made full first.
+            let lower = PathBuf::from(here.to_lowercase());
+            assert_eq!(same_volume(&root, &lower), Some(true));
+            assert_eq!(
+                same_volume(Path::new("."), &std::env::current_dir().unwrap()),
+                Some(true)
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
