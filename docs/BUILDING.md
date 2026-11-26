@@ -55,7 +55,7 @@ frosted instead.
 | `--backdrop KEY` | The backdrop: `lake`, `midday`, `golden`, `dusk`, `night` or `forest` |
 | `--no-blur` | Does not blur the backdrop |
 | `--no-sidebar` | Opens with the sidebar hidden |
-| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder, no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. All work is held (see below). Folding a group writes only to a settings file of its own in a folder under the system's temporary folder, which is removed when the window closes |
+| `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder, no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. All work is held (see below). |
 | `--show NAME` | With `--demo` only: opens `progress`, `remove`, `group` or `menu` at start, so a picture can show it |
 
 At start the window reads `theme`, `backdrop` and `blur` from the settings

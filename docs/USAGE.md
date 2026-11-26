@@ -518,7 +518,7 @@ settings file that has a mistake it shows the mistake and loads nothing.
 | `←` `→` | Fold or unfold the highlighted group |
 | `Space` | Tick or untick the highlighted row and move down |
 | `Ctrl-A` | Tick every row shown |
-| `Enter` | Open the menu of the highlighted row, or fold the highlighted group |
+| `Enter` | Open the menu of the highlighted row, as its "…" does; on a group's header, fold the group (with rows ticked, open the menu for them) |
 | `u` | Update the ticked rows, or the highlighted row (all of a highlighted group) |
 | `U` | Update every repository |
 | `w` | Turn the automatic pull on or off for the ticked rows, or the highlighted row |
@@ -529,7 +529,7 @@ settings file that has a mistake it shows the mistake and loads nothing.
 | `s` | Change the sort |
 | `/` | Type in the filter |
 | `r`, `F5` | Fetch and read again |
-| `Esc` | Clear the filter when it lets nothing through, otherwise clear the ticks |
+| `Esc` | Clear the filter when it lets nothing through; else stop work that has no dialog, such as a deletion from disk; else clear the ticks |
 
 `U` is a capital letter. With Caps Lock on, `u` types `U` and updates every
 repository, as it does in the terminal app. A key that acts, such as `u`, `w`
@@ -540,16 +540,19 @@ A click on a row highlights it, on its box ticks it, on a group's header
 highlights and folds it, and on the box in the head ticks every row shown. A
 row's "…" opens its menu. If the row is not ticked, the menu is for that row
 alone and the other ticks are cleared; if it is ticked, the menu is for every
-ticked row. Above the table, "Update all" updates every repository. Once
-something is ticked, a bar there says how many, with Update, Move to group,
-Open folder and Remove, and a button that clears the ticks. A double click
+ticked row. In the top row, beside the window's own buttons, "Update all"
+updates every repository. Once something is ticked, a bar above the table says
+how many, with Update, Move to group, Open folder and Remove, and a button that
+clears the ticks. A double click on a button acts once. A double click on a row
 does not update, as it does in the terminal app.
 
 While the filter has the keyboard, `↑` `↓` and `PgUp` `PgDn` still move the
 highlight. `Home` and `End` belong to the text. `Tab` keeps the keyboard in the
 filter. `Esc` clears the filter. The other keys of the table, such as `r`,
 `u` and `d`, act only when the filter does not have the keyboard: there they
-are typed into the filter, and `F5` does nothing.
+are typed into the filter, and `F5` does nothing. When a dialog comes up by
+itself while you type in the filter, the filter has the keyboard again once
+the dialog goes.
 
 ### The menu
 
@@ -587,10 +590,14 @@ buttons, and `Enter` presses the main one.
   the button is Close. A run that went well closes the dialog by itself a
   moment after it ended; one that failed stays until you close it.
 - **Remove.** It names the repositories, up to three, then counts them, and
-  says for each folder whether it is clean or has uncommitted changes. Cancel
+  says for each folder whether it is clean or has uncommitted changes, or
+  "not read yet" while its state is not known (it is still being read, or
+  could not be read); a folder that is no longer on the list shows only its
+  name. Cancel
   leaves everything. Forget takes the repositories off the list and leaves
   their folders. Delete from disk deletes the folders, and the status line
-  says how it went; the repositories on GitHub are never touched. No button is the main one: `Enter` does nothing
+  says how it went; `Esc` on the list stops it. The repositories on GitHub are
+  never touched. No button is the main one: `Enter` does nothing
   until `Tab` has picked a button, and `Esc` cancels. On a group's header with
   nothing ticked, `d` does not dissolve the group as in the terminal app. It
   says "Pick repositories to remove."
@@ -601,7 +608,9 @@ buttons, and `Enter` presses the main one.
   name is 40 characters at most. On a group's header (`m`) the same dialog
   renames the group.
 
-`Esc` does not cancel a run; the Cancel button does.
+`Esc` does not cancel a run that has a progress dialog, shown or hidden; its
+Cancel button does (`l` brings a hidden one back). Work without a dialog, a
+deletion from disk or the automatic pull, stops with `Esc` on the list.
 
 ### The demo
 
