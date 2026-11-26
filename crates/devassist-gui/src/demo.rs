@@ -521,7 +521,12 @@ mod tests {
     }
 
     /// How often the process has reached out so far: programs, the clipboard, the network, folders deleted; and how
-    /// often this thread's dialogs asked the disk for folders.
+    /// often this thread's dialogs asked the disk for the folders a folder field suggests (`prompt::suggest`, through
+    /// `dialogs::folder_suggestions`), which a held session never does: it suggests the demo's own folders. Not
+    /// counted, and the reads that remain in a held session: the checks of a typed folder when Import's or Move's
+    /// Confirm or Add's Clone is pressed (`prompt::resolve`'s `is_file`, and `is_dir` for Import and Move), and the
+    /// Push dialog's `is_dir` of an address that is a plain full path (`gitops::push_address`, asked for its facts as
+    /// the text changes, and on Push).
     fn reached_now() -> [usize; 5] {
         use devassist_core::sys::{Reach, reached};
         let [program, clipboard, network, disk] = [Reach::Program, Reach::Clipboard, Reach::Network, Reach::Disk].map(reached);
@@ -561,12 +566,45 @@ mod tests {
         );
     }
 
-    /// Checks, after the press `what`, that the status line says what the demo says, or that the held core refused
-    /// what was asked (`HELD`), or that the core refused it for a reason of its own (an error, as a push for two).
-    fn says_held_or_nothing(window: &Window, what: &str) {
+    /// The core's words when Update all is asked for with no repositories on the list.
+    const NOTHING_TO_UPDATE: &str = "There are no repositories to update.";
+
+    /// What the status line may say after a press.
+    #[derive(Clone, Copy, Debug)]
+    enum Says<'a> {
+        /// The demo's own line, or that the held core refused what was asked (`HELD`).
+        HeldOrNothing,
+        /// That too, or this refusal of the core's in its own words: a press meant to be refused.
+        OrRefused(&'a str),
+    }
+
+    /// Checks, after the press `what`, that the status line says what `says` allows, and no other words: a refusal
+    /// only where the press is meant to be refused, and then in the core's exact words, and never an error otherwise.
+    fn check_said(window: &Window, what: &str, says: Says<'_>) {
         let repos = window.repos();
-        let said = repos.status == STATUS || repos.status == devassist_core::repos::state::HELD || repos.status_error;
-        assert!(said, "{what}: the status line says {:?}", repos.status);
+        let quiet = (repos.status == STATUS || repos.status == devassist_core::repos::state::HELD) && !repos.status_error;
+        let refused = matches!(says, Says::OrRefused(words) if repos.status == words && repos.status_error);
+        assert!(quiet || refused, "{what}: the status line says {:?} (an error: {}), allowed {says:?}", repos.status, repos.status_error);
+    }
+
+    /// Checks, after the press `what`, that the status line says the demo's line or the held notice, nothing else.
+    fn says_held_or_nothing(window: &Window, what: &str) {
+        check_said(window, what, Says::HeldOrNothing);
+    }
+
+    /// The core's words when a push is asked for with two repositories chosen (the menu's Push on the ticked api and
+    /// web): it pushes one repository at a time. Taken from the core on the demo as it starts.
+    fn push_for_two_refused() -> String {
+        let mut repos = repos();
+        repos.run_migrate(MigrateItem::Service);
+        assert!(repos.status_error && repos.service_prompt.is_none(), "the core did not refuse a push for two");
+        repos.status
+    }
+
+    /// Whether `press` asks the menu's side menu (open on api and web) for its Push line: its letter typed.
+    fn types_the_push_letter(press: &[Event]) -> bool {
+        let letter = MigrateItem::Service.key();
+        press.iter().any(|event| matches!(event, Event::Text(typed) if typed.eq_ignore_ascii_case(&letter.to_string())))
     }
 
     /// A key pressed with `modifiers`.
@@ -599,6 +637,7 @@ mod tests {
         click_everything_in_each_overlay(&mut window, before);
         type_into_every_field(&mut window, before);
         press_retry_in_add(&mut window, before);
+        open_each_overlay_in_turn_on_one_window(before);
     }
 
     /// Windows narrower than the app allows, where the top row gives way: its capsule's icons only, then the main
@@ -661,11 +700,50 @@ mod tests {
         overlays
     }
 
-    /// The walk's window on a fresh demo with the overlay `open` opened and `prepare` done.
+    /// The walk's window on a fresh demo with the overlay `open` opened and `prepare` done, showing what the walk's
+    /// step says it shows ([`shows_what_it_claims`]).
     fn fresh_overlay(window: &mut Window, name: &str, open: Opener, prepare: Prepare) {
         fresh(window, open);
         assert!(window.open(), "the {name} overlay did not open");
         prepare(window);
+        shows_what_it_claims(window, name);
+    }
+
+    /// Whether the last frame painted a text that starts with `words`.
+    fn painted(window: &Window, words: &str) -> bool {
+        window.texts.iter().any(|(said, _, _)| said.starts_with(words))
+    }
+
+    /// Checks that the overlay `name` of [`walked_overlays`] shows what its step presses: Add failed its Retry and the
+    /// row that lists the typed account (the Add dialog's own words, `List github.com/{word}`); Add searched the line
+    /// that names the ticked repository the search hides; the menu with its side menu that pane and its two lines;
+    /// the Add dialog's folder field its rows; each dialog its own kind.
+    fn shows_what_it_claims(window: &Window, name: &str) {
+        let dialog = match name {
+            "progress" => Which::Progress,
+            "remove" => Which::Remove,
+            "group" => Which::Group,
+            "menu" | "migrate" => Which::Menu,
+            "import" | "move" => Which::Folder,
+            "push" => Which::Push,
+            _ => Which::Add,
+        };
+        assert!(window.shows(dialog), "the {name} overlay is no {dialog:?}");
+        match name {
+            "add failed" => {
+                assert!(window.add_retry().is_some(), "add failed: no Retry");
+                assert!(painted(window, "List github.com/zzzz"), "add failed: no row that lists zzzz");
+            }
+            "add searched" => assert!(painted(window, "Also ticked: acme/artcraft"), "add searched: no line of the hidden tick"),
+            "migrate" => {
+                assert!(window.submenu_pane().is_some(), "migrate: the side menu is not drawn");
+                for item in MigrateItem::ALL {
+                    assert!(painted(window, item.label()), "migrate: the side menu has no {}", item.label());
+                }
+            }
+            ADD_FOLDER => assert!(window.add_folder_rows_open(), "add-folder: the folder field's rows are not shown"),
+            _ => {}
+        }
     }
 
     /// Every key there is, alone and with Shift, Ctrl or Alt, and every letter, figure and sign typed, each with
@@ -715,6 +793,7 @@ mod tests {
     fn press_every_key_in_each_overlay(window: &mut Window, before: [usize; 5]) {
         let inputs = every_input();
         let enter = vec![key_event(Key::Enter, Modifiers::NONE, true)];
+        let push_refused = push_for_two_refused();
         for (name, open, prepare) in walked_overlays() {
             for (press, release) in &inputs {
                 fresh_overlay(window, name, open, prepare);
@@ -724,8 +803,11 @@ mod tests {
                 let what = format!("{press:?} in the {name} overlay");
                 let asks = *press == enter && ["add", "push"].contains(&name);
                 still_held(window, &what, if asks { Expect::Held } else { Expect::Free }, before);
-                // The older overlays change what a demo changes in memory, and say so (a group moved).
-                if !OLDER_OVERLAYS.contains(&name) {
+                // The older overlays change what a demo changes in memory, and say so (a group moved). In the side menu
+                // on api and web, its Push letter is refused: one repository is pushed at a time.
+                if name == "migrate" && types_the_push_letter(press) {
+                    check_said(window, &what, Says::OrRefused(&push_refused));
+                } else if !OLDER_OVERLAYS.contains(&name) {
                     says_held_or_nothing(window, &what);
                 }
             }
@@ -782,8 +864,23 @@ mod tests {
                 };
                 still_held(window, &what, expect, before);
                 // The top row's controls are this plan's; the others may say what they changed in memory (a sort).
+                // Each landed: "Add repository" opens Add, the capsule's first ("Import", or its icon) Import, its
+                // second ("Update all") is refused by the held core, saying so.
+                if *rect == main {
+                    assert!(window.shows(Which::Add), "{what}: no Add dialog");
+                } else if capsule.contains_rect(*rect) {
+                    let first = controls.iter().find(|(_, place)| capsule.contains_rect(*place)).is_some_and(|(_, place)| place == rect);
+                    if first {
+                        assert!(window.shows(Which::Folder) && window.repos().prompt.is_some(), "{what}: no Import dialog");
+                    } else {
+                        // With repositories the held core refuses the update; with none the core refuses it for that.
+                        assert!(!window.open(), "{what}: a dialog opened");
+                        let words = if empty { NOTHING_TO_UPDATE } else { devassist_core::repos::state::HELD };
+                        assert_eq!(window.repos().status, words, "{what}: Update all was not refused");
+                    }
+                }
                 if capsule.contains_rect(*rect) || *rect == main {
-                    says_held_or_nothing(window, &what);
+                    check_said(window, &what, if empty { Says::OrRefused(NOTHING_TO_UPDATE) } else { Says::HeldOrNothing });
                 }
             }
         }
@@ -1035,7 +1132,7 @@ mod tests {
             // Esc, Enter, Tab and the arrows in it too.
             for key in [Key::Tab, Key::ArrowDown, Key::ArrowUp, Key::Enter, Key::Escape] {
                 fresh(window, open);
-                window.key(key);
+                tap(window, key, None);
                 still_held(window, &format!("{key:?} in the {name} dialog"), Expect::Free, before);
             }
         }
@@ -1054,6 +1151,7 @@ mod tests {
     /// each clicked and double-clicked on a fresh demo with that overlay open. Nothing runs, is written or reaches out,
     /// and the status line says only the demo's words, or that the held core refused what was asked.
     fn click_everything_in_each_overlay(window: &mut Window, before: [usize; 5]) {
+        let push_refused = push_for_two_refused();
         // The older overlays' buttons are pressed by name ([`press_every_button_of_the_dialogs`]).
         for (name, open, prepare) in walked_overlays().into_iter().filter(|(name, ..)| !OLDER_OVERLAYS.contains(name)) {
             fresh_overlay(window, name, open, prepare);
@@ -1065,6 +1163,10 @@ mod tests {
             if name.starts_with("add") && name != "add failed" {
                 assert!(!window.add_boxes().is_empty(), "the {name} overlay has no checkbox");
             }
+            // The side menu's Push line, on api and web: refused, one repository is pushed at a time.
+            let push_line = window
+                .submenu_pane()
+                .map(|side| menu::side_line_rects(side)[MigrateItem::ALL.iter().position(|item| *item == MigrateItem::Service).unwrap()]);
             for at in points {
                 for double in [false, true] {
                     fresh_overlay(window, name, open, prepare);
@@ -1075,7 +1177,11 @@ mod tests {
                     window.frame(Vec::new());
                     let what = format!("a {}click at {at:?} in the {name} overlay", if double { "double " } else { "" });
                     still_held(window, &what, Expect::Free, before);
-                    says_held_or_nothing(window, &what);
+                    if push_line.is_some_and(|line| line.contains(at)) {
+                        check_said(window, &what, Says::OrRefused(&push_refused));
+                    } else {
+                        says_held_or_nothing(window, &what);
+                    }
                 }
             }
         }
@@ -1114,12 +1220,16 @@ mod tests {
                         window.frame(vec![key_event(Key::A, Modifiers::COMMAND, true)]);
                         window.frame(vec![key_event(Key::A, Modifiers::COMMAND, false)]);
                     }
+                    let was = field_text(window, name);
                     window.frame(vec![Event::Text(words.clone())]);
                     window.frame(Vec::new());
                     let what = format!("{words:?} typed into the {name} dialog{}", if over { " over its text" } else { "" });
+                    // The words reached the field's owner: the core's search, folder or address, or Add's folder.
+                    let now = field_text(window, name);
+                    let wanted = if over { words.clone() } else { format!("{was}{words}") };
+                    assert_eq!(now, wanted, "{what}: the text did not reach the field (it held {was:?})");
                     still_held(window, &what, Expect::Free, before);
-                    window.key(Key::Enter);
-                    window.frame(Vec::new());
+                    tap(window, Key::Enter, None);
                     let what = format!("{what}, then Enter");
                     still_held(window, &what, Expect::Free, before);
                     says_held_or_nothing(window, &what);
@@ -1128,13 +1238,27 @@ mod tests {
         }
     }
 
+    /// The text of the field the dialog `name` of [`type_into_every_field`] has the keyboard in, where its owner keeps
+    /// it: the core's search (`add_filter`), Add's folder field (the dialog's own), the core's folder question
+    /// (Import, Move) or its push address.
+    fn field_text(window: &Window, name: &str) -> String {
+        let repos = window.repos();
+        match name {
+            "add" => repos.add_filter.clone(),
+            ADD_FOLDER => window.add_folder_text().expect("Add is not open"),
+            "import" | "move" => repos.prompt.as_ref().expect("no folder question").input.clone(),
+            _ => repos.service_prompt.as_ref().expect("no push question").input.clone(),
+        }
+    }
+
     /// Retry in the Add dialog, with GitHub failed (the test's seam: the catalog's failed state): clicked,
-    /// double-clicked, and pressed by Enter once Tab gave it the focus. The held core asks GitHub nothing, and Add stays
-    /// open on its failed state.
+    /// double-clicked, and pressed by Enter once Tab gave it the focus. The held core asks GitHub nothing and says so
+    /// (`HELD`: the press landed on Retry), and Add stays open on its failed state.
     fn press_retry_in_add(window: &mut Window, before: [usize; 5]) {
         for by in ["a click", "a double click", "Enter"] {
             fresh(window, show_add_failed);
             let retry = window.add_retry().expect("no Retry beside the failed status");
+            assert_ne!(window.repos().status, devassist_core::repos::state::HELD, "held before Retry");
             match by {
                 "a click" => window.click(retry.center()),
                 "a double click" => {
@@ -1142,8 +1266,8 @@ mod tests {
                     window.click(retry.center());
                 }
                 _ => {
-                    window.key(Key::Tab);
-                    window.key(Key::Enter);
+                    tap(window, Key::Tab, None);
+                    tap(window, Key::Enter, None);
                 }
             }
             window.frame(Vec::new());
@@ -1151,9 +1275,110 @@ mod tests {
             assert!(window.shows(Which::Add), "{what}: Add closed");
             let failed = matches!(window.repos().remotes_state, devassist_core::repos::state::RemoteState::Failed(_));
             assert!(failed, "{what}: the catalog is no longer failed");
-            still_held(window, &what, Expect::Free, before);
-            says_held_or_nothing(window, &what);
+            still_held(window, &what, Expect::Held, before);
         }
+    }
+
+    /// A press of `key` (typing `text`), its release, and a frame.
+    fn tap(window: &mut Window, key: Key, text: Option<&str>) {
+        let mut press = vec![key_event(key, Modifiers::NONE, true)];
+        press.extend(text.map(|text| Event::Text(text.to_owned())));
+        window.frame(press);
+        window.frame(vec![key_event(key, Modifiers::NONE, false)]);
+        window.frame(Vec::new());
+    }
+
+    /// A second later on egui's clock, so the next click is no double click with the last.
+    fn pause(window: &mut Window) {
+        let now = window.ctx.input(|input| input.time);
+        window.frame_at(Vec::new(), Some(now + 1.0));
+    }
+
+    /// Opens the menu by the "…" of `row` and its side menu by its letter, on `window` as it is.
+    fn open_side_menu_on(window: &mut Window, row: &str) {
+        pause(window);
+        let lines = crate::repos_view::lines(window.repos());
+        let dots = table::dots_rect(window.layout().panel, &lines, 0.0, row).unwrap();
+        window.click(dots.center());
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Menu), "no menu on {row}");
+        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Update), "the menu on {row} opened on a stale line");
+        assert_eq!(window.repos().migrate_highlight(), None, "the menu on {row} opened with its side menu");
+        tap(window, Key::T, Some("t"));
+        assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "the side menu on {row} did not open");
+        assert!(window.submenu_pane().is_some(), "the side menu on {row} is not drawn");
+    }
+
+    /// One window, never restarted, through every new overlay in a row, each closed before the next opens: the menu
+    /// with its side menu (closed by Esc held over several frames, then the menu by a fresh Esc), Add (typed into, its
+    /// folder field's rows closed by Esc, then closed by Esc), Add again (its search empty, its folder field's rows
+    /// shown again), Import, Move, Push, and the menu again. Each opens clean (no stale highlight, no closed rows, a
+    /// fresh key acts in it), and nothing runs, is written or reaches out.
+    fn open_each_overlay_in_turn_on_one_window(before: [usize; 5]) {
+        // The clone folder the demo's Add offers, so Add's folder field suggests the demo's folders as it opens.
+        let mut start = repos();
+        start.clone_dir = PathBuf::from(CLONE_DIR);
+        let mut window = Window::new(crate::session::Session::demo(start));
+        window.frame(Vec::new());
+        let window = &mut window;
+        // The menu and its side menu; Esc held closes the side menu only, a fresh Esc the menu.
+        open_side_menu_on(window, "homelab");
+        window.frame(vec![key_event(Key::Escape, Modifiers::NONE, true)]);
+        for _ in 0..4 {
+            window.frame(vec![Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE }]);
+            assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_none(), "a held Esc closed more than the side menu");
+        }
+        window.frame(vec![key_event(Key::Escape, Modifiers::NONE, false)]);
+        tap(window, Key::Escape, None);
+        assert!(!window.open(), "a fresh Esc left the menu open");
+        still_held(window, "the menu in turn", Expect::Free, before);
+        // Add: typed into, its folder field's rows closed by Esc, closed by Esc.
+        for round in 0..2 {
+            tap(window, Key::A, Some("a"));
+            assert!(window.shows(Which::Add), "a opened no Add ({round})");
+            assert_eq!(window.repos().add_filter, "", "Add opened with a stale search ({round})");
+            tap(window, Key::R, Some("r"));
+            assert_eq!(window.repos().add_filter, "r", "a fresh letter did not type ({round})");
+            tap(window, Key::Tab, None);
+            assert!(window.add_folder_rows_open(), "Add's folder field's rows stayed closed ({round})");
+            tap(window, Key::Escape, None);
+            assert!(window.shows(Which::Add) && !window.add_folder_rows_open(), "Esc did not close the rows ({round})");
+            tap(window, Key::Escape, None);
+            assert!(!window.open(), "a fresh Esc left Add open ({round})");
+            still_held(window, &format!("Add in turn ({round})"), Expect::Free, before);
+        }
+        // Import: typed into, closed by Esc.
+        tap(window, Key::I, Some("i"));
+        assert!(window.shows(Which::Folder), "i opened no Import");
+        let typed = window.repos().prompt.as_ref().unwrap().input.clone();
+        tap(window, Key::X, Some("x"));
+        assert_eq!(window.repos().prompt.as_ref().unwrap().input, format!("{typed}x"), "a fresh letter did not type in Import");
+        tap(window, Key::Escape, None);
+        assert!(!window.open(), "Esc left Import open");
+        still_held(window, "Import in turn", Expect::Free, before);
+        // Move, by the side menu on the ticked api (api and web), and Push by the side menu on homelab alone.
+        for (row, item, dialog) in [("api", MigrateItem::Folder, Which::Folder), ("homelab", MigrateItem::Service, Which::Push)] {
+            open_side_menu_on(window, row);
+            let letter = item.key().to_string();
+            tap(window, Key::from_name(&letter.to_uppercase()).unwrap(), Some(&letter));
+            assert!(window.shows(dialog), "the side menu's {item:?} opened no {dialog:?}");
+            tap(window, Key::Escape, None);
+            if dialog == Which::Folder {
+                // Move's field opens at the demo's clone folder, whose folders it suggests: Esc closes those rows first.
+                assert!(window.shows(dialog), "the first Esc closed Move, not its rows");
+                tap(window, Key::Escape, None);
+            }
+            assert!(!window.open(), "Esc left {dialog:?} open");
+            still_held(window, &format!("{dialog:?} in turn"), Expect::Free, before);
+            says_held_or_nothing(window, &format!("{dialog:?} in turn"));
+        }
+        // The menu again: on its first line, its side menu closed, and a fresh Esc closes it.
+        open_side_menu_on(window, "homelab");
+        tap(window, Key::Escape, None);
+        tap(window, Key::Escape, None);
+        assert!(!window.open(), "a fresh Esc left the menu open at the end");
+        still_held(window, "the menu again", Expect::Free, before);
+        says_held_or_nothing(window, "the menu again");
     }
 
     fn pos(x: f32, y: f32) -> egui::Pos2 {

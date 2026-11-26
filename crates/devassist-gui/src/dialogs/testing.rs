@@ -106,7 +106,7 @@ impl Window {
         }
     }
 
-    /// The window on `session` from now on, as a fresh one starts: the screen, the dialogs, the keyboard's focus and
+    /// The window on `session` from now on, as a fresh one starts: no key down, the screen, the dialogs, the keyboard's focus and
     /// what the window's controls keep in egui (a folder field's rows closed by Esc, an overlay's opening) as they are
     /// in a new window, and two frames drawn, so an overlay of what was there before has closed.
     pub(crate) fn restart(&mut self, session: Session) {
@@ -119,9 +119,12 @@ impl Window {
             }
         });
         self.ctx.data_mut(egui::util::IdTypeMap::clear);
-        // A second later on egui's clock: no click made before is part of a double click with the next one.
+        // A second later on egui's clock, with every key let go that a step left down: no click made before is part of
+        // a double click with the next one, and no key is down as the new window's overlay opens.
         let now = self.ctx.input(|input| input.time);
-        self.frame_at(Vec::new(), Some(now + 1.0));
+        let down: Vec<Key> = self.ctx.input(|input| input.keys_down.iter().copied().collect());
+        let released = down.into_iter().map(|key| Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+        self.frame_at(released.collect(), Some(now + 1.0));
         self.frame(Vec::new());
     }
 
@@ -269,6 +272,11 @@ impl Window {
         let found = super::add_rows(places.list, self.repos(), &self.dialogs);
         let x = places.list.left() + crate::theme::ADD_ROW_PAD + crate::theme::CHECKBOX / 2.0;
         found.iter().map(|(row, _)| pos2(x, row.center().y)).filter(|at| places.list.contains(*at)).collect()
+    }
+
+    /// The Add dialog's folder field's text, as the dialog keeps it, while Add is open.
+    pub(crate) fn add_folder_text(&self) -> Option<String> {
+        self.dialogs.add.as_ref().map(|state| state.folder_text().to_owned())
     }
 
     /// Whether the Add dialog's folder field has the keyboard and shows its rows of folders in the last frame.

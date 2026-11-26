@@ -363,6 +363,8 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
     let done = keyed(&events, on_side, &mut at, &mut side_at, done.or(outside.then_some(Done::Close)));
     if leave {
         repos.close_migrate();
+        // As every other way it closes: a key down now (one held since before it opened) is not the menu's.
+        overlay::close_submenu(ui.ctx());
     }
     if let Some(at) = at {
         repos.highlight_menu(SHOWN[at]);
@@ -1559,6 +1561,51 @@ mod tests {
         window.frame_at(vec![key_down(Key::Escape, false)], Some(4.4));
         assert!(window.repos().mode == CoreMode::List, "a fresh Esc left the menu open");
         assert_ne!(window.repos().status, HELD);
+    }
+
+    #[test]
+    fn a_key_held_as_the_pointer_closes_the_side_menu_does_nothing_in_the_menu() {
+        // Esc and `t` held while the pointer moves from the side menu onto another line of the menu, which closes the
+        // side menu: their repeats, and `t`'s text, are not the menu's while they stay down. Esc is held from before the
+        // side menu opened (by a click on Migrate), so the side menu itself took none of its presses.
+        for (key, text) in [(Key::Escape, None), (Key::T, Some("t"))] {
+            let pressed = |repeat| {
+                let mut events = vec![key_down(key, repeat)];
+                events.extend(text.map(|text: &str| Event::Text(text.to_owned())));
+                events
+            };
+            let mut window = demo();
+            open_at_time(&mut window, "homelab");
+            let lines = rows(&window);
+            let migrate = lines[migrate_line()].center();
+            if key == Key::Escape {
+                // Opened, then closed by Esc held down, then opened again by a click while Esc stays down.
+                click_at_time(&mut window, migrate, 2.0);
+                window.frame_at(Vec::new(), Some(2.1));
+                window.frame_at(pressed(false), Some(2.5));
+                assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_none(), "Esc did not close the side menu");
+                window.frame_at(pressed(true), Some(2.6));
+                click_at_time(&mut window, migrate, 4.0);
+            } else {
+                // Opened by `t`, which stays down.
+                window.frame_at(pressed(false), Some(4.0));
+            }
+            window.frame_at(pressed(true), Some(4.1));
+            window.frame_at(pressed(true), Some(4.15));
+            assert!(window.repos().migrate_highlight().is_some(), "{key:?}: the side menu is not open");
+            // The pointer onto another line closes it; the key is still down.
+            window.frame_at(vec![Event::PointerMoved(lines[1].center())], Some(4.2));
+            assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_none(), "{key:?}: the pointer did not close the side menu");
+            for (index, at) in [4.3, 4.35, 4.4, 4.45].into_iter().enumerate() {
+                window.frame_at(pressed(true), Some(at));
+                assert!(window.shows(Which::Menu), "{key:?} held closed the menu ({index})");
+                assert!(window.repos().migrate_highlight().is_none(), "{key:?} held opened the side menu again ({index})");
+            }
+            window.frame_at(vec![key_up(key)], Some(4.5));
+            window.frame_at(Vec::new(), Some(4.6));
+            assert!(window.shows(Which::Menu), "{key:?}: its release closed the menu");
+            assert_ne!(window.repos().status, HELD);
+        }
     }
 
     #[test]

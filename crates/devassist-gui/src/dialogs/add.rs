@@ -96,6 +96,12 @@ pub(super) struct State {
 }
 
 impl State {
+    /// The folder field's text as the dialog keeps it.
+    #[cfg(test)]
+    pub(super) fn folder_text(&self) -> &str {
+        &self.folder
+    }
+
     /// The state of an Add dialog that opens on `repos`: the folder field at the core's `clone_dir`, and the
     /// folders that match it, asked for once (a text the dialog sets itself is never typed, so the field never
     /// says it changed).
