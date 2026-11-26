@@ -345,6 +345,9 @@ struct FolderRows {
     text: String,
     /// The rows were drawn in the last frame.
     shown: bool,
+    /// The rows were drawn in the last frame with the room for one whole row at least: only then do the keys go to
+    /// them, so Down and Enter never take a folder nobody could see.
+    seen: bool,
     /// The keys the rows took while they are held: their repeats are the rows' too, and reach nothing else.
     held: Vec<Key>,
     /// The pass the field was last drawn in ([`Context::cumulative_pass_nr`]).
@@ -472,7 +475,9 @@ const FOLDER_HINT: &str = "Folder";
 /// `suggestions` are the caller's: full folder paths that match the text (the core's `Repos::path_suggestions`),
 /// asked for again only when [`FolderDid::changed`] says so. `id` names the field, so it can be given the focus.
 ///
-/// The keyboard, while the rows show: Down moves the light into the rows and down them (it stays on the last), Up
+/// The keyboard, while the rows show (they were drawn in the last frame with the room for one whole row at least;
+/// rows cut shorter than that take no key, which stays the field's or the dialog's): Down moves the light into the
+/// rows and down them (it stays on the last), Up
 /// back up and from the first back into the field; the lit row is scrolled into view, and new suggestions light
 /// none. Enter takes the lit row. With none lit, Enter is left to the dialog, and the field keeps the focus (egui's
 /// own would give it up), so a person can type on when the dialog refuses the folder. A click takes a row
@@ -512,7 +517,7 @@ pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[S
     }
     let focused = ui.memory(|memory| memory.has_focus(id));
     let mut did = FolderDid::default();
-    if focused && !rows.closed && !suggestions.is_empty() {
+    if focused && rows.seen && !rows.closed && !suggestions.is_empty() {
         let mut held = Vec::new();
         let mut take = |ui: &mut Ui, key: Key| {
             let taken = ui.input_mut(|input| input.consume_key(Modifiers::NONE, key));
@@ -588,6 +593,7 @@ pub fn folder_field(ui: &mut Ui, rect: Rect, text: &mut String, suggestions: &[S
         }
     }
     rows.shown = show;
+    rows.seen = show && inset.height() >= FOLDER_INSET_PAD + FOLDER_ROW;
     rows.pass = ctx.cumulative_pass_nr();
     did.changed = *text != rows.text;
     rows.text.clone_from(text);
@@ -1114,6 +1120,42 @@ pub(crate) mod tests {
         fn row(&self, index: usize) -> Pos2 {
             let field = self.shown.last().unwrap().field;
             folder_row(folder_inset(field, self.suggestions.len()), index, self.rows().scroll).center()
+        }
+    }
+
+    #[test]
+    fn rows_with_no_room_for_one_whole_row_take_no_key() {
+        // A field whose dialog leaves its rows a sliver: Down then Enter would take a folder nobody saw. They take no
+        // key, and Enter is left to the dialog; given the room for a row, the same keys take it.
+        let text = path(&["D:", "code", ""]);
+        let suggestions = matching(&folders(), &text);
+        assert!(suggestions.len() > 1);
+        let sliver = DIALOG_FIELD_HEIGHT + FOLDER_GAP + FOLDER_INSET_PAD + FOLDER_ROW / 4.0;
+        for (height, takes) in [(sliver, false), (folder_field_height(suggestions.len()), true)] {
+            let ctx = context();
+            let rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(480.0, height));
+            let mut text = text.clone();
+            let mut took = Vec::new();
+            let mut enter_left = Vec::new();
+            for key in [None, None, Some(egui::Key::ArrowDown), Some(egui::Key::Enter)] {
+                let events = key.map_or_else(Vec::new, |key| {
+                    vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]
+                });
+                let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), events, ..Default::default() };
+                ctx.run_ui(input, |ui| {
+                    ui.memory_mut(|memory| memory.request_focus(folder_id()));
+                    let did = folder_field(ui, rect, &mut text, &suggestions, theme::palette(Mode::Light), folder_id());
+                    took.extend(did.took);
+                    enter_left.push(ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                })
+                .drop_without_applying_deltas();
+            }
+            if takes {
+                assert_eq!(took, [suggestions[0].clone()], "the rows in view did not take Down and Enter");
+            } else {
+                assert!(took.is_empty(), "rows with no room took {took:?}");
+                assert_eq!(enter_left.last(), Some(&true), "the Enter went to rows nobody saw");
+            }
         }
     }
 
