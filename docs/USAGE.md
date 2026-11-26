@@ -407,10 +407,22 @@ or a server of your own:
    `git@codeberg.org:you/name.git`.
 3. `Enter` pushes. The progress dialog shows what Git sends.
 
-Every branch and every tag goes over. A branch is taken from what was last
-fetched from GitHub when the local one is missing or only behind, so press `r`
-first to have the newest state. The default branch is pushed first, which makes
-it the default one over there on most services.
+Every branch, every tag and every pull request goes over. DevAssist fetches
+from GitHub first, the pull requests too, whatever the **Pull requests**
+setting says, so the copy has what GitHub has now. A branch is taken from
+GitHub when the local one is missing or only behind. The default branch is
+pushed first, which makes it the default one over there on most services.
+
+A pull request arrives as a branch named `pull/<number>`: open, merged and
+closed ones alike, also those from forks and those whose branch is deleted.
+Git cannot create a pull request on another service, so the title, the
+description and the comments do not go over; from the branch you can open a
+merge request there. When a branch of your own is called `pull` or starts
+with `pull/`, the branches are named `pull-request/<number>` instead. Doing
+it again moves each of these branches to where its pull request is now.
+
+When GitHub cannot be reached, or the repository is gone there, the push
+still happens with what is saved in the checkout, and the last line says so.
 
 The repository itself does not change: it keeps GitHub as its origin and stays
 on the list as before. The address is kept as one more remote, named after the

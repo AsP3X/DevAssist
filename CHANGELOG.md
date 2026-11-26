@@ -62,6 +62,11 @@ What changed in each version of DevAssist. The format follows
   branch and tag there, without forcing anything. The repository keeps
   GitHub as its origin, and the address is kept as a remote named after the
   host, so the copy can be brought up to date again.
+- **Pushing to another service takes every pull request and the newest
+  branches along.** It fetches from GitHub first, so branches and pull
+  requests that were not fetched yet are not left behind, and pushes each
+  pull request as a branch `pull/<number>`. Before, only the branches and
+  tags the checkout had already fetched went over, and no pull request.
 - **The overview has a column for pull requests.** `pulls` shows how many
   pull requests a repository has on GitHub by state, such as `○2 ✓14 ✕3`:
   open in green, merged in purple, closed without a merge in red. The line

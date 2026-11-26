@@ -1283,8 +1283,8 @@ fn draw_service(frame: &mut Frame, app: &mut App, screen: Rect) {
         None => {
             for note in [
                 "such as https://gitlab.com/you/name.git or git@codeberg.org:you/name.git",
-                "Every branch and tag is pushed. Nothing is forced, and nothing changes",
-                "here: the repository keeps GitHub as its origin.",
+                "Every branch, tag and pull request goes over, pull requests as branches",
+                "pull/<number>. The repository here keeps GitHub as its origin.",
             ] {
                 lines.push(Line::from(Span::styled(fit(note, width), dim)));
             }

@@ -1513,8 +1513,9 @@ impl Repos {
         self.submit(Queued::Service(prompt.repo, prompt.path, url));
     }
 
-    /// Pushes every branch and tag of one checkout to another service, in
-    /// the progress dialog. The checkout itself stays as it is.
+    /// Pushes every branch, tag and pull request of one checkout to
+    /// another service, in the progress dialog, after fetching what origin
+    /// has now. The checkout keeps its files and its origin.
     fn push_to_service(&mut self, name: String, path: PathBuf, url: String) {
         let host = gitops::address_host(&url).unwrap_or_else(|| url.clone());
         let job = gitprogress::job(format!("Pushing {name} to {host}"), vec![name.clone()], 0);
@@ -1523,19 +1524,15 @@ impl Repos {
             Some(job),
             move |tx| {
                 send(tx, JobEvent::Start(0));
-                let done = gitops::migrate_to(&path, &url, |line, progress| {
+                let token = github::token();
+                let done = gitops::migrate_to(&path, &url, token.as_deref(), |line, progress| {
                     send_line(tx, line, progress)
                 })?;
-                let count = |count: u32, one: &str, many: &str| match count {
-                    1 => format!("1 {one}"),
-                    count => format!("{count} {many}"),
-                };
-                Ok(format!(
-                    "Pushed {name} to {host}: {} and {}. The address is kept as the remote {}.",
-                    count(done.branches, "branch", "branches"),
-                    count(done.tags, "tag", "tags"),
-                    done.remote
-                ))
+                // The fetch before the push saved the pull requests too.
+                if done.stale.is_none() {
+                    let _ = tx.send(Msg::PullsSaved(path.clone()));
+                }
+                Ok(service_summary(&name, &host, &done))
             },
         );
     }
@@ -4186,6 +4183,34 @@ fn pulls_key(owner: &str, repo: &str) -> String {
     format!("{owner}/{repo}").to_lowercase()
 }
 
+/// The line that says what a push to another service took over.
+fn service_summary(name: &str, host: &str, done: &gitops::Migrated) -> String {
+    let count = |count: u32, one: &str, many: &str| match count {
+        1 => format!("1 {one}"),
+        count => format!("{count} {many}"),
+    };
+    let pulls = match done.pulls {
+        0 => "no pull requests".to_string(),
+        pulls => format!(
+            "{} as branches {}/<number>",
+            count(pulls, "pull request", "pull requests"),
+            done.pull_prefix
+        ),
+    };
+    let mut text = format!(
+        "Pushed {name} to {host}: {}, {} and {pulls}. The address is kept as the remote {}.",
+        count(done.branches, "branch", "branches"),
+        count(done.tags, "tag", "tags"),
+        done.remote
+    );
+    if let Some(why) = &done.stale {
+        text.push_str(&format!(
+            " Origin could not be fetched first ({why}), so this is what was saved here."
+        ));
+    }
+    text
+}
+
 fn count_label(count: usize) -> String {
     if count == 1 {
         "1 repository".to_string()
@@ -4288,6 +4313,30 @@ pub mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+
+    #[test]
+    fn the_line_after_a_push_to_a_service_counts_the_pull_requests() {
+        let mut done = gitops::Migrated {
+            remote: "gitlab".into(),
+            branches: 3,
+            tags: 1,
+            pulls: 19,
+            pull_prefix: "pull".into(),
+            stale: None,
+        };
+        assert_eq!(
+            service_summary("api", "gitlab.com", &done),
+            "Pushed api to gitlab.com: 3 branches, 1 tag and 19 pull requests as branches pull/<number>. The address is kept as the remote gitlab."
+        );
+        done.pulls = 0;
+        done.stale = Some("could not reach github.com".into());
+        let text = service_summary("api", "gitlab.com", &done);
+        assert!(text.contains("1 tag and no pull requests."), "{text}");
+        assert!(
+            text.ends_with("(could not reach github.com), so this is what was saved here."),
+            "{text}"
+        );
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let root =

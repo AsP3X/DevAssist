@@ -605,6 +605,29 @@ pub struct Migrated {
     pub remote: String,
     pub branches: u32,
     pub tags: u32,
+    /// Saved pull requests that went over, each as a branch.
+    pub pulls: u32,
+    /// What those branches start with: "pull" for `pull/<number>`.
+    pub pull_prefix: String,
+    /// Why origin could not be asked for its newest state first. What
+    /// was pushed is then what the checkout had saved.
+    pub stale: Option<String>,
+}
+
+/// The start of the branch names saved pull requests are pushed under:
+/// the first one that cannot collide with a branch there is.
+fn pull_prefix(branches: &[String]) -> &'static str {
+    const PREFIXES: [&str; 4] = ["pull", "pull-request", "pr", "devassist-pull"];
+    let taken = |prefix: &str| {
+        branches.iter().any(|branch| {
+            let branch = branch.to_ascii_lowercase();
+            branch == prefix || branch.starts_with(&format!("{prefix}/"))
+        })
+    };
+    PREFIXES
+        .into_iter()
+        .find(|prefix| !taken(prefix))
+        .unwrap_or("devassist-pull")
 }
 
 /// Checks an address a repository is to be pushed to, and tidies it.
@@ -691,16 +714,43 @@ fn git_lines(path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Fetches what origin has now for a migration: its branches and tags, and
+/// the commits of every pull request. Nothing is pruned.
+fn fetch_for_migration(
+    path: &Path,
+    token: Option<&str>,
+    mut on_line: impl FnMut(&str, bool),
+) -> Result<(), String> {
+    let mut args = auth_args(token);
+    args.extend([
+        OsString::from("-C"),
+        path.as_os_str().to_os_string(),
+        OsString::from("fetch"),
+        OsString::from("--no-prune"),
+        OsString::from("--recurse-submodules=no"),
+        OsString::from("--progress"),
+        OsString::from("origin"),
+    ]);
+    run_git(args, &mut on_line)?;
+    fetch_pull_requests(path, token, true, &mut on_line)
+}
+
 /// Pushes a complete copy of a checkout to `url`, a repository on another
-/// service: every branch and every tag. A branch is taken from origin
-/// where the local one is missing or only behind, so nothing that was
-/// fetched stays behind. Nothing is forced, and the checkout keeps its
+/// service: every branch, every tag and every pull request. Origin is
+/// fetched first, pull requests included, so the copy has what origin has
+/// now; when origin cannot be reached, what the checkout has saved goes
+/// over and the result says why. A branch is taken from origin where the
+/// local one is missing or only behind. A pull request goes over as a
+/// branch, `pull/<number>`: no service lets a push make a pull request.
+/// No branch or tag is forced; the branches of pull requests are, since
+/// they follow what the pull request is now. The checkout keeps its
 /// origin; the address is remembered as one more remote, named after the
-/// host. The sign-in for GitHub is not sent along: the other service
-/// uses what Git has for it, a saved login or an SSH key.
+/// host. `token` signs in to origin only: the other service uses what Git
+/// has for it, a saved login or an SSH key.
 pub fn migrate_to(
     path: &Path,
     url: &str,
+    token: Option<&str>,
     mut on_line: impl FnMut(&str, bool),
 ) -> Result<Migrated, String> {
     let url = push_address(url)?;
@@ -719,6 +769,13 @@ pub fn migrate_to(
     if origin.as_deref().is_some_and(|origin| same(origin, &url)) {
         return Err("That is the address the repository has already.".into());
     }
+    let stale = match origin {
+        Some(_) => fetch_for_migration(path, token, &mut on_line).err(),
+        None => None,
+    };
+    if process::was_cancelled() {
+        return Err("cancelled".into());
+    }
 
     let refs = git_lines(
         path,
@@ -728,11 +785,15 @@ pub fn migrate_to(
             "refs/heads",
             "refs/remotes/origin",
             "refs/tags",
+            "refs/pull",
         ],
     )?;
     let mut locals: std::collections::HashMap<String, String> = Default::default();
     let mut remotes: Vec<(String, String)> = Vec::new();
     let mut tags = 0u32;
+    // Saved pull requests: the ref, and what comes after the prefix of
+    // its branch, "7" for refs/pull/7/head.
+    let mut pulls: Vec<(String, String)> = Vec::new();
     for line in &refs {
         let Some((name, tip)) = line.split_once('\t') else {
             continue;
@@ -745,6 +806,11 @@ pub fn migrate_to(
             }
         } else if name.starts_with("refs/tags/") {
             tags += 1;
+        } else if let Some(pull) = name
+            .strip_prefix("refs/pull/")
+            .and_then(|rest| rest.strip_suffix("/head"))
+        {
+            pulls.push((name.to_string(), pull.to_string()));
         }
     }
     // Each branch with the ref it is pushed from.
@@ -791,6 +857,13 @@ pub fn migrate_to(
         .map(|branch| spec(branch))
         .collect();
     batches.extend(rest.chunks(100).map(<[String]>::to_vec));
+    let branches: Vec<String> = sources.keys().cloned().collect();
+    let prefix = pull_prefix(&branches);
+    let pull_specs: Vec<String> = pulls
+        .iter()
+        .map(|(from, pull)| format!("+{from}:refs/heads/{prefix}/{pull}"))
+        .collect();
+    batches.extend(pull_specs.chunks(100).map(<[String]>::to_vec));
     if tags > 0 {
         batches.push(vec!["refs/tags/*:refs/tags/*".to_string()]);
     }
@@ -819,6 +892,9 @@ pub fn migrate_to(
         remote,
         branches: u32::try_from(sources.len()).unwrap_or(u32::MAX),
         tags,
+        pulls: u32::try_from(pulls.len()).unwrap_or(u32::MAX),
+        pull_prefix: prefix.to_string(),
+        stale,
     })
 }
 
@@ -3371,13 +3447,16 @@ refs/remotes/fork/dev\tiii\t\t
         };
         let address = target.display().to_string();
 
-        let done = migrate_to(&clone, &address, |_, _| {}).unwrap();
+        let done = migrate_to(&clone, &address, None, |_, _| {}).unwrap();
         assert_eq!(
             done,
             Migrated {
                 remote: "mirror".into(),
                 branches: 3,
-                tags: 1
+                tags: 1,
+                pulls: 0,
+                pull_prefix: "pull".into(),
+                stale: None,
             }
         );
         assert_eq!(
@@ -3404,7 +3483,7 @@ refs/remotes/fork/dev\tiii\t\t
 
         // Again, after more work: the copy follows, the remote stays one.
         commit(&clone, "later");
-        migrate_to(&clone, &address, |_, _| {}).unwrap();
+        migrate_to(&clone, &address, None, |_, _| {}).unwrap();
         assert_eq!(
             tip(&target, "refs/heads/main"),
             tip(&clone, "refs/heads/main")
@@ -3414,8 +3493,93 @@ refs/remotes/fork/dev\tiii\t\t
 
         // Its own origin is not somewhere else.
         let origin = upstream.display().to_string();
-        assert!(migrate_to(&clone, &origin, |_, _| {}).is_err());
+        assert!(migrate_to(&clone, &origin, None, |_, _| {}).is_err());
         let _ = remove_tree(&root);
+    }
+
+    #[test]
+    fn migrating_brings_what_origin_got_since_and_every_pull_request() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-migrate-pulls-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let upstream = root.join("upstream");
+        let clone = root.join("clone");
+        let target = root.join("target.git");
+        git(&root, &["init", "-q", "-b", "main", "upstream"]);
+        commit(&upstream, "one");
+        git(&root, &["clone", "-q", "upstream", "clone"]);
+        git(&root, &["init", "-q", "--bare", "target.git"]);
+        // After the clone, origin gets a branch and two pull requests whose
+        // commits are on no branch. Nothing of that was fetched.
+        git(&upstream, &["checkout", "-q", "-b", "late"]);
+        commit(&upstream, "late-work");
+        for number in [1, 2] {
+            git(&upstream, &["checkout", "-q", "--detach", "main"]);
+            commit(&upstream, &format!("pull-{number}"));
+            let head = format!("refs/pull/{number}/head");
+            git(&upstream, &["update-ref", &head, "HEAD"]);
+        }
+        git(&upstream, &["checkout", "-q", "main"]);
+        let tip = |dir: &Path, name: &str| {
+            let output = git_command()
+                .arg("-C")
+                .arg(dir)
+                .args(["rev-parse", "--verify", "-q", name])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let address = target.display().to_string();
+
+        let done = migrate_to(&clone, &address, None, |_, _| {}).unwrap();
+        assert_eq!(
+            done,
+            Migrated {
+                remote: "mirror".into(),
+                branches: 2,
+                tags: 0,
+                pulls: 2,
+                pull_prefix: "pull".into(),
+                stale: None,
+            }
+        );
+        assert_eq!(
+            tip(&target, "refs/heads/late"),
+            tip(&upstream, "refs/heads/late")
+        );
+        for number in [1, 2] {
+            let there = tip(&target, &format!("refs/heads/pull/{number}"));
+            assert!(!there.is_empty());
+            assert_eq!(there, tip(&upstream, &format!("refs/pull/{number}/head")));
+        }
+
+        // A pull request that was pushed over gets other commits: the copy
+        // follows, although that is no fast-forward.
+        git(&upstream, &["checkout", "-q", "--detach", "main"]);
+        commit(&upstream, "pull-1-again");
+        git(&upstream, &["update-ref", "refs/pull/1/head", "HEAD"]);
+        git(&upstream, &["checkout", "-q", "main"]);
+        migrate_to(&clone, &address, None, |_, _| {}).unwrap();
+        assert_eq!(
+            tip(&target, "refs/heads/pull/1"),
+            tip(&upstream, "refs/pull/1/head")
+        );
+
+        // Origin is gone: what is saved goes over, and the result says so.
+        remove_tree(&upstream).unwrap();
+        let done = migrate_to(&clone, &address, None, |_, _| {}).unwrap();
+        assert_eq!(done.pulls, 2);
+        assert!(done.stale.is_some());
+        let _ = remove_tree(&root);
+    }
+
+    #[test]
+    fn pull_requests_get_a_branch_prefix_no_branch_has() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        assert_eq!(pull_prefix(&names(&["main", "pulley"])), "pull");
+        assert_eq!(pull_prefix(&names(&["main", "pull"])), "pull-request");
+        assert_eq!(pull_prefix(&names(&["pull/7", "Pull-Request/x"])), "pr");
     }
 
     #[test]
