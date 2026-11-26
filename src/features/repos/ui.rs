@@ -817,7 +817,7 @@ fn draw_add(frame: &mut Frame, app: &mut App, screen: Rect) {
     let inner = dialog::window(
         frame,
         popup,
-        &format!(" Add from {} ", add_source(app)),
+        &format!(" Add from {} ", app.add_source()),
         Color::Cyan,
     );
     if inner.height < 5 {
@@ -2438,17 +2438,6 @@ fn column_widths(total: u16, need: &Need) -> [usize; 8] {
     [marker, name, branch, state, sync, pulls, path, rest - path]
 }
 
-fn add_source(app: &App) -> String {
-    if let Some(owner) = app.add_account() {
-        return format!("github.com/{owner}");
-    }
-    match app.owners.as_slice() {
-        [] => "GitHub".to_string(),
-        [owner] => format!("github.com/{owner}"),
-        _ => "GitHub".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3454,5 +3443,49 @@ mod tests {
         let screen = render(&mut app, 100, 30);
         assert!(screen.contains("Add from github.com/UCS-Care-Group"));
         assert!(screen.contains("Loading github.com/UCS-Care-Group"));
+    }
+
+    #[test]
+    fn the_add_dialog_names_where_it_looks_and_how_its_list_stands() {
+        let mut app = app(false);
+        for name in ["alpha", "beta"] {
+            app.remotes
+                .push(crate::features::repos::github::RemoteRepo::direct(
+                    crate::features::repos::github::RepoSpec {
+                        owner: "AsP3X".into(),
+                        name: name.into(),
+                    },
+                ));
+        }
+        app.run(Action::Add);
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ Add from github.com/AsP3X "), "{screen}");
+        assert!(
+            screen.contains(
+                "2 repositories · 0 cloned · type owner/ or paste a link to list any account"
+            ),
+            "{screen}"
+        );
+
+        // A word that could be an account says how to list it.
+        app.on_event(ratatui::crossterm::event::Event::Paste("storytold".into()));
+        let screen = render(&mut app, 120, 30);
+        assert!(
+            screen.contains("2 repositories · 0 cloned · tab lists github.com/storytold"),
+            "{screen}"
+        );
+
+        // Several default accounts, or none: the title says GitHub.
+        app.owners = vec!["AsP3X".into(), "storytold".into()];
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ Add from GitHub "), "{screen}");
+        app.owners.clear();
+        app.pinned.clear();
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ Add from GitHub "), "{screen}");
+        assert!(
+            screen.contains("No default account · tab lists github.com/storytold"),
+            "{screen}"
+        );
     }
 }

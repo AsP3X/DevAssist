@@ -1024,6 +1024,14 @@ impl Repos {
                     ))
                 }
                 Some(Err(err)) => failed(err.clone()),
+                // Held, no lookup is started: nothing is loading. One that
+                // was already running is left to land.
+                None if self.work_held
+                    && self.lookup_running.as_deref()
+                        != Some(query.owner.to_ascii_lowercase().as_str()) =>
+                {
+                    plain(HELD.to_string())
+                }
                 None => loading(format!("Loading {site}…")),
             };
         }
@@ -1075,6 +1083,18 @@ impl Repos {
                 }
                 None => "Nothing matches that search.".to_string(),
             },
+        }
+    }
+
+    /// Where Add looks, for its title: the account the search names, the
+    /// one default account, or GitHub.
+    pub fn add_source(&self) -> String {
+        if let Some(owner) = self.add_account() {
+            return format!("github.com/{owner}");
+        }
+        match self.owners.as_slice() {
+            [owner] => format!("github.com/{owner}"),
+            _ => "GitHub".to_string(),
         }
     }
 
@@ -1142,6 +1162,46 @@ impl Repos {
             self.add_marked.push(remote);
         }
         self.move_by(1);
+    }
+
+    /// Highlights the found repository `id` ("owner/name"). Nothing when
+    /// Add is closed or `id` is not on its list.
+    pub fn pick_add(&mut self, id: &str) {
+        if self.mode != Mode::Add {
+            return;
+        }
+        if let Some(remote) = self
+            .add_list()
+            .into_iter()
+            .find(|repo| repo.id().eq_ignore_ascii_case(id))
+        {
+            self.add_selected = Some(remote.id());
+        }
+    }
+
+    /// Ticks or unticks the found repository `id` ("owner/name"), and
+    /// leaves the highlight where it is. One already cloned is not ticked.
+    /// Nothing when Add is closed or `id` is not on its list.
+    pub fn toggle_add_mark_of(&mut self, id: &str) {
+        if self.mode != Mode::Add {
+            return;
+        }
+        let Some(remote) = self
+            .add_list()
+            .into_iter()
+            .find(|repo| repo.id().eq_ignore_ascii_case(id))
+        else {
+            return;
+        };
+        if let Some(index) = self
+            .add_marked
+            .iter()
+            .position(|marked| marked.id().eq_ignore_ascii_case(id))
+        {
+            self.add_marked.remove(index);
+        } else if !self.is_installed(&remote) {
+            self.add_marked.push(remote);
+        }
     }
 
     pub fn is_installed(&self, remote: &RemoteRepo) -> bool {
@@ -1469,6 +1529,30 @@ impl Repos {
         }
     }
 
+    /// The Migrate submenu's line that is highlighted, while it is open.
+    pub fn migrate_highlight(&self) -> Option<MigrateItem> {
+        let index = self.menu.as_ref()?.migrate?;
+        MigrateItem::ALL.get(index).copied()
+    }
+
+    /// Highlights the Migrate submenu's line `item`. Nothing while the
+    /// submenu is closed.
+    pub fn highlight_migrate(&mut self, item: MigrateItem) {
+        if let Some(selected) = self.menu.as_mut().and_then(|menu| menu.migrate.as_mut())
+            && let Some(index) = MigrateItem::ALL.iter().position(|known| *known == item)
+        {
+            *selected = index;
+        }
+    }
+
+    /// Closes the Migrate submenu and goes back to the menu it came from.
+    /// Nothing while the submenu is closed.
+    pub fn close_migrate(&mut self) {
+        if let Some(menu) = self.menu.as_mut() {
+            menu.migrate = None;
+        }
+    }
+
     /// Closes the menu and does what a line of the Migrate submenu says.
     pub fn run_migrate(&mut self, item: MigrateItem) {
         self.close_menu();
@@ -1501,6 +1585,19 @@ impl Repos {
                 "Select one repository: each needs an address of its own.",
                 true,
             ),
+        }
+    }
+
+    /// The service dialog's address becomes `text`, whole; what went wrong
+    /// with the last one is forgotten. Nothing while the dialog is closed
+    /// or when the text is the same. The address is checked by
+    /// `accept_service`.
+    pub fn set_service_input(&mut self, text: &str) {
+        if let Some(prompt) = self.service_prompt.as_mut()
+            && prompt.input != text
+        {
+            text.clone_into(&mut prompt.input);
+            prompt.error = None;
         }
     }
 
@@ -2015,6 +2112,15 @@ impl Repos {
         self.note_list_filter_changed();
     }
 
+    /// The folder dialog's folder becomes `text`, whole; what went wrong
+    /// with the last one and what Tab found are forgotten. Nothing while
+    /// the dialog is closed or when the text is the same.
+    pub fn set_path_input(&mut self, text: &str) {
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.set_input(text);
+        }
+    }
+
     pub fn open_import(&mut self) {
         self.prompt = Some(Purpose::Import.prompt(&self.clone_dir));
         self.mode = Mode::Path;
@@ -2441,6 +2547,16 @@ impl Repos {
     fn snap_visible_selection(&mut self) {
         let names = self.list_names();
         list::snap(&mut self.selected, &names);
+    }
+
+    /// Sets Add's search to `text` in one step and does what typing into
+    /// it does. The same text again does nothing, and so does a closed Add.
+    pub fn set_add_filter(&mut self, text: &str) {
+        if self.mode != Mode::Add || self.add_filter == text {
+            return;
+        }
+        text.clone_into(&mut self.add_filter);
+        self.note_add_filter_changed();
     }
 
     pub fn note_add_filter_changed(&mut self) {
@@ -5530,6 +5646,185 @@ mod tests {
         assert_eq!(app.menu_highlight(), Some(MenuItem::Github));
         app.close_menu();
         assert!(app.menu_highlight().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_add_search_is_set_and_plans_a_lookup_once() {
+        let mut app = Repos::empty(test_settings());
+        app.remotes_state = RemoteState::Ready;
+        app.remotes = vec![remote("storytold", "alpha"), remote("storytold", "beta")];
+        assert_eq!(app.add_source(), "github.com/storytold");
+        app.set_add_filter("someone/");
+        assert!(app.add_filter.is_empty(), "nothing while Add is closed");
+        assert!(app.lookup_due.is_none());
+
+        app.open_add();
+        app.add_scroll = 4;
+        app.set_add_filter("bet");
+        assert_eq!(app.add_filter, "bet");
+        assert_eq!(app.add_scroll, 0, "the list starts at the top again");
+        assert_eq!(app.add_selected.as_deref(), Some("storytold/beta"));
+        assert!(app.lookup_due.is_none(), "no account is named");
+
+        app.set_add_filter("someone/");
+        assert_eq!(app.add_source(), "github.com/someone");
+        let (owner, at) = app.lookup_due.clone().expect("a lookup is planned");
+        assert_eq!(owner, "someone");
+        app.add_scroll = 2;
+        app.set_add_filter("someone/");
+        assert_eq!(
+            app.lookup_due.as_ref().map(|(_, due)| *due),
+            Some(at),
+            "the same text plans nothing new"
+        );
+        assert_eq!(app.add_scroll, 2, "the same text changes nothing");
+
+        // Several default accounts, or none: GitHub.
+        app.set_add_filter("");
+        app.owners = vec!["storytold".into(), "acme".into()];
+        assert_eq!(app.add_source(), "GitHub");
+        app.owners.clear();
+        assert_eq!(app.add_source(), "GitHub");
+    }
+
+    #[test]
+    fn a_found_repository_is_picked_and_ticked_by_its_id() {
+        let mut app = Repos::empty(test_settings());
+        app.remotes_state = RemoteState::Ready;
+        app.installed.push(installed("storytold", "alpha"));
+        app.remotes = vec![
+            remote("storytold", "alpha"),
+            remote("storytold", "beta"),
+            remote("storytold", "gamma"),
+        ];
+        app.pick_add("storytold/beta");
+        app.toggle_add_mark_of("storytold/beta");
+        assert!(app.add_selected.is_none() && app.add_marked.is_empty());
+        assert!(app.mode == Mode::List, "nothing while Add is closed");
+
+        app.open_add();
+        app.pick_add("Storytold/Gamma");
+        assert_eq!(app.add_selected.as_deref(), Some("storytold/gamma"));
+        app.pick_add("storytold/nowhere");
+        assert_eq!(
+            app.add_selected.as_deref(),
+            Some("storytold/gamma"),
+            "an unknown id does nothing"
+        );
+
+        app.toggle_add_mark_of("storytold/beta");
+        assert!(app.is_marked(&remote("storytold", "beta")));
+        assert_eq!(
+            app.add_selected.as_deref(),
+            Some("storytold/gamma"),
+            "the highlight stays"
+        );
+        app.toggle_add_mark_of("storytold/alpha");
+        assert!(
+            !app.is_marked(&remote("storytold", "alpha")),
+            "an installed one is not ticked"
+        );
+        app.toggle_add_mark_of("storytold/nowhere");
+        assert_eq!(app.add_marked.len(), 1, "an unknown id does nothing");
+        app.toggle_add_mark_of("STORYTOLD/BETA");
+        assert!(app.add_marked.is_empty(), "a second time unticks");
+    }
+
+    #[test]
+    fn a_question_takes_its_text_and_forgets_its_error() {
+        let (mut app, root) = held_app("question-text");
+        app.set_path_input("anything");
+        app.set_service_input("anything");
+        assert!(app.prompt.is_none() && app.service_prompt.is_none());
+        assert!(app.mode == Mode::List, "nothing while no question is open");
+
+        // The folder question.
+        app.open_import();
+        let prompt = app.prompt.as_mut().unwrap();
+        prompt.error = Some("That is not a folder.".into());
+        prompt.matches = vec!["api".into()];
+        let before = prompt.input.clone();
+        app.set_path_input(&before);
+        let prompt = app.prompt.as_ref().unwrap();
+        assert!(
+            prompt.error.is_some() && !prompt.matches.is_empty(),
+            "the same text changes nothing"
+        );
+        let typed = root.join("elsewhere").display().to_string();
+        app.set_path_input(&typed);
+        let prompt = app.prompt.as_ref().unwrap();
+        assert_eq!(prompt.input, typed);
+        assert!(prompt.error.is_none() && prompt.matches.is_empty());
+        app.close_path();
+
+        // The service question.
+        app.run_migrate(MigrateItem::Service);
+        assert!(app.mode == Mode::Service);
+        app.accept_service();
+        assert!(app.service_prompt.as_ref().unwrap().error.is_some());
+        app.set_service_input("https://gitlab.com/acme/tool.git");
+        let prompt = app.service_prompt.as_ref().unwrap();
+        assert_eq!(prompt.input, "https://gitlab.com/acme/tool.git");
+        assert!(prompt.error.is_none());
+        app.set_service_input("");
+        assert!(app.service_prompt.as_ref().unwrap().input.is_empty());
+        app.close_service();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_migrate_menu_is_stepped_and_closed_through_methods() {
+        let (mut app, root) = held_app("migrate-menu");
+        app.highlight_migrate(MigrateItem::Service);
+        app.close_migrate();
+        assert!(app.menu.is_none() && app.migrate_highlight().is_none());
+        app.enter_row();
+        app.highlight_migrate(MigrateItem::Service);
+        assert!(
+            app.migrate_highlight().is_none(),
+            "nothing while the submenu is closed"
+        );
+        assert_eq!(app.menu.as_ref().unwrap().migrate, None);
+        app.highlight_menu(MenuItem::Migrate);
+        app.run_menu(MenuItem::Migrate);
+        assert_eq!(app.migrate_highlight(), Some(MigrateItem::Folder));
+        app.highlight_migrate(MigrateItem::Service);
+        assert_eq!(app.migrate_highlight(), Some(MigrateItem::Service));
+        assert_eq!(app.menu.as_ref().unwrap().migrate, Some(1));
+        app.highlight_migrate(MigrateItem::Folder);
+        assert_eq!(app.migrate_highlight(), Some(MigrateItem::Folder));
+        app.close_migrate();
+        assert!(app.migrate_highlight().is_none());
+        assert!(app.mode == Mode::Menu, "back on the menu it came from");
+        assert_eq!(app.menu_highlight(), Some(MenuItem::Migrate));
+        app.close_menu();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_held_add_says_so_instead_of_loading_for_ever() {
+        let (mut app, root) = held_app("held-add");
+        app.remotes_state = RemoteState::Ready;
+        app.open_add();
+        app.set_add_filter("someone/");
+        let status = app.add_status();
+        assert_eq!(status.text, HELD);
+        assert!(!status.busy && !status.error);
+        assert!(app.lookup_due.is_none());
+        assert!(!app.waiting(), "no lookup is coming");
+        assert!(!app.drain());
+        assert!(!app.waiting());
+        // One that was running when work was held is left to land.
+        app.lookup_running = Some("someone".into());
+        assert!(app.add_status().busy);
+        app.lookup_running = None;
+        // Not held, it loads.
+        app.work_held = false;
+        app.set_add_filter("other/");
+        let status = app.add_status();
+        assert_eq!(status.text, "Loading github.com/other…");
+        assert!(status.busy);
         let _ = std::fs::remove_dir_all(&root);
     }
 

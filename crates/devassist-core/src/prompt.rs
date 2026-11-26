@@ -42,6 +42,14 @@ impl<P> PathPrompt<P> {
         self.matches.clear();
     }
 
+    /// The input becomes `text`, whole, as `edit` changes it. The same
+    /// text again changes nothing, so the last error stays.
+    pub fn set_input(&mut self, text: &str) {
+        if self.input != text {
+            self.edit(|input| text.clone_into(input));
+        }
+    }
+
     /// The folder that is typed, checked.
     pub fn folder(&self) -> Result<PathBuf, String> {
         let folder = resolve(&self.input)?;

@@ -194,7 +194,7 @@ impl App {
             let keys = MigrateItem::ALL.map(MigrateItem::key);
             match menu::on_key(selected, key, &keys) {
                 menu::Outcome::Stay => {}
-                menu::Outcome::Close => state.migrate = None,
+                menu::Outcome::Close => self.close_migrate(),
                 menu::Outcome::Run(index) => self.run_migrate(MigrateItem::ALL[index]),
             }
             return;
