@@ -805,6 +805,7 @@ mod tests {
     const OTHER: &str = r"E:\work";
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "the demo's checkouts and these folders are Windows paths (drives D: and E:)")]
     fn the_rows_say_where_each_goes_as_the_folder_is_typed() {
         // The title follows the remove dialog's rule.
         let one = |name: &str| (name.to_owned(), PathBuf::from(WORK).join(name));
@@ -852,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "the demo's checkouts and these folders are Windows paths (drives D: and E:)")]
     fn a_row_that_is_there_already_says_so_and_does_not_count() {
         // api is in the Work folder already; notes moves there.
         let mut window = move_dialog(&["api", "notes"], WORK);
@@ -896,6 +898,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "the demo's checkouts and these folders are Windows paths (drives D: and E:)")]
     fn the_other_drive_note_shows_only_when_the_core_can_tell() {
         assert_eq!(
             drive_note(Some("E:")),
@@ -1017,6 +1020,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "the demo's checkouts and these folders are Windows paths (drives D: and E:)")]
     fn fifty_rows_scroll_and_the_buttons_stay_in_view() {
         // Placed: in the smallest window, with the folder rows open and the note shown, the box keeps three rows and
         // the buttons stay inside the pane; in the design's window it shows six.

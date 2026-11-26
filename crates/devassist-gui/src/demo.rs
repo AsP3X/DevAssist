@@ -322,12 +322,13 @@ fn show_import(repos: &mut Repos) {
 }
 
 /// The made-up folder the demo's Move dialog moves into: the drawing's `E:\work`, on another drive than the demo's
-/// checkouts, so the note on another drive shows (`/mnt/work` on other systems).
+/// checkouts, so the note on another drive shows on Windows. On other systems it is `/mnt/work`, and no note shows:
+/// the held core cannot tell a mount point from a path's text.
 pub const MOVE_DIR: &str = if cfg!(windows) { r"E:\work" } else { "/mnt/work" };
 
 /// The drawing's Move dialog: the ticked api and web, opened as the Migrate menu's move line opens it, its folder
-/// [`MOVE_DIR`]. The held core tells where each goes and that the drive is another from the text alone: nothing reads
-/// the disk.
+/// [`MOVE_DIR`]. The held core tells where each goes, and on Windows that the drive is another, from the text alone:
+/// nothing reads the disk.
 fn show_move(repos: &mut Repos) {
     repos.run_migrate(MigrateItem::Folder);
     repos.set_path_input(MOVE_DIR);

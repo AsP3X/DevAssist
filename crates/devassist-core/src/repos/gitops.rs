@@ -964,26 +964,30 @@ pub fn same_volume(a: &Path, b: &Path) -> Option<bool> {
 /// None for a path without one (relative, `\code`, a device path), and
 /// always on other systems, where a mount point cannot be told from the
 /// text. Reads nothing.
+#[cfg(windows)]
 pub fn volume_root(path: &Path) -> Option<String> {
-    use std::path::Component;
-    match path.components().next()? {
-        #[cfg(windows)]
-        Component::Prefix(prefix) => {
-            use std::path::Prefix;
-            match prefix.kind() {
-                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-                    Some(format!("{}:", char::from(letter).to_ascii_uppercase()))
-                }
-                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => Some(format!(
-                    "\\\\{}\\{}",
-                    server.to_string_lossy(),
-                    share.to_string_lossy()
-                )),
-                _ => None,
-            }
+    use std::path::{Component, Prefix};
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+    match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            Some(format!("{}:", char::from(letter).to_ascii_uppercase()))
         }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => Some(format!(
+            "\\\\{}\\{}",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        )),
         _ => None,
     }
+}
+
+/// See the Windows `volume_root`: other systems have no drive in a path's
+/// text, and a mount point cannot be told from it.
+#[cfg(not(windows))]
+pub fn volume_root(_path: &Path) -> Option<String> {
+    None
 }
 
 #[cfg(windows)]
@@ -3749,21 +3753,21 @@ refs/remotes/fork/dev\tiii\t\t
         assert!(taken.contains("there already"), "{taken}");
         let inside = move_checkout(&old, &old.join("deeper").join("api"), |_, _| {}).unwrap_err();
         assert!(inside.contains("into itself"), "{inside}");
-        // Inside it by a name that differs only in case: the same folder on Windows.
+        // Inside it by a name that differs only in case: the same folder on
+        // Windows, where it is refused before anything is made. Elsewhere the
+        // upper-cased path lies outside the temporary folder, so it is not
+        // moved to; `paths::is_within` answers for it there.
         let upper = PathBuf::from(old.display().to_string().to_uppercase())
             .join("deeper")
             .join("api");
-        let cased = move_checkout(&old, &upper, |_, _| {});
         if cfg!(windows) {
+            let cased = move_checkout(&old, &upper, |_, _| {});
             assert!(
                 cased.as_ref().is_err_and(|err| err.contains("into itself")),
                 "{cased:?}"
             );
         } else {
-            assert!(
-                !cased.as_ref().is_err_and(|err| err.contains("into itself")),
-                "{cased:?}"
-            );
+            assert!(!paths::is_within(&upper, &old));
         }
         assert!(old.join(".git").exists());
 
