@@ -121,6 +121,8 @@ pub fn compose_down(project: &str, volumes: bool) -> Vec<String> {
 
 /// `docker` with these arguments, ready to run without a console window.
 pub fn command(arguments: &[String]) -> Command {
+    #[cfg(feature = "testing")]
+    crate::sys::note(crate::sys::Reach::Program);
     let mut cmd = Command::new("docker");
     cmd.args(arguments);
     process::quiet(&mut cmd);

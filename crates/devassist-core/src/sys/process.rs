@@ -273,6 +273,8 @@ impl Drop for PidGuard {
 }
 
 fn kill_pid(pid: u32) {
+    #[cfg(feature = "testing")]
+    super::note(super::Reach::Program);
     let pid = pid.to_string();
     #[cfg(windows)]
     let mut cmd = Command::new("taskkill");

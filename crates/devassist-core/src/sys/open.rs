@@ -32,6 +32,8 @@ pub fn folder(path: &Path) -> Result<(), String> {
 }
 
 fn command(target: &Path) -> Command {
+    #[cfg(feature = "testing")]
+    super::note(super::Reach::Program);
     #[cfg(windows)]
     {
         let mut cmd = Command::new("explorer");

@@ -276,7 +276,7 @@ pub fn state_text(session: &Session) -> Option<(String, Vec<String>)> {
 
 /// What a key asks of the screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Command {
+pub(crate) enum Command {
     /// Move the highlight this many rows.
     Move(isize),
     /// Highlight the first row (`true`) or the last.
@@ -322,11 +322,42 @@ impl Command {
     }
 }
 
+#[cfg(test)]
+impl Command {
+    /// How many kinds of command there are: [`Command::kind`] gives each one its number below this.
+    pub(crate) const KINDS: usize = 18;
+
+    /// The number of this command's kind, whatever it carries, for the tests that press every key the screen knows
+    /// and must reach every kind. No wildcard: a new command must be numbered here, and [`Command::KINDS`] grown.
+    pub(crate) fn kind(self) -> usize {
+        match self {
+            Command::Move(_) => 0,
+            Command::End(_) => 1,
+            Command::Tick => 2,
+            Command::TickAll => 3,
+            Command::Escape => 4,
+            Command::Sort => 5,
+            Command::Filter => 6,
+            Command::Type(_) => 7,
+            Command::Refresh => 8,
+            Command::Fold(_) => 9,
+            Command::ShowRun => 10,
+            Command::Enter => 11,
+            Command::UpdateChosen => 12,
+            Command::UpdateAll => 13,
+            Command::Watch => 14,
+            Command::Open => 15,
+            Command::Group => 16,
+            Command::Remove => 17,
+        }
+    }
+}
+
 /// What the keys among `events` ask, in order, as the terminal app reads them. Letters are read from the typed
 /// text, so they follow the keyboard's layout; text typed with Ctrl, Alt or Cmd held (as the last key said) is no
 /// key here, as Ctrl-A is told from `a`. Once `/` has asked for the filter, the rest of the frame's text is typed
 /// into it and its other keys are the field's.
-fn commands(events: &[Event]) -> Vec<Command> {
+pub(crate) fn commands(events: &[Event]) -> Vec<Command> {
     let mut commands = Vec::new();
     // The modifiers held with the last key, and whether it was a repeat of a held key: the text a key types comes
     // after it.
@@ -393,6 +424,29 @@ fn commands(events: &[Event]) -> Vec<Command> {
         }
     }
     commands
+}
+
+/// Every control of the screen's toolbar and top row that `plan` (from [`plan`]) places, with its words (an icon
+/// alone by its name), measured with `painter`'s faces: the filter field, the sort, each item of the selection bar
+/// and "Update all". For the tests that press every control; it reads the same items the screen draws.
+#[cfg(test)]
+pub(crate) fn control_places(painter: &Painter, plan: &Plan) -> Vec<(String, Rect)> {
+    let mut controls = vec![(FILTER_HINT.to_owned(), plan.field), (plan.sort.to_owned(), plan.view)];
+    let words = |item: &Item<'_>| match *item {
+        Item::Divider => "divider".to_owned(),
+        Item::Action { icon, words: "", .. } => icon.name().to_owned(),
+        Item::Label(words) | Item::Count { name: words, .. } | Item::Action { words, .. } => words.to_owned(),
+    };
+    if let Some((rect, count, fit)) = plan.selection {
+        let (number, said) = (count.to_string(), selected(count));
+        let items = selection_items(&number, &said, fit);
+        controls.extend(items.iter().map(words).zip(widgets::item_rects(painter, rect, &items)));
+    }
+    if let Some((rect, fit)) = plan.update_all {
+        let items = top_items(fit);
+        controls.extend(items.iter().map(words).zip(widgets::item_rects(painter, rect, &items)));
+    }
+    controls
 }
 
 /// The scroll that shows the whole line at `index` of lines of `heights` in `room` points, moving `scroll` as

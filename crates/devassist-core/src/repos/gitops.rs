@@ -2787,6 +2787,8 @@ fn auth_header(token: Option<&str>) -> Option<String> {
 }
 
 fn git_command() -> Command {
+    #[cfg(feature = "testing")]
+    crate::sys::note(crate::sys::Reach::Program);
     let mut cmd = Command::new("git");
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())

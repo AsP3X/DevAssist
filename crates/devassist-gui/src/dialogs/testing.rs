@@ -87,6 +87,21 @@ impl Window {
         }
     }
 
+    /// The window on `session` from now on, as a fresh one starts: the screen, the dialogs and the keyboard's focus
+    /// as they are in a new window, and two frames drawn, so an overlay of what was there before has closed.
+    pub(crate) fn restart(&mut self, session: Session) {
+        self.session = session;
+        self.screen = Screen::default();
+        self.dialogs = Dialogs::default();
+        self.ctx.memory_mut(|memory| {
+            if let Some(focused) = memory.focused() {
+                memory.surrender_focus(focused);
+            }
+        });
+        self.frame(Vec::new());
+        self.frame(Vec::new());
+    }
+
     pub(crate) fn frame(&mut self, events: Vec<Event>) {
         self.frame_at(events, None);
     }

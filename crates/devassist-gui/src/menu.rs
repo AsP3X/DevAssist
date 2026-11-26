@@ -95,6 +95,12 @@ fn layout(pane: Rect) -> (Vec<Rect>, Vec<Rect>) {
     (rows, rules)
 }
 
+/// The places of the menu's lines in its pane at `pane`, in the order of [`shown`]: for the tests that press them.
+#[cfg(test)]
+pub(crate) fn line_rects(pane: Rect) -> Vec<Rect> {
+    layout(pane).0
+}
+
 /// What a key asks of the open menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {

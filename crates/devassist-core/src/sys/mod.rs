@@ -6,3 +6,55 @@ pub mod http;
 pub mod open;
 pub mod paths;
 pub mod process;
+
+/// A way the core reaches outside itself. Each is noted where it
+/// happens, under the `testing` feature only, so the tests can count
+/// them and prove that something reached nothing. A normal build has
+/// neither the notes nor the counts.
+#[cfg(feature = "testing")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// A program made ready to run: git, gh, docker, the file manager
+    /// or the browser that opens a folder or a page, the stopping of a
+    /// program.
+    Program,
+    /// The clipboard written.
+    Clipboard,
+    /// A request sent over the network.
+    Network,
+}
+
+#[cfg(feature = "testing")]
+static REACHED: [std::sync::atomic::AtomicUsize; 3] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+
+/// Notes that the core reaches outside itself in the way `reach`.
+#[cfg(feature = "testing")]
+pub(crate) fn note(reach: Reach) {
+    REACHED[reach as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How often this process reached outside itself in the way `reach` so
+/// far, in every thread. Only grows.
+#[cfg(feature = "testing")]
+pub fn reached(reach: Reach) -> usize {
+    REACHED[reach as usize].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_reaches_out_is_counted() {
+        // A program made through the core's own commands counts, run or
+        // not (this one is not). Other tests run beside this one, so the
+        // counts are only seen to grow.
+        let before = reached(Reach::Program);
+        let _ = crate::docker::cli::command(&[]);
+        assert!(reached(Reach::Program) > before);
+        let before = reached(Reach::Network);
+        note(Reach::Network);
+        assert!(reached(Reach::Network) > before);
+    }
+}

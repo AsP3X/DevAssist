@@ -4,6 +4,8 @@ pub fn set_text(text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
+    #[cfg(feature = "testing")]
+    super::note(super::Reach::Clipboard);
     #[cfg(windows)]
     {
         set_windows(text)

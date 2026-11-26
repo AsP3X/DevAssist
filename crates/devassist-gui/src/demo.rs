@@ -235,6 +235,12 @@ fn show_menu(repos: &mut Repos) {
 mod tests {
     use devassist_core::repos::state::Mode;
     use devassist_core::task::job::ItemState;
+    use egui::{Event, Key, Modifiers};
+
+    use crate::dialogs::Which;
+    use crate::dialogs::testing::Window;
+    use crate::repos_screen::{self, Command};
+    use crate::{menu, table};
 
     use super::*;
 
@@ -313,6 +319,247 @@ mod tests {
         assert_eq!(by("DevAssist").folder, "DevAssist");
         assert!(repos.installed.iter().all(|r| r.ready));
         assert!(repos.installed.iter().all(|r| !r.path.to_string_lossy().contains('\u{2026}')));
+    }
+
+    /// What one press in the walk of [`a_demo_runs_nothing_whatever_is_pressed`] may do.
+    #[derive(Clone, Copy, Debug)]
+    enum Expect {
+        /// It asks for work: the core refuses it and the status line says so (`HELD`).
+        Held,
+        /// It changes nothing but what a demo changes in memory on purpose (the ticks, the highlight, the sort, the
+        /// filter, the folds, a group, a dialog or the menu opened or closed), or nothing at all.
+        Free,
+        /// Forget, which takes these off the list in memory; their folders are nowhere.
+        Forgot(&'static [&'static str]),
+    }
+
+    /// How often the process has reached out so far: programs, the clipboard, the network.
+    fn reached_now() -> [usize; 3] {
+        use devassist_core::sys::{Reach, reached};
+        [Reach::Program, Reach::Clipboard, Reach::Network].map(reached)
+    }
+
+    /// The walk's window, on a fresh demo with `start` done to it first.
+    fn fresh(window: &mut Window, start: fn(&mut Repos)) {
+        let mut repos = repos();
+        start(&mut repos);
+        window.restart(crate::session::Session::demo(repos));
+    }
+
+    /// Checks, after the press `what`, that the demo ran and wrote nothing and reached nothing since `before`.
+    fn still_held(window: &Window, what: &str, expect: Expect, before: [usize; 3]) {
+        let repos = window.repos();
+        assert!(repos.work_held(), "{what}: the demo's work is no longer held");
+        assert!(!repos.busy && !repos.fetching && !repos.waiting(), "{what}: the core is busy");
+        assert!(repos.queue.is_empty(), "{what}: work was queued: {}", repos.queue.len());
+        let paths: Vec<PathBuf> = repos.installed.iter().map(|repo| repo.path.clone()).collect();
+        let gone: &[&str] = if let Expect::Forgot(gone) = expect { gone } else { &[] };
+        let kept: Vec<PathBuf> = ENTRIES.iter().filter(|entry| !gone.contains(&entry.name)).map(|entry| PathBuf::from(entry.path)).collect();
+        assert_eq!(paths, kept, "{what}: the demo's rows changed");
+        if matches!(expect, Expect::Held) {
+            assert_eq!(repos.status, devassist_core::repos::state::HELD, "{what}: refused without saying so");
+        }
+        // The held core saves nothing (`save_config` returns before the write): the demo's settings file is never made.
+        assert!(!repos.config_path.exists(), "{what}: the demo wrote its settings");
+        assert_eq!(reached_now(), before, "{what}: a program ran, the clipboard was written or the network asked");
+    }
+
+    /// A key pressed with `modifiers`.
+    fn key_event(key: Key, modifiers: Modifiers, pressed: bool) -> Event {
+        Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
+    }
+
+    /// A dialog of the walk: its name, what opens it on a fresh demo, and its buttons with what each may do.
+    type Dialog = (&'static str, fn(&mut Repos), &'static [(&'static str, Expect)]);
+
+    /// Leaves the demo as it starts.
+    fn unchanged(_: &mut Repos) {}
+
+    #[test]
+    fn a_demo_runs_nothing_whatever_is_pressed() {
+        // The tests that run git on real checkouts take turns with this one: the counts are the whole process's.
+        let _live = crate::session::tests::live_git();
+        let before = reached_now();
+        let mut window = Window::new(crate::session::Session::demo(repos()));
+        press_every_key(&mut window, before);
+        press_every_control(&mut window, before);
+        run_every_line_of_the_menu(&mut window, before);
+        press_every_button_of_the_dialogs(&mut window, before);
+    }
+
+    /// Every key there is, and every letter, figure and sign typed, each on a fresh demo.
+    fn press_every_key(window: &mut Window, before: [usize; 3]) {
+        let on_api: fn(&mut Repos) = |repos| repos.pick("api");
+        // Every key there is, alone and with Shift, Ctrl or Alt, and every letter, figure and sign typed, on a demo whose
+        // highlight is on a group's header and on a ticked row: whatever the screen's keys are now or later, each
+        // is pressed. Each starts from a fresh demo, and is let go after.
+        let modifiers = [Modifiers::NONE, Modifiers::SHIFT, Modifiers::COMMAND, Modifiers::ALT];
+        let mut inputs: Vec<(Vec<Event>, Vec<Event>)> =
+            Key::ALL.iter().flat_map(|&key| modifiers.map(|held| (vec![key_event(key, held, true)], vec![key_event(key, held, false)]))).collect();
+        inputs.extend((' '..='~').map(|typed| (vec![Event::Text(typed.to_string())], Vec::new())));
+        // The filter, and a letter typed into it in the same frame.
+        inputs.push((vec![Event::Text("/".to_owned()), Event::Text("u".to_owned())], Vec::new()));
+        let mut kinds = [false; Command::KINDS];
+        for start in [unchanged, on_api] {
+            for (press, release) in &inputs {
+                fresh(window, start);
+                let commands = repos_screen::commands(press);
+                for command in &commands {
+                    kinds[command.kind()] = true;
+                }
+                window.frame(press.clone());
+                window.frame(release.clone());
+                window.frame(Vec::new());
+                // The keys that ask for work: the rest move, tick, sort, filter, fold, or open a dialog or the menu.
+                let asks = commands
+                    .iter()
+                    .any(|command| matches!(command, Command::UpdateChosen | Command::UpdateAll | Command::Watch | Command::Open | Command::Refresh));
+                still_held(window, &format!("{press:?}"), if asks { Expect::Held } else { Expect::Free }, before);
+            }
+        }
+        let missed: Vec<usize> = (0..Command::KINDS).filter(|kind| !kinds[*kind]).collect();
+        assert!(missed.is_empty(), "the walk pressed no key for the commands {missed:?}");
+    }
+
+    /// Every control of the toolbar, the selection bar and the top row, and the table's, each on a fresh demo.
+    fn press_every_control(window: &mut Window, before: [usize; 3]) {
+        // Every control of the toolbar, the selection bar and the top row, clicked on a fresh demo.
+        fresh(window, unchanged);
+        let layout = window.layout();
+        let mut controls = Vec::new();
+        let input = egui::RawInput { screen_rect: Some(crate::dialogs::testing::window()), ..Default::default() };
+        let session = crate::session::Session::demo(repos());
+        window
+            .ctx
+            .clone()
+            .run_ui(input, |ui| {
+                let plan = repos_screen::plan(ui.painter(), &layout, &session).unwrap();
+                controls = repos_screen::control_places(ui.painter(), &plan);
+            })
+            .drop_without_applying_deltas();
+        let words: Vec<&str> = controls.iter().map(|(words, _)| words.as_str()).collect();
+        for asked in ["Update", "Move to group", "Open folder", "Remove", "x", "Update all"] {
+            assert!(words.contains(&asked), "no control {asked} among {words:?}");
+        }
+        for (words, rect) in &controls {
+            fresh(window, unchanged);
+            window.click(rect.center());
+            let expect = if ["Update", "Open folder", "Update all"].contains(&words.as_str()) { Expect::Held } else { Expect::Free };
+            still_held(window, &format!("the control {words}"), expect, before);
+        }
+        // The table: a group's header, a row, its tick, the status bar (which brings a run back; there is none).
+        let lines = crate::repos_view::lines(window.repos());
+        let header = table::dots_rect(layout.panel, &lines, 0.0, "group::home").unwrap();
+        let row = table::dots_rect(layout.panel, &lines, 0.0, "homelab").unwrap();
+        let table_presses = [
+            ("a group's header", pos(header.center().x - 400.0, header.center().y)),
+            ("a row", pos(row.center().x - 400.0, row.center().y)),
+            ("a row's tick", pos(layout.panel.left() + crate::columns::columns(layout.panel.width()).check.left + 8.0, row.center().y)),
+            ("the status bar", layout.status.center()),
+        ];
+        for (what, at) in table_presses {
+            fresh(window, unchanged);
+            window.click(at);
+            still_held(window, what, Expect::Free, before);
+        }
+    }
+
+    /// Every line of the row's menu, by its letter and by a click, each on a fresh demo.
+    fn run_every_line_of_the_menu(window: &mut Window, before: [usize; 3]) {
+        // The row's menu, opened by its "…" on the ticked api (so it is for api and web): every line it shows, by
+        // its letter and by a click. A line that asks for work is refused; Move to a group and Remove open their
+        // dialogs, whose buttons come next.
+        for item in menu::shown().iter().copied() {
+            for by_click in [false, true] {
+                fresh(window, unchanged);
+                let lines = crate::repos_view::lines(window.repos());
+                let dots = table::dots_rect(window.layout().panel, &lines, 0.0, "api").unwrap();
+                window.click(dots.center());
+                window.frame(Vec::new());
+                assert!(window.shows(Which::Menu), "the menu did not open");
+                let what = format!("the menu's {item:?} by {}", if by_click { "a click" } else { "its letter" });
+                if by_click {
+                    let at = menu::line_rects(window.menu_pane().unwrap())[menu::shown().iter().position(|shown| *shown == item).unwrap()];
+                    window.click(at.center());
+                } else {
+                    let letter = item.key().to_string();
+                    let code = Key::from_name(&letter.to_uppercase()).unwrap();
+                    window.frame(vec![key_event(code, Modifiers::NONE, true), Event::Text(letter)]);
+                    window.frame(vec![key_event(code, Modifiers::NONE, false)]);
+                }
+                window.frame(Vec::new());
+                let opens = match item {
+                    devassist_core::repos::state::MenuItem::Group => Some(Which::Group),
+                    devassist_core::repos::state::MenuItem::Remove => Some(Which::Remove),
+                    _ => None,
+                };
+                match opens {
+                    Some(dialog) => assert!(window.shows(dialog), "{what}: no dialog"),
+                    None => assert!(!window.open(), "{what}: the menu stayed"),
+                }
+                still_held(window, &what, if opens.is_some() { Expect::Free } else { Expect::Held }, before);
+            }
+        }
+    }
+
+    /// Each dialog, opened as the core opens it on a fresh demo, and each of its buttons pressed; its keys; its scrim.
+    fn press_every_button_of_the_dialogs(window: &mut Window, before: [usize; 3]) {
+        // Forget takes api and web off the list (in memory only); Delete from disk is refused.
+        let dialogs: [Dialog; 6] = [
+            ("remove", show_remove, &[("Cancel", Expect::Free), ("Forget", Expect::Forgot(&["api", "web"])), ("Delete from disk", Expect::Held)]),
+            ("group", show_group, &[("Cancel", Expect::Free), ("Move", Expect::Free)]),
+            (
+                "group into Tools",
+                |repos| {
+                    show_group(repos);
+                    repos.set_group_name("Tools");
+                },
+                &[("Move", Expect::Free)],
+            ),
+            (
+                "group without a name",
+                |repos| {
+                    show_group(repos);
+                    repos.set_group_name("");
+                },
+                &[("Move", Expect::Free)],
+            ),
+            ("progress", show_progress, &[("Cancel", Expect::Free), ("Hide", Expect::Free)]),
+            (
+                "progress cancelling",
+                |repos| {
+                    show_progress(repos);
+                    repos.job.as_mut().unwrap().cancelling = true;
+                },
+                &[("Cancelling…", Expect::Free), ("Hide", Expect::Free)],
+            ),
+        ];
+        for (name, open, buttons) in dialogs {
+            for (words, expect) in buttons {
+                fresh(window, open);
+                assert!(window.open(), "the {name} dialog did not open");
+                assert!(window.said().contains(words), "the {name} dialog has no {words}: {:?}", window.said());
+                window.press(words);
+                window.frame(Vec::new());
+                still_held(window, &format!("{words} in the {name} dialog"), *expect, before);
+            }
+            // Esc, Enter, Tab and the arrows in it too.
+            for key in [Key::Tab, Key::ArrowDown, Key::ArrowUp, Key::Enter, Key::Escape] {
+                fresh(window, open);
+                window.key(key);
+                still_held(window, &format!("{key:?} in the {name} dialog"), Expect::Free, before);
+            }
+        }
+        // A click on each dialog's scrim.
+        for open in [show_remove, show_group, show_progress] {
+            fresh(window, open);
+            window.click(pos(30.0, 450.0));
+            still_held(window, "a click on the scrim", Expect::Free, before);
+        }
+    }
+
+    fn pos(x: f32, y: f32) -> egui::Pos2 {
+        egui::pos2(x, y)
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub enum Profile {
 }
 
 fn agent(profile: Profile) -> &'static ureq::Agent {
+    #[cfg(feature = "testing")]
+    super::note(super::Reach::Network);
     static QUICK: OnceLock<ureq::Agent> = OnceLock::new();
     static STEADY: OnceLock<ureq::Agent> = OnceLock::new();
     match profile {

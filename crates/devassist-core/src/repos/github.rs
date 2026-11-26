@@ -857,6 +857,8 @@ fn github_message(body: &str) -> String {
 }
 
 fn gh_cli_token() -> Option<String> {
+    #[cfg(feature = "testing")]
+    crate::sys::note(crate::sys::Reach::Program);
     let mut cmd = std::process::Command::new("gh");
     cmd.args(["auth", "token"])
         .stdin(std::process::Stdio::null())
