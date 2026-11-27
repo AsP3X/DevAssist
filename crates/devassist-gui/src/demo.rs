@@ -866,7 +866,9 @@ mod tests {
         type_into_the_forks_filter(&mut win, before);
         walk_the_fetch_dialog_over_the_forks(&mut win, before);
         walk_the_ways_into_the_forks(&mut win, before);
-        through_the_forks_and_back_on_one_window(&mut win, before);
+        for back in [Key::Escape, Key::Backspace] {
+            through_the_forks_and_back_on_one_window(&mut win, back, before);
+        }
     }
 
     /// Windows narrower than the app allows, where the top row gives way: its capsule's icons only, then the main
@@ -2350,9 +2352,10 @@ mod tests {
     /// held opens the menu on the ticked api alone (and runs none of its lines), `f` held its "Show the forks" (the
     /// forks screen gets none of it), `u` held asks for the fetch once (refused), the demo's fetch given to the held
     /// core as `--show forks-fetching` gives it (a held session starts none: pressed, its fetch is refused), Esc held
-    /// hides its dialog (the forks stay), `l` held shows it again, Hide hides it, and the button back goes back. Each
-    /// step draws one screen and runs nothing; the list's ticks, filter, scroll and highlight are as they were.
-    fn through_the_forks_and_back_on_one_window(win: &mut Win, before: [usize; 5]) {
+    /// hides its dialog (the forks stay), `l` held shows it again, Hide hides it, and `back` (Esc or Backspace) held
+    /// goes back to the list, where its repeats do nothing. Each step draws one screen and runs nothing; the list's
+    /// ticks, filter, scroll and highlight are as they were.
+    fn through_the_forks_and_back_on_one_window(win: &mut Win, back: Key, before: [usize; 5]) {
         win.size = crate::theme::MIN_WINDOW;
         fresh_win(win, |repos| {
             one_chosen(repos, FORKS_OF);
@@ -2430,11 +2433,28 @@ mod tests {
         assert!(!fetch_open(win), "Hide did not hide the fetch's dialog");
         fetch_left(win, "Hide in the fetch's dialog", &job, before);
         one_screen(win, true, "Hide");
-        win.click(win.pages_layout().toggle.center());
-        win.frame(Vec::new());
-        one_screen(win, false, "back from the forks");
-        assert_eq!(list(win), was, "the list is not as it was");
-        held_in(win.repos(), "back from the forks", Expect::Free, before);
+        // `back` held: the forks close, and its repeats do nothing on the list (Esc would clear its filter there,
+        // Backspace edit it).
+        let what = format!("a held {back:?} back from the forks");
+        let stamp = win.repos().status_stamp();
+        hold(win, back, None);
+        one_screen(win, false, &what);
+        assert_eq!(list(win), was, "{what}: the list is not as it was");
+        assert!(
+            win.pages.sidebar_shown && win.ctx.memory(|memory| memory.focused().is_none()),
+            "{what}: the sidebar went or a field took the keyboard"
+        );
+        assert_eq!(win.repos().status_stamp(), stamp, "{what}: the core said something");
+        held_in(win.repos(), &what, Expect::Free, before);
+        // The held fetch still runs, hidden: the status line says so.
+        said_in(win.repos(), &what, Says::HeldOrFetching);
+        // A fresh Esc acts on the list (it clears the ticks): what the held one's repeats were kept from. (Backspace
+        // does nothing on a list whose filter has no keyboard.)
+        if back == Key::Escape {
+            win.key(back, None);
+            win.frame(Vec::new());
+            assert!(win.repos().marked.is_empty(), "a fresh Esc on the list did nothing: the check above proves nothing");
+        }
         win.size = crate::theme::WINDOW;
     }
 
