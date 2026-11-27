@@ -516,16 +516,17 @@ fn measure_all(rendering: Rendering) -> Vec<Row> {
     on_workers(&BACKDROPS, |backdrop| measure(backdrop, rendering)).into_iter().flatten().collect()
 }
 
-/// How many threads the contrast tests draw and measure on: `DEVASSIST_TEST_WORKERS` when it is set to a positive
-/// number, else half of what the machine can run at once, at least one and at most eight. Each take renders and
-/// measures whole windows: one thread a take, all at once, took every core of the machine (the user's request,
-/// 2026-11-27).
+/// How many threads the contrast tests draw and measure on: `DEVASSIST_TEST_WORKERS` as given when it is set to a
+/// positive number (no more than the machine can run at once); else half of what the machine can run at once, at
+/// least one and at most eight. [`on_workers`] starts no more than it has items. Each take renders and measures whole
+/// windows: one thread a take, all at once, took every core of the machine (the user's request, 2026-11-27).
 fn workers() -> usize {
+    let parallel = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     std::env::var("DEVASSIST_TEST_WORKERS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|count| *count > 0)
-        .unwrap_or_else(|| (thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) / 2).clamp(1, 8))
+        .map_or_else(|| (parallel / 2).clamp(1, 8), |count| count.min(parallel))
 }
 
 /// `job` done to each of `items` on a few threads ([`workers`]), each taking the next item not yet taken; the results
