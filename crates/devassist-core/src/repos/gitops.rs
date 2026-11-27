@@ -4,6 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use super::forklines;
+// The pause's own test reads its clock here.
+#[cfg(test)]
+use super::forklines::clock;
 use crate::sys::paths;
 use crate::sys::process::{self, RunError};
 
@@ -1389,7 +1393,7 @@ pub struct ForkSource {
 }
 
 /// How many forks are fetched at the same time.
-const FORK_JOBS: usize = 8;
+pub(crate) const FORK_JOBS: usize = 8;
 
 /// The stamps the forks were last fetched with, by owner: a file in the
 /// collection's `.git`, one `owner<tab>stamp` a line.
@@ -1843,13 +1847,7 @@ pub fn save_forks(
         drop(news_tx);
         let (mut next, mut flying, mut done, mut unsaved) = (0, 0, 0, 0);
         let progress = |done: usize, on_line: &mut dyn FnMut(&str, bool)| {
-            on_line(
-                &format!(
-                    "Fetching forks: {:>3}% ({done}/{total})",
-                    done * 100 / total
-                ),
-                true,
-            );
+            on_line(&forklines::fetching(done, total), true);
         };
         loop {
             while !cancelled && flying < FORK_JOBS && next < total {
@@ -2161,16 +2159,6 @@ fn fork_folders(
     Ok(folders)
 }
 
-/// "1:05" for 65 seconds, "1:01:05" from an hour on.
-fn clock(seconds: u64) -> String {
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
 /// Waits `seconds` and says so: one line that it pauses and why, a
 /// countdown that replaces itself every second, and a line when it goes
 /// on. Cancelling ends the wait at once, with an error.
@@ -2182,9 +2170,9 @@ pub fn pause_for(
     if seconds == 0 {
         return Ok(());
     }
-    on_line(&format!("{why}. Paused for {}.", clock(seconds)), false);
+    on_line(&forklines::paused(why, seconds), false);
     for left in (1..=seconds).rev() {
-        on_line(&format!("Paused, going on in {}", clock(left)), true);
+        on_line(&forklines::countdown(left), true);
         for _ in 0..4 {
             if process::was_cancelled() {
                 return Err("cancelled".into());
@@ -2192,7 +2180,7 @@ pub fn pause_for(
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
     }
-    on_line("Going on.", false);
+    on_line(&forklines::going_on(), false);
     Ok(())
 }
 
