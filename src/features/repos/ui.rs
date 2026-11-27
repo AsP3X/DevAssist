@@ -2456,7 +2456,10 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("devassist-forkui-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("api-fork").join(".git")).unwrap();
+        crate::features::repos::state::testing::mark_forks_collection(
+            &root.join("api-fork"),
+            "ada/api",
+        );
         let mut app = app(false);
         let mut api = local("api", false);
         api.path = root.join("api");

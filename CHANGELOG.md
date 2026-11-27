@@ -57,16 +57,19 @@ What changed in each version of DevAssist. The format follows
   behind and the moved repository's forks read as not cloned. Only a forks
   folder DevAssist made goes along (its configuration names whose forks it
   holds); another folder of that name, or one that is a repository on the
-  list, stays untouched. When something is at the new place already, another
-  repository of the same move goes there, or its move fails or is cancelled,
-  the forks folder stays where it was, whole, the repository's move still
-  stands, and the run ends with a fault that names it. The window's Move
-  dialog notes a forks folder that cannot follow. This holds in the terminal
-  app too.
-- A fetch of the forks first repairs fork folders that moved with their forks
-  folder (by a move that could not repair them, or by hand), instead of
-  leaving them out. A repair that fails is a line in the progress dialog; the
-  fetch goes on.
+  list, stays untouched. When its configuration cannot be read, something is
+  at the new place already, another repository of the same move goes there,
+  or its move fails or is cancelled, the forks folder stays where it was,
+  whole, the repository's move still stands, and the run ends with a fault
+  that names it. The window's Move dialog notes a forks folder that cannot
+  follow, and why. This holds in the terminal app too.
+- The forks of a repository count as cloned only when the folder beside it is
+  a forks folder DevAssist made, in the menu, for `f` and for "Update the
+  forks of all repositories". Before, any folder called `<name>-fork` with a
+  `.git` folder counted.
+- A fetch of the forks first repairs the fork folders of a forks folder that
+  was moved, instead of leaving them out. A repair that fails is a line in the
+  progress dialog, nothing is pruned then, and the fetch goes on.
 
 ## [0.7.0] - 2026-11-26
 

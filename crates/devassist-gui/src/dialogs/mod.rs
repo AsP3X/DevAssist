@@ -504,12 +504,12 @@ pub(crate) fn reason_box(plan: &Plan, repos: &Repos, dialogs: &Dialogs) -> Optio
     }
 }
 
-/// Has the open Move dialog say that the forks folders of `names` cannot follow them, as a live core finds it when
+/// Has the open Move dialog say that the forks folders of `blocked` (name and reason) cannot follow them, as a live core finds it when
 /// something is at their targets (`Repos::move_forks_blocked`): a held demo reads no folder, so never says so itself.
 #[cfg(test)]
-pub(crate) fn note_forks_stay(dialogs: &mut Dialogs, names: &[&str]) {
+pub(crate) fn note_forks_stay(dialogs: &mut Dialogs, blocked: &[(&str, &str)]) {
     if let Some(state) = dialogs.folder.as_mut() {
-        folder::note_forks_stay(state, names);
+        folder::note_forks_stay(state, blocked);
     }
 }
 

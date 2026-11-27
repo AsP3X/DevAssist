@@ -1139,9 +1139,10 @@ pub struct ForksFolderMoved {
 /// moves `<from_checkout>-fork` to `<to_checkout>-fork` the way
 /// `move_checkout` moves a checkout, then repairs the fork folders in it
 /// (Git worktrees of the collection, which name each other by their
-/// paths). None when there is no forks collection (`forks_collection`):
-/// a folder that only has its name is left alone. An error, as a clause, when
-/// it cannot go: something is at the target already ("something is at
+/// paths). None when the folder beside it is no forks collection
+/// (`forks_collection`): a folder that only has its name is left alone. An
+/// error, as a clause, when it cannot go: its configuration cannot be read
+/// (`cannot_read`), something is at the target already ("something is at
 /// D:\code\api-fork already"), the move failed, or it was cancelled
 /// ("cancelled"); the forks folder is then where it was, whole.
 ///
@@ -1154,8 +1155,12 @@ pub fn move_forks_folder(
     to_checkout: &Path,
     mut on_line: impl FnMut(&str, bool),
 ) -> Result<Option<ForksFolderMoved>, String> {
-    let (Some(from), Some(to)) = (forks_collection(from_checkout), forks_folder(to_checkout))
-    else {
+    let from = match forks_collection(from_checkout) {
+        ForksFolder::Collection(from) => from,
+        ForksFolder::NotOne => return Ok(None),
+        ForksFolder::CannotTell(_, why) => return Err(cannot_read(&why)),
+    };
+    let Some(to) = forks_folder(to_checkout) else {
         return Ok(None);
     };
     if stopped(&from) {
@@ -1179,31 +1184,103 @@ pub fn move_forks_folder(
     }))
 }
 
-/// The forks collection of a checkout: the folder beside it (`forks_folder`)
-/// when it is one that `save_forks` made, which is so when its `.git` is a
-/// folder and its configuration names the repository whose forks it holds
-/// (`devassist.forksof`, any value that is not empty). None for anything
-/// else of that name, such as someone's own clone or a plain folder. The
-/// configuration file is read by Git directly, so a folder that is no
-/// repository is not mistaken for one above it.
-pub fn forks_collection(checkout: &Path) -> Option<PathBuf> {
-    let dest = forks_folder(checkout)?;
-    crate::sys::note_read();
-    let config = dest.join(".git").join("config");
-    if !config.is_file() {
-        return None;
-    }
-    let marked = git_command()
-        .arg("config")
-        .arg("--file")
-        .arg(&config)
-        .args(["--get", FORKS_KEY])
-        .output()
-        .ok()?;
-    let value = String::from_utf8_lossy(&marked.stdout);
-    (marked.status.success() && !value.trim().is_empty()).then_some(dest)
+/// What the folder beside a checkout (`forks_folder`) is for its forks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForksFolder {
+    /// The collection `save_forks` made, at this path.
+    Collection(PathBuf),
+    /// No collection: nothing is there, its `.git` is no folder, or its
+    /// configuration was read and names no original.
+    NotOne,
+    /// A `.git` folder is there, at this path, but its configuration
+    /// cannot be read; why, as a clause.
+    CannotTell(PathBuf, String),
 }
 
+/// What the folder beside a checkout is for its forks (`ForksFolder`): a
+/// collection when its `.git` is a folder and its configuration names the
+/// original whose forks it holds (`devassist.forksof`, as `save_forks`
+/// sets it, any value that is not empty); not one when there is no `.git`
+/// folder, or the configuration was read and has no such value or an
+/// empty one; cannot be told when there is a `.git` folder whose
+/// configuration cannot be read (missing, unreadable, not UTF-8). The
+/// configuration is read as text: no Git runs. One look at the disk.
+pub fn forks_collection(checkout: &Path) -> ForksFolder {
+    crate::sys::note_read();
+    let Some(dest) = forks_folder(checkout) else {
+        return ForksFolder::NotOne;
+    };
+    let git = dest.join(".git");
+    if !git.is_dir() {
+        return ForksFolder::NotOne;
+    }
+    let text = match fs::read(git.join("config")) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => return ForksFolder::CannotTell(dest, "it is not UTF-8 text".into()),
+        },
+        Err(err) => return ForksFolder::CannotTell(dest, err.to_string()),
+    };
+    match config_value(&text, "devassist", "forksof") {
+        Some(value) if !value.is_empty() => ForksFolder::Collection(dest),
+        _ => ForksFolder::NotOne,
+    }
+}
+
+/// The clause a move says of a forks folder `forks_collection` cannot
+/// tell, for the reason `why`.
+pub(crate) fn cannot_read(why: &str) -> String {
+    format!("its Git configuration could not be read ({why})")
+}
+
+/// The value of `key` in the section `section` (without a subsection) of
+/// a Git configuration file's `text`, as Git reads it for a simple value:
+/// names compared without regard to case, `=` with any spaces or tabs, the
+/// value trimmed, its quotes taken off when it is quoted whole, and a
+/// comment after it (`#` or `;`) left out. The last one counts. Lines that
+/// start with `#` or `;` are comments.
+fn config_value(text: &str, section: &str, key: &str) -> Option<String> {
+    let mut inside = false;
+    let mut found = None;
+    for line in text.lines() {
+        let mut line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            let Some((header, after)) = rest.split_once(']') else {
+                inside = false;
+                continue;
+            };
+            inside = header.trim().eq_ignore_ascii_case(section);
+            line = after.trim();
+            if line.is_empty() {
+                continue;
+            }
+        }
+        if !inside {
+            continue;
+        }
+        let (name, value) = line.split_once('=').unwrap_or((line, ""));
+        if !name.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let value = value.trim();
+        let value = match value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            Some(quoted) => quoted,
+            None => value
+                .split(['#', ';'])
+                .next()
+                .unwrap_or_default()
+                .trim_end(),
+        };
+        found = Some(value.to_string());
+    }
+    found
+}
 /// Why `git worktree repair` failed, from what it wrote to its error
 /// output: the first line that is an error, else the last line (it also
 /// writes lines of what it repaired), without a closing full stop.
@@ -1228,11 +1305,17 @@ fn repair_fork_folders(dest: &Path) -> Result<(), String> {
     // The fork folders' paths are given to Git as they are: absolute, so
     // that `-C` does not resolve them a second time.
     let dest = &std::path::absolute(dest).map_err(|err| format!("{}: {err}", dest.display()))?;
+    let entries = dest.join(".git").join("worktrees");
     let folders: Vec<PathBuf> = fs::read_dir(dest)
         .map_err(|err| format!("{}: {err}", dest.display()))?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.join(".git").is_file())
+        // A folder whose entry in the collection is gone cannot be
+        // repaired: `fork_folders` says what becomes of it, as before.
+        .filter(|path| {
+            worktree_entry(&path.join(".git")).is_none_or(|id| entries.join(id).is_dir())
+        })
         .collect();
     if folders.is_empty() {
         return Ok(());
@@ -1254,6 +1337,22 @@ fn repair_fork_folders(dest: &Path) -> Result<(), String> {
         }
         Err(err) => Err(format!("could not start git ({err})")),
     }
+}
+
+/// The name of the entry in its collection's `.git/worktrees` that the
+/// `.git` file of a fork folder points at (the last part of its `gitdir:`
+/// line). None when the file cannot be read as one: Git judges it then.
+fn worktree_entry(git_file: &Path) -> Option<String> {
+    let text = fs::read_to_string(git_file).ok()?;
+    let gitdir = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))?;
+    let id = gitdir
+        .trim()
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()?;
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 /// Whether work on `path` is to stop: the run was cancelled (in tests also
@@ -1418,8 +1517,6 @@ fn count_files(dir: &Path) -> u64 {
         .sum()
 }
 
-/// Copies a folder with everything in it. `on_file` hears each file that
-/// has been copied.
 /// Why a copy stopped before it was complete.
 #[derive(Debug)]
 enum CopyStop {
@@ -1444,6 +1541,8 @@ impl std::fmt::Display for CopyStop {
     }
 }
 
+/// Copies a folder with everything in it. `on_file` hears each file that
+/// has been copied. It stops between entries when the run is cancelled.
 fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(), CopyStop> {
     fs::create_dir_all(to).map_err(|err| format!("{}: {err}", to.display()))?;
     let entries = fs::read_dir(from).map_err(|err| format!("{}: {err}", from.display()))?;
@@ -1574,10 +1673,10 @@ pub fn forks_folder(path: &Path) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{name}-fork")))
 }
 
-/// Whether the forks of a checkout have been cloned beside it.
+/// Whether the forks of a checkout have been cloned beside it: the folder
+/// there is a forks collection (`forks_collection`). One look at the disk.
 pub fn forks_cloned(path: &Path) -> bool {
-    crate::sys::note_read();
-    forks_folder(path).is_some_and(|dest| dest.join(".git").is_dir())
+    matches!(forks_collection(path), ForksFolder::Collection(_))
 }
 
 /// A fork to fetch into the collection.
@@ -2260,15 +2359,18 @@ fn fork_folders(
     on_line: &mut dyn FnMut(&str, bool),
 ) -> Result<u32, String> {
     use std::collections::{BTreeMap, HashMap, HashSet};
-    // Fork folders that moved with the collection (by a move that could
-    // not repair them, or by hand) are repaired, not pruned.
-    if let Err(why) = repair_fork_folders(dest) {
-        on_line(
+    // Fork folders that moved with the collection are repaired, not
+    // pruned. While they cannot be, nothing is pruned, so that a later
+    // fetch (with a newer Git, say) can still repair them.
+    match repair_fork_folders(dest) {
+        Ok(()) => {
+            let _ = git_lines(dest, &["worktree", "prune"]);
+        }
+        Err(why) => on_line(
             &format!("The fork folders could not be repaired: {why}."),
             false,
-        );
+        ),
     }
-    let _ = git_lines(dest, &["worktree", "prune"]);
     // Every commit of the original: a branch that ends on one of them
     // has nothing of its own.
     let pattern = format!("--remotes={original}");
@@ -5142,7 +5244,10 @@ refs/remotes/fork/dev\tiii\t\t
         let _gone = Gone(root.clone());
         // A collection DevAssist made is one.
         let (api, _) = checkout_with_forks(&root);
-        assert_eq!(forks_collection(&api), forks_folder(&api));
+        assert_eq!(
+            forks_collection(&api),
+            ForksFolder::Collection(forks_folder(&api).unwrap())
+        );
         // A plain folder, and someone's own clone, beside a checkout are not.
         fs::create_dir_all(root.join("mine")).unwrap();
         git(&root.join("mine"), &["clone", "-q", "../ada", "web"]);
@@ -5156,7 +5261,7 @@ refs/remotes/fork/dev\tiii\t\t
         ] {
             let old = root.join("mine").join(name);
             let other = forks_folder(&old).unwrap();
-            assert_eq!(forks_collection(&old), None, "{name}");
+            assert_eq!(forks_collection(&old), ForksFolder::NotOne, "{name}");
             let before = fs::read(other.join(file)).unwrap();
             let listing = entries(&other);
             let new = root.join("moved").join(name);
@@ -5172,6 +5277,208 @@ refs/remotes/fork/dev\tiii\t\t
             assert_eq!(entries(&other), listing, "{name}");
             assert!(!forks_folder(&new).unwrap().exists(), "{name}");
         }
+    }
+
+    #[test]
+    fn the_marker_of_a_forks_collection_is_read_from_the_configuration_text() {
+        let read = |text: &str| config_value(text, "devassist", "forksof");
+        assert_eq!(
+            read("[devassist]\n\tforksof = ada/api\n").as_deref(),
+            Some("ada/api")
+        );
+        assert_eq!(
+            read("[DevAssist]\nForksOf=ada/api").as_deref(),
+            Some("ada/api")
+        );
+        assert_eq!(
+            read("[devassist]\n  forksof \t=\t \"ada/api\"  \n").as_deref(),
+            Some("ada/api")
+        );
+        assert_eq!(
+            read("[devassist]\r\n\tforksof = ada/api\r\n").as_deref(),
+            Some("ada/api")
+        );
+        assert_eq!(
+            read("[devassist]\n\tforksof = ada/api ; a note\n").as_deref(),
+            Some("ada/api")
+        );
+        // Comments, other sections and other keys are not it; the last one counts.
+        assert_eq!(
+            read("# [devassist]\n; forksof = x\n[core]\n\tforksof = x\n"),
+            None
+        );
+        assert_eq!(
+            read("[devassist]\n\tother = x\n[remote \"origin\"]\n\tforksof = x\n"),
+            None
+        );
+        assert_eq!(
+            read("[devassist]\n\tforksof = a/b\n[devassist]\n\tforksof = c/d\n").as_deref(),
+            Some("c/d")
+        );
+        assert_eq!(read("[devassist \"sub\"]\n\tforksof = x\n"), None);
+        assert_eq!(read("[devassist]\n\tforksof =\n").as_deref(), Some(""));
+        assert_eq!(read(""), None);
+
+        // What Git itself writes is read back, with either line end.
+        let root = std::env::temp_dir().join(format!("devassist-marker-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main", "made"]);
+        let made = root.join("made");
+        git(&made, &["config", FORKS_KEY, "ada/api"]);
+        git(&made, &["config", "core.bare", "true"]);
+        let text = fs::read_to_string(made.join(".git").join("config")).unwrap();
+        assert_eq!(read(&text).as_deref(), Some("ada/api"), "{text}");
+        let crlf = text.replace("\r\n", "\n").replace('\n', "\r\n");
+        assert_eq!(read(&crlf).as_deref(), Some("ada/api"));
+    }
+
+    #[test]
+    fn a_forks_folder_is_a_collection_is_none_or_cannot_be_told() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-forks-kind-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let checkout = |name: &str| root.join(name);
+        let beside = |name: &str| root.join(format!("{name}-fork"));
+        fs::create_dir_all(&root).unwrap();
+        // Nothing beside it, a plain folder, a `.git` file: none.
+        fs::create_dir_all(beside("plain")).unwrap();
+        fs::create_dir_all(beside("file")).unwrap();
+        fs::write(beside("file").join(".git"), "gitdir: elsewhere").unwrap();
+        // Marked, marked empty, without the marker.
+        for (name, config) in [
+            ("marked", "[devassist]\n\tforksof = ada/api\n"),
+            ("empty", "[devassist]\n\tforksof =\n"),
+            ("unmarked", "[core]\n\tbare = true\n"),
+        ] {
+            fs::create_dir_all(beside(name).join(".git")).unwrap();
+            fs::write(beside(name).join(".git").join("config"), config).unwrap();
+        }
+        // A `.git` folder whose configuration cannot be read: missing, not text.
+        fs::create_dir_all(beside("missing").join(".git")).unwrap();
+        fs::create_dir_all(beside("binary").join(".git")).unwrap();
+        fs::write(
+            beside("binary").join(".git").join("config"),
+            [0xff, 0xfe, 0x00, 0x80],
+        )
+        .unwrap();
+        for name in ["none", "plain", "file", "empty", "unmarked"] {
+            assert_eq!(
+                forks_collection(&checkout(name)),
+                ForksFolder::NotOne,
+                "{name}"
+            );
+            assert!(!forks_cloned(&checkout(name)), "{name}");
+        }
+        assert_eq!(
+            forks_collection(&checkout("marked")),
+            ForksFolder::Collection(beside("marked"))
+        );
+        assert!(forks_cloned(&checkout("marked")));
+        for name in ["missing", "binary"] {
+            let ForksFolder::CannotTell(path, why) = forks_collection(&checkout(name)) else {
+                panic!("{name}: {:?}", forks_collection(&checkout(name)));
+            };
+            assert_eq!(path, beside(name));
+            assert!(!why.is_empty() && !why.ends_with('.'), "{name}: {why}");
+            assert!(!forks_cloned(&checkout(name)), "{name}");
+            // A move leaves it where it is, whole, and says why.
+            let to = root.join("moved").join(name);
+            let said = move_forks_folder(&checkout(name), &to, |_, _| {}).unwrap_err();
+            assert_eq!(
+                said,
+                format!("its Git configuration could not be read ({why})")
+            );
+            assert!(beside(name).join(".git").is_dir() && !forks_folder(&to).unwrap().exists());
+        }
+        // One look at the disk for each question.
+        #[cfg(feature = "testing")]
+        {
+            let before = crate::sys::disk_reads_here();
+            let _ = forks_cloned(&checkout("marked"));
+            assert_eq!(crate::sys::disk_reads_here(), before + 1);
+        }
+    }
+
+    #[test]
+    fn a_fetch_leaves_a_fork_folder_whose_entry_is_gone_as_it_did() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-forks-entry-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let (api, forks) = checkout_with_forks(&root);
+        let dest = forks_folder(&api).unwrap();
+        remove_tree(&dest.join(".git").join("worktrees").join("bob")).unwrap();
+        let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
+        let original = ("ada".to_string(), "api".to_string());
+        let mut lines = Vec::new();
+        save_forks(&api, &dest, &original, &forks, &url_of, None, |line, _| {
+            lines.push(line.to_string())
+        })
+        .unwrap();
+        // No word of a repair: the folder is left as a fetch left it before.
+        assert!(
+            !lines.iter().any(|line| line.contains("repaired")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("No folder for bob")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_fetch_whose_repair_fails_says_so_once_and_prunes_nothing() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-forks-noprune-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let (old, forks) = checkout_with_forks(&root);
+        let old_forks = forks_folder(&old).unwrap();
+        // Moved by hand, the checkout and its forks folder together.
+        let new = root.join("there").join("api");
+        let new_forks = forks_folder(&new).unwrap();
+        fs::create_dir_all(root.join("there")).unwrap();
+        fs::rename(&old, &new).unwrap();
+        fs::rename(&old_forks, &new_forks).unwrap();
+        seams::fail_repair_once(&new_forks);
+        let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
+        let original = ("ada".to_string(), "api".to_string());
+        let mut lines = Vec::new();
+        save_forks(
+            &new,
+            &new_forks,
+            &original,
+            &forks,
+            &url_of,
+            None,
+            |line, _| lines.push(line.to_string()),
+        )
+        .unwrap();
+        let said: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("repaired"))
+            .collect();
+        assert_eq!(
+            said,
+            ["The fork folders could not be repaired: refused by the test."]
+        );
+        assert!(
+            new_forks
+                .join(".git")
+                .join("worktrees")
+                .join("bob")
+                .is_dir(),
+            "it was pruned"
+        );
+        // The next fetch repairs them.
+        let again = fetch_again(&root, &new, &forks);
+        assert_eq!((again.fetched, again.unchanged, again.folders), (0, 2, 1));
+        works_at(&new, &old_forks);
     }
 
     #[test]

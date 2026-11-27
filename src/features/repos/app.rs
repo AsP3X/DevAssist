@@ -1250,7 +1250,7 @@ mod tests {
             .find(|repo| repo.folder == "web")
             .unwrap();
         web.path = root.join("web");
-        std::fs::create_dir_all(root.join("web-fork").join(".git")).unwrap();
+        mark_forks_collection(&root.join("web-fork"), "ada/web");
         press(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
         let view = app.forks.as_ref().expect("the overview is open");
         assert!(view.loading);
@@ -1336,7 +1336,7 @@ mod tests {
             .find(|repo| repo.folder == "web")
             .unwrap();
         web.path = root.join("web");
-        std::fs::create_dir_all(root.join("web-fork").join(".git")).unwrap();
+        mark_forks_collection(&root.join("web-fork"), "ada/web");
         app.selected = Some("api".into());
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);

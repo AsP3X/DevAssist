@@ -413,7 +413,11 @@ Only a forks folder DevAssist made goes along: one whose Git configuration
 says whose forks it holds (`devassist.forksof`, which cloning the forks sets).
 Any other folder called `api-fork`, such as a clone of your own, stays where
 it is, untouched, and the move says nothing about it. So does a folder that is
-on the list as a repository of its own: it moves only when you move it.
+on the list as a repository of its own: it moves only when you move it. The
+menu and `f` count the forks as cloned only for a forks folder DevAssist
+made. A folder whose `.git` is there but whose configuration cannot be read
+stays where it is too, and the move names it: "The forks folder of api
+stayed at D:\code\api-fork: its Git configuration could not be read (…)."
 
 When something is at that place already, or another repository of the same
 move goes there, the forks folder cannot follow. The progress dialog says so
@@ -424,11 +428,12 @@ fails or is cancelled. The run then ends with a fault that names it, which the
 progress dialog and the status line keep: "Moved api to E:\work. The forks
 folder of api stayed at D:\code\api-fork: something is at E:\work\api-fork
 already." If the forks folder moved but its fork folders could not be
-repaired (`git worktree repair` needs Git 2.30 or newer), the run ends with a
-fault that says so: "… Fetch the forks again to repair them." Every fetch of
-the forks repairs fork folders that moved with their forks folder before it
-does anything else with them, so that also holds for a forks folder you moved
-yourself together with its repository.
+repaired, the run ends with a fault that says so: "… Fetch the forks again to
+repair them." Every fetch of the forks repairs the fork folders of a forks
+folder that was moved before it does anything else with them. The repair
+needs Git 2.30 or newer: with an older Git it fails at the move and at each
+fetch, which then says "The fork folders could not be repaired: …" and
+removes nothing, so they can still be repaired once Git is updated.
 
 ### Migrate: pushing a repository to another service
 
@@ -766,8 +771,9 @@ it reads "That folder is on another drive."), that everything is copied first an
 original is deleted only after the copy is complete, and that programs with
 files of the repositories open should be closed first. When something is at
 the place a repository's forks folder would go, or another row of the move
-goes there, a note under the rows says that it stays: "The forks folder of api stays where it is: something is at
-the target already." The repository itself still moves.
+goes there, or its Git configuration cannot be read, a note under the rows
+says that it stays and why: "The forks folder of api stays where it is:
+something is at E:\work\api-fork already." The repository itself still moves.
 
 The main button counts only the rows that move: "Move" for one, "Move 3
 repositories" for three. It is off while none can move. `Enter` in the field

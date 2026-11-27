@@ -1203,7 +1203,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
             if shot.name == MOVE_FORKS_STAY {
-                dialogs::note_forks_stay(&mut dialogs, &["api"]);
+                dialogs::note_forks_stay(&mut dialogs, &[("api", r"something is at E:\work\api-fork already")]);
             }
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
             found = planned.as_ref().and_then(dialogs::add_found_box);

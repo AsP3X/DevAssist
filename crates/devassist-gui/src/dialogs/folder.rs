@@ -30,7 +30,7 @@
 use std::sync::Arc;
 
 use devassist_core::repos::gitops;
-use devassist_core::repos::state::{Action, MoveLine, Purpose, Repos};
+use devassist_core::repos::state::{Action, ForksBlocked, MoveLine, Purpose, Repos};
 use egui::text::LayoutJob;
 use egui::{Align2, Color32, FontFamily, FontId, Galley, Id, Key, Painter, Rect, Sense, Stroke, Ui, pos2, vec2};
 
@@ -155,14 +155,28 @@ fn drive_note(root: Option<&str>) -> String {
     )
 }
 
-/// The note on the forks folders that stay where they are, for the checkouts `names` whose forks folder cannot follow
-/// them (`Repos::move_forks_blocked`), named by the title's rule; none when every one can.
-fn forks_note(names: &[String]) -> Option<String> {
-    match names {
-        [] => None,
-        [name] => Some(format!("The forks folder of {name} stays where it is: something is at the target already.")),
-        many => Some(format!("The forks folders of {} stay where they are: something is at their targets already.", remove::named(many))),
+/// How many of the forks folders that stay are named one a line, each with its own reason, before the rest is counted.
+const FORKS_NOTE_LINES: usize = 3;
+
+/// The note on the forks folders that stay where they are, for the checkouts `blocked` whose forks folder cannot follow
+/// them, with the core's reason for each (`Repos::move_forks_blocked`); none when every one can. One, or several for the
+/// same reason: one sentence, the names by the title's rule. Several for reasons of their own: a sentence each, one a
+/// line, [`FORKS_NOTE_LINES`] at most, then how many more.
+fn forks_note(blocked: &[ForksBlocked]) -> Option<String> {
+    let first = blocked.first()?;
+    let one = |blocked: &ForksBlocked| format!("The forks folder of {} stays where it is: {}.", blocked.name, blocked.why);
+    if blocked.len() == 1 {
+        return Some(one(first));
     }
+    if blocked.iter().all(|other| other.why == first.why) {
+        let names: Vec<String> = blocked.iter().map(|blocked| blocked.name.clone()).collect();
+        return Some(format!("The forks folders of {} stay where they are: {}.", remove::named(&names), first.why));
+    }
+    let mut lines: Vec<String> = blocked.iter().take(FORKS_NOTE_LINES).map(one).collect();
+    if blocked.len() > FORKS_NOTE_LINES {
+        lines.push(format!("And {} more.", blocked.len() - FORKS_NOTE_LINES));
+    }
+    Some(lines.join("\n"))
 }
 
 /// How the line under the field is drawn.
@@ -210,7 +224,7 @@ pub(super) struct State {
     reason: Option<String>,
     /// For a move, the checkouts whose forks folder cannot follow them (`Repos::move_forks_blocked`), asked for with
     /// them.
-    forks: Vec<String>,
+    forks: Vec<ForksBlocked>,
 }
 
 impl State {
@@ -266,10 +280,10 @@ pub(super) fn reason_box(places: Places, repos: &Repos, state: &State) -> Option
     if refused || state.reason.is_some() { places.note.or(places.hint) } else { None }
 }
 
-/// Has the Move dialog's `state` note that the forks folders of `names` cannot follow them, as `follow` asks the core.
+/// Has the Move dialog's `state` note that the forks folders of `blocked` (name and the core's reason) cannot follow them, as `follow` asks the core.
 #[cfg(test)]
-pub(super) fn note_forks_stay(state: &mut State, names: &[&str]) {
-    state.forks = names.iter().map(|name| (*name).to_owned()).collect();
+pub(super) fn note_forks_stay(state: &mut State, blocked: &[(&str, &str)]) {
+    state.forks = blocked.iter().map(|(name, why)| ForksBlocked { name: (*name).to_owned(), why: (*why).to_owned() }).collect();
 }
 
 /// The parts of the folder dialog.
@@ -1026,15 +1040,40 @@ mod tests {
     #[test]
     fn the_line_says_a_move_keeps_the_forks_and_the_note_names_those_that_stay() {
         assert_eq!(MOVE_LINE, "Each keeps its folder name, its group, the automatic pull, the saved pull requests and its forks.");
-        let names = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        let blocked = |pairs: &[(&str, &str)]| {
+            pairs.iter().map(|(name, why)| ForksBlocked { name: (*name).to_owned(), why: (*why).to_owned() }).collect::<Vec<_>>()
+        };
         assert_eq!(forks_note(&[]), None);
-        assert_eq!(forks_note(&names(&["api"])).as_deref(), Some("The forks folder of api stays where it is: something is at the target already."));
+        // One: the core's reason.
         assert_eq!(
-            forks_note(&names(&["api", "web"])).as_deref(),
-            Some("The forks folders of api and web stay where they are: something is at their targets already.")
+            forks_note(&blocked(&[("api", r"something is at E:\work\api-fork already")])).as_deref(),
+            Some(r"The forks folder of api stays where it is: something is at E:\work\api-fork already.")
         );
-        // At its longest, five repositories counted, it takes two lines (as the dialog's places allow for).
-        let longest = forks_note(&names(&["a", "b", "c", "d", "e"])).unwrap();
+        // Several for the same reason: one sentence.
+        let same = "its Git configuration could not be read (denied)";
+        assert_eq!(
+            forks_note(&blocked(&[("api", same), ("web", same)])).as_deref(),
+            Some("The forks folders of api and web stay where they are: its Git configuration could not be read (denied).")
+        );
+        // Several for their own reasons: a line each, three at most, then how many more.
+        let own = blocked(&[("a", "one"), ("b", "two"), ("c", "three"), ("d", "four"), ("e", "five")]);
+        assert_eq!(
+            forks_note(&own).as_deref(),
+            Some(
+                "The forks folder of a stays where it is: one.\nThe forks folder of b stays where it is: two.\nThe forks folder of c stays \
+                 where it is: three.\nAnd 2 more."
+            )
+        );
+        assert_eq!(
+            forks_note(&own[..3]).as_deref(),
+            Some(
+                "The forks folder of a stays where it is: one.\nThe forks folder of b stays where it is: two.\nThe forks folder of c stays \
+                 where it is: three."
+            )
+        );
+        // Five for the same reason, counted, take two lines (as the dialog's places allow for).
+        let five = ["a", "b", "c", "d", "e"].map(|name| (name, "something is at the place it would go already"));
+        let longest = forks_note(&blocked(&five)).unwrap();
         assert!(longest.starts_with("The forks folders of 5 repositories stay"), "{longest}");
         let mut rows = 0;
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
@@ -1042,7 +1081,7 @@ mod tests {
         assert_eq!(rows, 2, "{longest}");
         // The demo's Move is held: it reads no folder, and has no note.
         let window = move_dialog(&["api", "web"], OTHER);
-        assert_eq!(state(&window).forks, Vec::<String>::new());
+        assert_eq!(state(&window).forks, Vec::<ForksBlocked>::new());
         assert_eq!(parts(&window).forks, None);
     }
 
@@ -1063,19 +1102,20 @@ mod tests {
         std::fs::create_dir_all(there.join("api-fork")).unwrap();
         // Asked again as the text changes.
         type_over(&mut window, &format!("{}{}", there.display(), std::path::MAIN_SEPARATOR));
-        assert_eq!(state(&window).forks, ["api"]);
+        assert_eq!(state(&window).forks.iter().map(|blocked| blocked.name.as_str()).collect::<Vec<_>>(), ["api"]);
         let places = parts(&window);
         let (list, forks) = (places.list.unwrap(), places.forks.expect("the note on the forks folder"));
         assert!(forks.top() >= list.bottom() && forks.bottom() <= places.buttons.top() && places.pane.contains_rect(forks));
         assert!(places.pane.height() > tall, "the dialog did not make room for the note");
-        let said = forks_note(&["api".to_owned()]).unwrap();
+        let said = forks_note(&state(&window).forks).unwrap();
+        assert_eq!(said, format!("The forks folder of api stays where it is: something is at {} already.", there.join("api-fork").display()));
         assert!(window.texts.iter().any(|(words, rect, cut)| *words == said && !cut && forks.contains_rect(*rect)), "the note is not drawn");
         // Both still move: the note only says what stays.
         assert_eq!(window.said(), ["Cancel", "Move 2 repositories"]);
         // A folder only named like a forks folder is none: no note.
         std::fs::write(git_dir.join("config"), "[core]\n\tbare = false\n").unwrap();
         type_over(&mut window, &there.display().to_string());
-        assert_eq!(state(&window).forks, Vec::<String>::new());
+        assert_eq!(state(&window).forks, Vec::<ForksBlocked>::new());
         assert_eq!(parts(&window).forks, None);
         window.session.close();
     }
