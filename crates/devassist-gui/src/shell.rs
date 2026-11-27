@@ -5,7 +5,9 @@
 //! on it, or by [`placeholder`]; [`draw`] puts the text, icons and buttons of the frame over them all.
 
 use devassist_core::update::VERSION;
-use egui::{Align2, Color32, FontFamily, FontId, Id, Painter, Pos2, Rect, Response, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2};
+use egui::{
+    Align2, Color32, FontFamily, FontId, Id, Painter, PointerButton, Pos2, Rect, Response, Role, Sense, Ui, Vec2, ViewportCommand, WidgetInfo, pos2,
+};
 
 use crate::assets::{self, Icon};
 use crate::baker::{Sheet, Want};
@@ -276,19 +278,26 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
     let painter = ui.painter().clone();
     let toggle = layout.toggle;
     let mut back = false;
+    // The second (or third) click of a double click is the rest of one press: the button in that place acts once, also
+    // when the first press put another button there (back, then the sidebar's).
+    let second =
+        ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary) || input.pointer.button_triple_clicked(PointerButton::Primary));
     if shown.back.is_some() {
         let response = ui.interact(toggle, ui.scope_id().with(BACK_BUTTON), Sense::CLICK).on_hover_text(BACK);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, BACK));
         if response.hovered() {
             painter.circle_filled(toggle.center(), toggle.height() / 2.0, palette.on_glass.gamma_multiply(HOVER_OPACITY));
         }
-        back = response.clicked() && !stale;
+        back = response.clicked() && !stale && !second;
         if back {
             ui.ctx().request_repaint();
         }
         draw_icon(&painter, toggle.center(), Icon::ArrowLeft, ICON, palette.on_glass);
     } else {
-        if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked() && !stale {
+        if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked()
+            && !stale
+            && !second
+        {
             *sidebar_shown = !*sidebar_shown;
             ui.ctx().request_repaint();
         }
