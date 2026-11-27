@@ -102,12 +102,6 @@ pub fn shown(repos: &Repos) -> bool {
     repos.forks.is_some()
 }
 
-/// The top row's title while the forks show: "Forks of {name}"; `None` while they do not.
-#[must_use]
-pub fn title(repos: &Repos) -> Option<String> {
-    repos.forks.as_ref().map(forks_of)
-}
-
 /// What the status bar says while the forks show; `None` while they do not. Its words: what the core said since the
 /// person last did something to the forks (`Repos::fork_notice`), in the danger colour when it is an error; else,
 /// while rows show, an error of the last read (until a read goes well); else the core's sentence about the forks.
@@ -1085,14 +1079,14 @@ mod tests {
         let (mut back, mut asked) = (false, Vec::new());
         let output = ctx.run_ui(input, |ui| {
             let layout = layout_at(size);
-            let title = title(repos);
+            // As the app draws it: the title as the forks' plan shows it.
+            let planned = repos.forks.as_ref().map(|view| plan(view, &layout, ui.painter()));
             let status = status(repos);
-            let shown = Shown { mode: Mode::Light, waiting: 0, status: status.as_ref(), back: title.as_deref() };
+            let shown = Shown { mode: Mode::Light, waiting: 0, status: status.as_ref(), back: planned.as_ref().map(Plan::title) };
             let (mut sidebar, mut page) = (true, Page::Repositories);
             back = shell::draw(ui, &layout, &mut sidebar, &mut page, shown);
-            if let Some(view) = repos.forks.as_ref() {
-                let plan = plan(view, &layout, ui.painter());
-                asked = show(ui, &layout, &plan, Some(&sheet()), Mode::Light, screen, true);
+            if let Some(plan) = &planned {
+                asked = show(ui, &layout, plan, Some(&sheet()), Mode::Light, screen, true);
             }
         });
         let shapes = output.shapes.iter().map(|clipped| clipped.shape.clone()).collect();
@@ -1295,7 +1289,7 @@ mod tests {
     fn the_forks_take_the_tables_place_and_back_returns() {
         let mut repos = forks_open();
         assert!(shown(&repos));
-        assert_eq!(title(&repos).as_deref(), Some("Forks of api"));
+        assert_eq!(forks_of(view(&repos)), "Forks of api");
         let ctx = context();
         let mut screen = Screen::default();
         let toggle = layout_at([1440.0, 900.0]).toggle;
@@ -1596,7 +1590,7 @@ mod tests {
         let mut repos = forks_open();
         for original in ["", "acme/", " "] {
             original.clone_into(&mut repos.forks.as_mut().unwrap().original);
-            assert_eq!(title(&repos).as_deref(), Some("Forks of api"), "{original:?}");
+            assert_eq!(forks_of(view(&repos)), "Forks of api", "{original:?}");
         }
         repos.forks.as_mut().unwrap().dest = std::path::PathBuf::new();
         let said = status(&repos).unwrap();

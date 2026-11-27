@@ -51,22 +51,25 @@ pub(super) struct Fetch {
     progress: ForkProgress,
     /// The collection, once the core knows it.
     into: Option<PathBuf>,
+    /// The run it is of (`Repos::job_stamp`).
+    stamp: u64,
 }
 
 /// The fetch of forks `repos`'s run is, as the core says it now.
 fn fetch_now(repos: &Repos) -> Option<Fetch> {
-    repos.fork_progress().map(|progress| Fetch { progress, into: repos.fork_job_into() })
+    repos.fork_progress().map(|progress| Fetch { progress, into: repos.fork_job_into(), stamp: repos.job_stamp() })
 }
 
-/// The fetch of forks the dialog of `repos`'s run shows: the core's now, or, once the run has ended (the core says no
-/// more of it), `kept`, the last one the dialog showed.
+/// The fetch of forks the dialog of `repos`'s run shows: the core's now, or else `kept`, the last one the dialog showed,
+/// when it is of this same run: between two repositories of a run of several (until the next one says its total) and
+/// once the run has ended (the core says no more of it). Another run never shows it.
 fn fetch_shown(repos: &Repos, kept: Option<&Fetch>) -> Option<Fetch> {
-    let job = repos.job.as_ref()?;
-    fetch_now(repos).or_else(|| kept.filter(|_| !job.running()).cloned())
+    repos.job.as_ref()?;
+    fetch_now(repos).or_else(|| kept.filter(|kept| kept.stamp == repos.job_stamp()).cloned())
 }
 
-/// Keeps in `dialogs` the fetch of forks `repos`'s run is now, so the dialog of a run that has ended shows its last
-/// count until it closes.
+/// Keeps in `dialogs` the fetch of forks `repos`'s run is now, so the dialog shows its run's last count until the next
+/// one, or, once the run has ended, until it closes.
 fn keep_fetch(repos: &Repos, dialogs: &mut Dialogs) {
     if let Some(now) = fetch_now(repos) {
         dialogs.fetch = Some(now);
@@ -113,8 +116,13 @@ fn into_line(painter: &Painter, folder: &str, width: f32) -> String {
         let mid = f32::midpoint(low, high);
         if fits(&cut(mid)) { low = mid } else { high = mid }
     }
-    cut(low)
+    // With no room for any of the folder, the line names it in words; the hover still has the whole path.
+    let tail = widgets::path_tail_in(painter, folder, &face, low);
+    if tail.trim_start_matches('…').is_empty() { into_words(THE_FORKS_FOLDER) } else { into_words(&tail) }
 }
+
+/// The folder in the line under a fetch's title when there is no room for any of its path.
+const THE_FORKS_FOLDER: &str = "the forks folder";
 
 /// How many times [`into_line`] halves the room it looks in: to well under a character of a folder of a few
 /// thousand points.
@@ -1058,6 +1066,102 @@ mod tests {
             window.frame_at(Vec::new(), Some(10.0 + 0.2 * f64::from(step)));
         }
         assert!(window.texts.iter().any(|(words, ..)| *words == folder), "no hover text with the whole folder");
+    }
+
+    #[test]
+    fn a_count_belongs_to_its_own_run() {
+        use devassist_core::repos::state::testing;
+        let mut window = Window::new(fetch_session(&fetched(false)));
+        window.frame(Vec::new());
+        assert!(parts(&window).count.is_some());
+        // The fetch ends; a queued update starts in the same open dialog.
+        window.session.repos_mut().unwrap().job.as_mut().unwrap().finish(Ok("Updated the forks of api.".to_owned()), false);
+        window.frame(Vec::new());
+        assert!(parts(&window).count.is_some(), "the ended fetch keeps its count");
+        testing::start_run(window.session.repos_mut().unwrap(), run(&["web"], 3));
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Progress));
+        let plain = |window: &Window| {
+            let places = parts(window);
+            let summary = window.job().summary().to_string();
+            assert_eq!(places.count, None, "the update shows the fetch's count");
+            assert!((places.pane.width() - PROGRESS_WIDTH).abs() < 1e-3);
+            assert!(window.texts.iter().any(|(words, ..)| *words == summary), "not the update's own line");
+            assert!(!window.texts.iter().any(|(words, ..)| words.starts_with("Into ")), "the fetch's folder line stayed");
+        };
+        plain(&window);
+        // And once it has ended, failed.
+        window.session.repos_mut().unwrap().job.as_mut().unwrap().finish(Err("Updated 0, 1 failed: web".to_owned()), false);
+        window.frame(Vec::new());
+        plain(&window);
+    }
+
+    #[test]
+    fn a_run_of_several_keeps_its_count_between_repositories() {
+        use devassist_core::repos::state::testing;
+        let mut window = Window::new(super::super::testing::fetch_session_of(&["api", "web"], &fetched(false)));
+        window.frame(Vec::new());
+        let count = parts(&window).count.expect("no count");
+        assert!(parts(&window).tasks.height() > 0.0, "a run of several keeps its task list");
+        assert_eq!(texts_in(&window, count), ["24 of 38 forks, 8 at a time"]);
+        let api = into_line(&into().display().to_string());
+        // web starts: until it says its total, api's count and folder stay.
+        testing::fork_job_next(window.session.repos_mut().unwrap(), &[]);
+        assert_eq!(window.repos().fork_progress(), None);
+        window.frame(Vec::new());
+        let still = parts(&window).count.expect("the count dropped out between repositories");
+        assert_eq!(still, count, "the dialog moved");
+        assert_eq!(texts_in(&window, still), ["24 of 38 forks, 8 at a time"]);
+        assert!(window.texts.iter().any(|(words, ..)| *words == api));
+        // web's total arrives: its count and folder.
+        let web = into().with_file_name("web-fork");
+        let total = forklines::total(3, &web);
+        testing::fork_job_next(window.session.repos_mut().unwrap(), &[(total.as_str(), false)]);
+        window.frame(Vec::new());
+        let count = parts(&window).count.expect("no count");
+        assert_eq!(texts_in(&window, count), ["0 of 3 forks, 3 at a time"]);
+        assert!(window.texts.iter().any(|(words, ..)| *words == into_line(&web.display().to_string())));
+    }
+
+    #[test]
+    fn a_folder_with_no_room_is_named_the_forks_folder() {
+        let folder = (0..12).fold(PathBuf::from(crate::demo::CODE_DIR), |path, at| path.join(format!("folder-{at}"))).join("api-fork");
+        let mut said = String::new();
+        let input = RawInput { screen_rect: Some(window()), ..Default::default() };
+        // So narrow that the sentence alone takes its two lines.
+        context().run_ui(input, |ui| said = super::into_line(ui.painter(), &folder.display().to_string(), 200.0)).drop_without_applying_deltas();
+        assert_eq!(said, into_line("the forks folder"));
+    }
+
+    #[test]
+    fn four_repositories_a_count_a_pause_and_forty_lines_fit_the_smallest_window() {
+        let mut lines = fetched(false);
+        lines.extend((0..40).map(|fork| (format!("Fetching owner-{fork}/api."), false)));
+        lines.extend(fetched(true).into_iter().skip(2));
+        let mut window = Window::new(super::super::testing::fetch_session_of(&["api", "web", "docs", "notes"], &lines));
+        window.size = MIN_WINDOW;
+        window.frame(Vec::new());
+        let places = parts(&window);
+        let whole = Rect::from_min_size(Pos2::ZERO, vec2(MIN_WINDOW[0], MIN_WINDOW[1]));
+        assert!(whole.contains_rect(places.pane), "{places:?}");
+        let count = places.count.expect("no count");
+        let parts_in_order = [places.header, places.tasks, count, places.output, places.buttons];
+        for part in parts_in_order {
+            assert!(places.pane.contains_rect(part), "{part:?} leaves {:?}", places.pane);
+        }
+        for pair in parts_in_order.windows(2) {
+            assert!(pair[0].bottom() <= pair[1].top() + 1e-3, "{:?} overlaps {:?}", pair[0], pair[1]);
+        }
+        assert!(places.tasks.height() >= TASK_HEIGHT && (places.buttons.height() - BUTTON_HEIGHT).abs() < 1e-3, "{places:?}");
+        assert_eq!(texts_in(&window, count).len(), 3, "{:?}", texts_in(&window, count));
+        assert!(output_rows(places.output.height()) >= 1, "{places:?}");
+        // The output still scrolls back.
+        window.frame(vec![Event::PointerMoved(places.output.center())]);
+        for _ in 0..10 {
+            window.frame(vec![wheel(60.0)]);
+        }
+        assert!(window.job().scroll > 0, "the output did not scroll");
+        assert!(window.buttons().iter().all(|(place, _)| parts(&window).pane.contains_rect(*place)));
     }
 
     #[test]

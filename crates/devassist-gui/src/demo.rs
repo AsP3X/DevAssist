@@ -765,18 +765,26 @@ mod tests {
     /// What the status line may say after a press.
     #[derive(Clone, Copy, Debug)]
     enum Says<'a> {
-        /// The demo's own line, or that the held core refused what was asked (`HELD`), or that its held run runs.
+        /// The demo's own line, or that the held core refused what was asked (`HELD`).
         HeldOrNothing,
+        /// That too, or that the held fetch of forks (`--show forks-fetching`) runs, as the core says a run it starts:
+        /// in that overlay alone.
+        HeldOrFetching,
         /// That too, or this refusal of the core's in its own words: a press meant to be refused.
         OrRefused(&'a str),
+    }
+
+    /// What the status line may say after a press in the walked overlay `name` that is meant to change nothing.
+    fn quiet_in(name: &str) -> Says<'static> {
+        if name == FORKS_FETCHING { Says::HeldOrFetching } else { Says::HeldOrNothing }
     }
 
     /// Checks, after the press `what`, that the status line says what `says` allows, and no other words: a refusal
     /// only where the press is meant to be refused, and then in the core's exact words, and never an error otherwise.
     fn check_said(window: &Window, what: &str, says: Says<'_>) {
         let repos = window.repos();
-        // A held fetch of forks (`--show forks-fetching`) says it runs, as the core says a run it starts.
-        let running = repos.job.as_ref().is_some_and(|job| job.running() && repos.status == format!("{}…", job.title));
+        let running =
+            matches!(says, Says::HeldOrFetching) && repos.job.as_ref().is_some_and(|job| job.running() && repos.status == format!("{}…", job.title));
         let quiet = (repos.status == STATUS || repos.status == devassist_core::repos::state::HELD || running) && !repos.status_error;
         let refused = matches!(says, Says::OrRefused(words) if repos.status == words && repos.status_error);
         assert!(quiet || refused, "{what}: the status line says {:?} (an error: {}), allowed {says:?}", repos.status, repos.status_error);
@@ -1007,7 +1015,7 @@ mod tests {
                 if name == "migrate" && types_the_push_letter(press) {
                     check_said(window, &what, Says::OrRefused(&push_refused));
                 } else if !OLDER_OVERLAYS.contains(&name) {
-                    says_held_or_nothing(window, &what);
+                    check_said(window, &what, quiet_in(name));
                 }
             }
         }
@@ -1379,7 +1387,7 @@ mod tests {
                     if push_line.is_some_and(|line| line.contains(at)) {
                         check_said(window, &what, Says::OrRefused(&push_refused));
                     } else {
-                        says_held_or_nothing(window, &what);
+                        check_said(window, &what, quiet_in(name));
                     }
                 }
             }

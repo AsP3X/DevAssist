@@ -773,10 +773,12 @@ pub struct Repos {
     /// (`testing::token_source`). Never asked while GitHub is held.
     token_source: fn() -> Option<String>,
     /// A fetch of forks takes these accounts and addresses (the
-    /// original's among them) in place of GitHub's list of forks, and
-    /// asks for no token: set only by `testing::local_forks`, for tests
+    /// original's among them) in place of GitHub's list of forks (the
+    /// token is asked as for every run): set only by `testing::local_forks`, for tests
     /// whose forks are folders on this disk. None otherwise.
     local_forks: Option<Vec<(String, String)>>,
+    /// Which run `job` is (`job_stamp`).
+    job_stamp: u64,
     /// The remotes of the checkout the service dialog is open for, with
     /// their addresses: read once when it opens.
     service_remotes: Vec<(String, String)>,
@@ -945,6 +947,7 @@ impl Repos {
             github_held: false,
             token_source: github::token,
             local_forks: None,
+            job_stamp: 0,
             service_remotes: Vec::new(),
             push_running: false,
             watch_status: None,
@@ -3559,12 +3562,9 @@ impl Repos {
         let job = gitprogress::job(format!("{verb} the forks of {named}"), names, 0);
         let label = format!("{verb} the forks of {named}…");
         let local = self.local_forks.clone();
+        let token_of = self.token_getter();
         self.start_fork_job(label, job, move |tx| {
-            let token = if local.is_some() {
-                None
-            } else {
-                github::token()
-            };
+            let token = token_of();
             let mut fetched = 0;
             let mut kept = 0;
             let mut gone = 0;
@@ -4492,6 +4492,7 @@ impl Repos {
         self.fork_watch = None;
         if let Some(job) = job {
             self.job = Some(job);
+            self.job_stamp += 1;
             // Someone in another dialog is not pulled out of it.
             if matches!(self.mode, Mode::List | Mode::Filter | Mode::Progress) {
                 self.mode = Mode::Progress;
@@ -4528,6 +4529,13 @@ impl Repos {
         self.running_fork_watch()?.folder().map(Path::to_path_buf)
     }
 
+    /// Which run `job` is: a number that changes each time a run with a
+    /// dialog starts (or a held one is given), so that what is shown of one
+    /// run is not taken for another's.
+    pub fn job_stamp(&self) -> u64 {
+        self.job_stamp
+    }
+
     /// What the lines of the fetch of forks said, while one runs.
     fn running_fork_watch(&self) -> Option<&ForkWatch> {
         self.job.as_ref().filter(|job| job.running())?;
@@ -4540,12 +4548,27 @@ impl Repos {
     /// No worker runs it, so it never ends by itself; Cancel says the held
     /// notice and Hide hides it. A live session gets nothing here.
     pub fn hold_fork_job(&mut self, repo: &str, lines: &[(&str, bool)]) {
+        self.hold_fork_job_of(&[repo], lines);
+    }
+
+    /// `hold_fork_job` for the forks of `repos`, one task each, the first
+    /// running.
+    fn hold_fork_job_of(&mut self, repos: &[&str], lines: &[(&str, bool)]) {
         if !self.work_held {
             return;
         }
-        let title = format!("Updating the forks of {repo}");
+        let named = match repos {
+            [only] => (*only).to_string(),
+            many => count_label(many.len()),
+        };
+        let title = format!("Updating the forks of {named}");
         self.notice(format!("{title}…"), false);
-        self.job = Some(gitprogress::job(title, vec![repo.to_string()], 0));
+        self.job = Some(gitprogress::job(
+            title,
+            repos.iter().map(|repo| (*repo).to_string()).collect(),
+            0,
+        ));
+        self.job_stamp += 1;
         // No worker counts its pauses down: they stand as they were said.
         self.fork_watch = Some(ForkWatch::held());
         self.job_close_at = None;
@@ -5422,6 +5445,44 @@ pub mod testing {
         repos.hold_fork_job(repo, lines);
     }
 
+    /// Gives `repos` `job` as a run that starts now in its progress dialog,
+    /// with a stamp of its own and no fetch of forks, as a run the queue
+    /// starts would be; nothing runs it.
+    pub fn start_run(repos: &mut Repos, job: Job) {
+        repos.job = Some(job);
+        repos.job_stamp += 1;
+        repos.fork_watch = None;
+        repos.job_close_at = None;
+        repos.dialog_hidden = false;
+        if matches!(repos.mode, Mode::List | Mode::Filter | Mode::Progress) {
+            repos.mode = Mode::Progress;
+        }
+    }
+
+    /// `fork_job` for the forks of several repositories, one task each:
+    /// the first runs and has said `lines`.
+    pub fn fork_job_of(repos: &mut Repos, names: &[&str], lines: &[(&str, bool)]) {
+        repos.hold_work();
+        repos.hold_fork_job_of(names, lines);
+    }
+
+    /// Moves the held fetch of forks (`fork_job_of`) on: the task that
+    /// runs ends well and the next starts, when there is one; then the
+    /// running task says `lines`.
+    pub fn fork_job_next(repos: &mut Repos, lines: &[(&str, bool)]) {
+        let Some(job) = repos.job.as_ref() else {
+            return;
+        };
+        let now = job.shown();
+        if now + 1 < job.items.len() {
+            repos.on_msg(Msg::Job(JobEvent::Done(now, "fetched".into())));
+            repos.on_msg(Msg::Job(JobEvent::Start(now + 1)));
+        }
+        for (line, progress) in lines {
+            repos.on_msg(Msg::Job(JobEvent::Line((*line).to_string(), *progress)));
+        }
+    }
+
     /// Opens the fork overview of `repo` (by row name) on `list`, as a
     /// read of its collection would have found it, without reading
     /// anything: for the window's tests of what a core that is not held
@@ -5459,7 +5520,7 @@ pub mod testing {
 
     /// Makes a fetch of forks in `repos` take `remotes` (account, and the
     /// folder of its repository on this disk; the original's account among
-    /// them) in place of GitHub's list of forks, without a token: for the
+    /// them) in place of GitHub's list of forks: for the
     /// tests that fetch forks for real from local repositories.
     pub fn local_forks(repos: &mut Repos, remotes: &[(&str, &Path)]) {
         repos.local_forks = Some(
@@ -8410,7 +8471,12 @@ mod tests {
         app.installed.push(repo);
         // Without them a fetch of forks asks GitHub for the list.
         testing::local_forks(&mut app, &[("ada", &ada), ("bob", &bob)]);
-        testing::token_source(&mut app, || panic!("a token was asked for"));
+        // The token is asked of the same source as every other run: a test's.
+        static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        testing::token_source(&mut app, || {
+            ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        });
 
         app.clone_forks(&["api".to_string()]);
         let until = Instant::now() + Duration::from_secs(60);
@@ -8434,7 +8500,67 @@ mod tests {
         );
         assert!(gitops::forks_cloned(&api));
         assert!(dest.join("bob").join("bobs").exists(), "{output:?}");
+        assert_eq!(
+            ASKED.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the token was not asked of the run's source"
+        );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn each_run_has_a_stamp_of_its_own() {
+        let mut app = grouped_app();
+        let first = app.job_stamp();
+        app.start_job(
+            "Updating api…".into(),
+            Some(Job::new("Updating", vec!["api".into()], 0)),
+            |_| Ok("Done.".into()),
+        );
+        let second = app.job_stamp();
+        assert_ne!(first, second, "a run with a dialog has a stamp of its own");
+        app.busy = false;
+        app.start_job("Looking…".into(), None, |_| Ok("Done.".into()));
+        assert_eq!(
+            app.job_stamp(),
+            second,
+            "a run without a dialog keeps the shown run's"
+        );
+        app.hold_work();
+        app.hold_fork_job("api", &[]);
+        assert_ne!(app.job_stamp(), second, "a held run has one too");
+    }
+
+    #[test]
+    fn a_held_fetch_of_several_moves_from_task_to_task() {
+        let mut app = grouped_app();
+        testing::fork_job_of(
+            &mut app,
+            &["api", "docs"],
+            &[("38 forks, into api-fork", false)],
+        );
+        let job = app.job.as_ref().unwrap();
+        assert_eq!(job.title, "Updating the forks of 2 repositories");
+        assert_eq!(app.fork_progress(), fork_fetch(0, 38, None));
+        let stamp = app.job_stamp();
+        // The next task starts from nothing, in the same run.
+        testing::fork_job_next(&mut app, &[]);
+        assert_eq!(
+            app.fork_progress(),
+            None,
+            "the next task has said nothing yet"
+        );
+        assert_eq!(app.job.as_ref().unwrap().shown(), 1);
+        assert_eq!(app.job_stamp(), stamp);
+        testing::fork_job_next(&mut app, &[("3 forks, into docs-fork", false)]);
+        assert_eq!(
+            app.job.as_ref().unwrap().shown(),
+            1,
+            "there is no third task"
+        );
+        assert_eq!(app.fork_progress(), fork_fetch(0, 3, None));
+        assert_eq!(app.fork_job_into(), Some(PathBuf::from("docs-fork")));
+        assert!(app.job.as_ref().unwrap().running());
     }
 
     #[test]

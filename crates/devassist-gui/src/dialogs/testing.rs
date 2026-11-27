@@ -54,10 +54,19 @@ pub(crate) fn session_with(job: Job) -> Session {
 /// The demo's repositories with a held fetch of the forks of api that has said `lines` (each with whether it is a
 /// progress line), its dialog open: as the core's `testing::fork_job` gives it.
 pub(crate) fn fetch_session(lines: &[(String, bool)]) -> Session {
+    fetch_session_of(&["api"], lines)
+}
+
+/// [`fetch_session`] for the forks of `names`, one task each, the first running.
+pub(crate) fn fetch_session_of(names: &[&str], lines: &[(String, bool)]) -> Session {
     let mut session = Session::demo(crate::demo::repos());
-    let said: Vec<(&str, bool)> = lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect();
-    devassist_core::repos::state::testing::fork_job(session.repos_mut().unwrap(), "api", &said);
+    devassist_core::repos::state::testing::fork_job_of(session.repos_mut().unwrap(), names, &said(lines));
     session
+}
+
+/// `lines` as the core's held runs take them.
+pub(crate) fn said(lines: &[(String, bool)]) -> Vec<(&str, bool)> {
+    lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect()
 }
 
 fn sheet() -> Sheet {
