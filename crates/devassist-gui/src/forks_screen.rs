@@ -50,9 +50,11 @@ fn ahead(commits: u32) -> String {
     format!("{commits} ahead")
 }
 
-/// The screen's title: the forks of the original's repository, by its name (`owner/name` without its owner).
-fn forks_of(original: &str) -> String {
-    let name = original.rsplit_once('/').map_or(original, |(_, name)| name);
+/// The screen's title: the forks of the original's repository, by its name (`owner/name` without its owner); by
+/// the repository's own name when the original names none.
+fn forks_of(view: &ForksView) -> String {
+    let name = view.original.rsplit_once('/').map_or(view.original.as_str(), |(_, name)| name);
+    let name = if name.trim().is_empty() { view.repo.as_str() } else { name };
     format!("Forks of {name}")
 }
 
@@ -65,7 +67,7 @@ pub fn shown(repos: &Repos) -> bool {
 /// The top row's title while the forks show: "Forks of {name}"; `None` while they do not.
 #[must_use]
 pub fn title(repos: &Repos) -> Option<String> {
-    repos.forks.as_ref().map(|view| forks_of(&view.original))
+    repos.forks.as_ref().map(forks_of)
 }
 
 /// What the status bar says while the forks show: the core's sentence, kept whole, then the folder of the forks
@@ -73,11 +75,14 @@ pub fn title(repos: &Repos) -> Option<String> {
 /// window.
 #[must_use]
 pub fn status(view: &ForksView) -> Status {
-    let mut notes = vec![(Icon::Folder, view.dest.display().to_string())];
+    let dest = view.dest.display().to_string();
+    // No folder known, no note with an icon and no words.
+    let mut notes: Vec<(Icon, String)> = (!dest.is_empty()).then_some((Icon::Folder, dest)).into_iter().collect();
+    let path = (!notes.is_empty()).then_some(0);
     if let Some(fetched) = view.fetched() {
         notes.push((Icon::Clock, format!("Fetched {}", day(fetched, DayForm::Words))));
     }
-    Status { text: view.summary(), error: false, notes, keep_text: true, path: Some(0) }
+    Status { text: view.summary(), error: false, notes, keep_text: true, path }
 }
 
 /// How a cell's words are drawn.
@@ -147,6 +152,8 @@ pub(crate) enum Sorted {
 /// Everything the screen draws on its panel, decided before it is drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
+    /// The repository whose forks these are, by row name.
+    repo: String,
     /// The panel.
     panel: Rect,
     /// Where the columns are.
@@ -199,6 +206,7 @@ pub fn plan(view: &ForksView, panel: Rect) -> Plan {
         ForkSort::Name => Sorted::Fork,
     };
     Plan {
+        repo: view.repo.clone(),
         panel,
         columns: columns::fork_columns(panel.width()),
         ahead_head: view.base().map_or_else(|| AHEAD_OF_THE_ORIGINAL.to_owned(), ahead_of),
@@ -229,6 +237,8 @@ pub struct Screen {
     scroll: f32,
     /// The owner of the fork highlighted in the last frame: when the highlight moves, it is followed into view.
     chosen: Option<String>,
+    /// The repository whose forks were shown in the last frame: the forks of another start afresh.
+    repo: Option<String>,
 }
 
 /// The rows' heights, from the top.
@@ -264,6 +274,9 @@ fn draw_cell(ui: &Ui, left: f32, y: f32, cell: &Cell, room: f32, palette: Palett
 pub fn show(ui: &mut Ui, layout: &Layout, plan: &Plan, sheet: Option<&Sheet>, mode: Mode, screen: &mut Screen, presses: bool) -> Option<Command> {
     let palette = theme::palette(mode);
     let panel = layout.panel;
+    if screen.repo.as_deref() != Some(plan.repo.as_str()) {
+        *screen = Screen { repo: Some(plan.repo.clone()), ..Screen::default() };
+    }
     let sheet = sheet?;
     let window = Rect::from_min_size(Pos2::ZERO, ui.ctx().content_rect().size());
     frost::paint(ui.painter(), window, panel, RADIUS_PANEL, sheet);
@@ -463,11 +476,24 @@ mod tests {
         let toggle = shell::layout(vec2(1440.0, 900.0), true, false).toggle;
         let (shapes, ..) = frame(&ctx, [1440.0, 900.0], &mut repos, &mut screen, Vec::new());
         let said = texts(&shapes);
-        assert!(said.contains(&"Forks of api".to_owned()), "{said:?}");
-        assert!(
-            !said.contains(&"Repositories".to_owned()) || said.iter().filter(|text| *text == "Repositories").count() == 1,
-            "the page's name is the sidebar's only"
-        );
+        // The title is the screen's, in the title's room; "Repositories" is the sidebar's entry alone, and lit.
+        let layout = shell::layout(vec2(1440.0, 900.0), true, false);
+        let placed = |words: &str| -> Vec<Pos2> {
+            shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    Shape::Text(text) if text.galley.text() == words => Some(text.galley.rect.translate(text.pos.to_vec2()).center()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let title_at = placed("Forks of api");
+        assert!(title_at.len() == 1 && layout.title.contains(title_at[0]), "{title_at:?}");
+        let entry = shell::page_rows(layout.sidebar).into_iter().find(|(page, _)| *page == Page::Repositories).map(|(_, row)| row).unwrap();
+        let named = placed("Repositories");
+        assert!(named.len() == 1 && entry.contains(named[0]), "{named:?}");
+        let lit = theme::palette(Mode::Light).selection;
+        assert!(shapes.iter().any(|shape| matches!(shape, Shape::Rect(rect) if rect.fill == lit && rect.rect == entry)), "Repositories is not lit");
         let back = assets::icon(Icon::ArrowLeft).to_string();
         let toggle_icon = assets::icon(Icon::PanelLeft).to_string();
         assert!(said.contains(&back) && !said.contains(&toggle_icon), "the back button stands in the sidebar button's place");
@@ -708,9 +734,9 @@ mod tests {
         assert_eq!(status.notes, [(Icon::Folder, dest), (Icon::Clock, "Fetched 25 Nov 2026".to_owned())]);
         assert!(!status.error && status.keep_text);
         assert_eq!(status.path, Some(0));
-        // Without a fetch date, the folder alone.
+        // Without a fetch date or a folder, no note.
         let mut unfetched = many(2);
-        assert_eq!(status_of(&mut unfetched).notes.len(), 1);
+        assert_eq!(status_of(&mut unfetched).notes.len(), 0);
         // A narrow bar: the fetched day gives way first, then the folder; never the sentence.
         let words = [300.0, 110.0];
         let note = theme::STATUS_GAP + theme::STATUS_ICON + theme::STATUS_ICON_GAP;
@@ -719,6 +745,59 @@ mod tests {
         assert_eq!(shell::notes_fit(600.0 + note + 200.0, 600.0, &words, Some(0)), [Some(200.0), None], "the folder is cut from its left");
         assert_eq!(shell::notes_fit(600.0 + note + 100.0, 600.0, &words, Some(0)), [None, None]);
         assert_eq!(shell::notes_fit(100.0, 600.0, &words, Some(0)), [None, None]);
+    }
+
+    #[test]
+    fn a_title_or_a_folder_the_core_cannot_name_leaves_no_gap() {
+        let mut repos = forks_open();
+        for original in ["", "acme/", " "] {
+            original.clone_into(&mut repos.forks.as_mut().unwrap().original);
+            assert_eq!(title(&repos).as_deref(), Some("Forks of api"), "{original:?}");
+        }
+        repos.forks.as_mut().unwrap().dest = std::path::PathBuf::new();
+        let said = status(view(&repos));
+        assert_eq!(said.notes, [(Icon::Clock, "Fetched 25 Nov 2026".to_owned())], "no folder icon without its words");
+        assert_eq!(said.path, None);
+    }
+
+    #[test]
+    fn the_forks_of_another_repository_start_afresh() {
+        let size = [960.0, 600.0];
+        let mut repos = many(200);
+        // The same owners for web.
+        let forks = view(&repos).forks.clone();
+        repos.hold_forks("web", ForkList { original: "acme/web".to_owned(), forks, ..ForkList::default() });
+        let ctx = context();
+        let mut screen = Screen::default();
+        let panel = shell::layout(vec2(size[0], size[1]), true, false).panel;
+        let body = table::body_rect(panel);
+        repos.pick_fork("owner-150");
+        frame(&ctx, size, &mut repos, &mut screen, Vec::new());
+        assert!(screen.scroll() > 0.0, "owner-150 was followed");
+        // Wheeled back to the top: owner-150 is out of view now, and stays highlighted.
+        let wheel = Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, 1.0e6),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: Modifiers::NONE,
+        };
+        frame(&ctx, size, &mut repos, &mut screen, vec![Event::PointerMoved(body.center())]);
+        for events in std::iter::repeat_n(vec![wheel], 30).chain(std::iter::repeat_n(Vec::new(), 30)) {
+            frame(&ctx, size, &mut repos, &mut screen, events);
+        }
+        assert_eq!(screen.scroll(), 0.0);
+        // The pointer leaves the panel, so what is left of the wheel's smoothing moves nothing after.
+        frame(&ctx, size, &mut repos, &mut screen, vec![Event::PointerMoved(Pos2::ZERO)]);
+        // Back, then the forks of web, the same owner highlighted: they start at the top and follow it into view.
+        repos.close_forks();
+        repos.pick("web");
+        repos.open_forks_plain();
+        repos.pick_fork("owner-150");
+        assert_eq!(view(&repos).repo, "web");
+        frame(&ctx, size, &mut repos, &mut screen, Vec::new());
+        let plan = plan(view(&repos), panel);
+        assert!(body.contains_rect(row_rect(&plan, screen.scroll(), "owner-150").unwrap()), "web's highlight is not in view at {}", screen.scroll());
     }
 
     fn status_of(repos: &mut Repos) -> Status {

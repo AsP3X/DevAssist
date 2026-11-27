@@ -700,6 +700,57 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_folder_in_the_status_bar_shows_all_of_it_on_hover() {
+        let ctx = crate::widgets::tests::context();
+        let size = egui::vec2(1200.0, 700.0);
+        let layout = layout(size, true, false);
+        let folder = r"D:\code\a-very-long-folder-of-work\with-many-levels\and-more-levels-still\api-fork".to_owned();
+        let status = Status {
+            text: "13 forks. 6 have changes and a folder. 1 is gone from GitHub. 27 branches and 9 pull requests are saved.".to_owned(),
+            notes: vec![(Icon::Folder, folder.clone()), (Icon::Clock, "Fetched 25 Nov 2026".to_owned())],
+            keep_text: true,
+            path: Some(0),
+            ..Status::default()
+        };
+        let texts = |output: &egui::FullOutput| -> Vec<(String, Rect)> {
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.galley.rect.translate(text.pos.to_vec2()))),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut cut: Option<Rect> = None;
+        let mut hovered = false;
+        for step in 0..40 {
+            // The pointer comes once, then rests.
+            let events = cut.filter(|_| step == 1).map_or_default(|rect| vec![Event::PointerMoved(rect.center())]);
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                time: Some(f64::from(step) * 0.1),
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let (mut shown, mut page) = (true, Page::Repositories);
+                let _ = draw(ui, &layout, &mut shown, &mut page, Shown { mode: Mode::Light, waiting: 0, status: Some(&status), back: None });
+            });
+            let said = texts(&output);
+            output.drop_without_applying_deltas();
+            assert!(said.iter().any(|(words, _)| *words == status.text), "the sentence is kept whole");
+            assert!(said.iter().all(|(words, _)| !words.starts_with("Fetched")), "the fetched day gave way first");
+            let shown = said.iter().find(|(words, rect)| words.ends_with("api-fork") && layout.status.contains(rect.center())).cloned();
+            let (words, rect) = shown.expect("the folder is drawn, cut");
+            assert!(words.starts_with('\u{2026}') && words != folder, "{words}");
+            cut = Some(rect);
+            hovered |= said.iter().any(|(words, rect)| *words == folder && !layout.status.contains(rect.center()));
+        }
+        assert!(hovered, "the full folder never showed on hover");
+    }
+
+    #[test]
     fn the_layout_is_the_designs_at_1440_by_900() {
         let l = layout(egui::vec2(1440.0, 900.0), true, true); // sidebar shown, with a toolbar
         assert_eq!(l.sidebar, egui::Rect::from_min_size(egui::pos2(12.0, 12.0), egui::vec2(256.0, 876.0)));

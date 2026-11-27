@@ -7,7 +7,7 @@ use devassist_glass::gpu;
 use egui::{Color32, LayerId, Mesh};
 
 use crate::assets;
-use crate::baker::{Baker, Scene};
+use crate::baker::{Baker, Scene, Sheet};
 use crate::demo;
 use crate::dialogs::{self, Dialogs};
 use crate::forks_screen;
@@ -91,8 +91,6 @@ pub fn run(launch: Launch, settings: Result<Settings, String>) -> Result<(), Str
 pub struct App {
     /// The look while the system asks for light, and while it asks for dark: mode, backdrop key and blur.
     looks: [(Mode, String, bool); 2],
-    /// Whether the sidebar is shown.
-    sidebar_shown: bool,
     /// The glass's pictures.
     baker: Baker,
     /// The mode egui's own visuals were last set for.
@@ -103,12 +101,8 @@ pub struct App {
     start: Instant,
     /// The repositories, loaded and kept current.
     session: Session,
-    /// The screen the sidebar has chosen.
-    page: Page,
-    /// What the Repositories screen keeps between frames.
-    screen: Screen,
-    /// What the forks screen keeps between frames.
-    forks: forks_screen::Screen,
+    /// The page the sidebar has chosen and what its screens keep.
+    pages: Pages,
     /// What the dialogs keep between frames.
     dialogs: Dialogs,
     /// The settings warning, said in the status bar for the first [`NOTICE_TIME`]: a window started without a
@@ -131,15 +125,12 @@ impl App {
         let notice = window_warning(&settings);
         App {
             looks,
-            sidebar_shown: !launch.sidebar_hidden,
             baker: Baker::new(),
             visuals: None,
             shot: launch.screenshot.clone().map(screenshot::Job::new),
             start: Instant::now(),
             session: Session::start(settings, launch),
-            page: Page::default(),
-            screen: Screen::default(),
-            forks: forks_screen::Screen::default(),
+            pages: Pages { sidebar_shown: !launch.sidebar_hidden, ..Pages::default() },
             dialogs: Dialogs::default(),
             notice,
             folder_focus: launch.demo && launch.show.as_deref() == Some(demo::ADD_FOLDER),
@@ -184,25 +175,14 @@ impl eframe::App for App {
 
         let size = ctx.content_rect().size();
         // A dialog is on the Repositories screen: one the core's workers opened brings its page back.
-        self.page = dialogs::page_for(self.session.repos(), self.page);
-        let on_repositories = self.page == Page::Repositories;
-        // The forks of a repository take the table's place while the core has them open.
-        let forks = on_repositories && self.session.repos().is_some_and(forks_screen::shown);
-        let layout = shell::layout(size, self.sidebar_shown, on_repositories && repos_screen::has_toolbar(&self.session));
+        self.pages.page = dialogs::page_for(self.session.repos(), self.pages.page);
         let painter = ctx.layer_painter(LayerId::background());
         // The screen's glass is placed before the bake, so it is baked where the screen draws over it.
-        let plan = if on_repositories { repos_screen::plan(&painter, &layout, &self.session) } else { None };
-        let forks_view = self.session.repos().and_then(|repos| repos.forks.as_ref()).filter(|_| forks);
-        let forks_plan = forks_view.map(|view| forks_screen::plan(view, layout.panel));
-        let forks_title = self.session.repos().and_then(forks_screen::title).filter(|_| forks);
-        let forks_status = forks_view.map(forks_screen::status);
+        let planned = self.pages.plan(&painter, size, &self.session);
         // The dialog or the menu the core's mode asks for, on any screen: opened now when the core's workers asked for
         // it. The menu stands under the row's button the screen placed in the last frame.
-        let dialog = dialogs::before(&ctx, self.session.repos(), repos_screen::menu_anchor(&self.screen), &mut self.dialogs);
-        let mut wants = shell::wants(&layout);
-        if let Some(plan) = &plan {
-            plan.add_wants(&mut wants);
-        }
+        let dialog = dialogs::before(&ctx, self.session.repos(), repos_screen::menu_anchor(&self.pages.screen), &mut self.dialogs);
+        let mut wants = planned.wants();
         for want in dialog.iter().flat_map(dialogs::Plan::wants) {
             wants.add(want);
         }
@@ -223,34 +203,106 @@ impl eframe::App for App {
         // The frosted panel is no picture: the screen paints it from the sheet, which costs nothing to move.
         let sheet = self.baker.sheet(Surface::Panel);
         let notice = notice_status(self.notice.as_deref(), self.start.elapsed());
-        let status = notice.or(forks_status).or_else(|| repos_screen::status(&self.session));
-        let waiting = self.session.repos().map_or(0, |repos| repos.queue.len());
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
-            let shown = Shown { mode, waiting, status: status.as_ref(), back: forks_title.as_deref() };
-            let back = shell::draw(ui, &layout, &mut self.sidebar_shown, &mut self.page, shown);
-            if let Some(forks_plan) = &forks_plan {
-                // Under an open overlay the screen takes no press.
-                let presses = !overlay::is_open(&ctx);
-                let asked = forks_screen::show(ui, &layout, forks_plan, sheet.as_ref(), mode, &mut self.forks, presses);
-                if let Some(repos) = self.session.repos_mut() {
-                    if back {
-                        repos.close_forks();
-                    } else if let Some(command) = asked {
-                        forks_screen::apply(command, repos);
-                    }
-                }
-            } else if on_repositories {
-                // Under an open overlay the screen has no keyboard and takes no press.
-                let keys = !overlay::is_open(&ctx);
-                repos_screen::show(ui, &layout, plan.as_ref(), &mut self.session, sheet.as_ref(), mode, &mut self.screen, keys);
-            } else {
-                shell::placeholder(ui, layout.panel, sheet.as_ref(), theme::palette(mode));
-            }
+            self.pages.draw(ui, &planned, &mut self.session, sheet.as_ref(), mode, notice);
         });
         // Over everything but the window's own top row: the dialog, also one the screen asked for in this frame.
         dialogs::after(&ctx, dialog, self.session.repos_mut(), &drawn, mode, &mut self.dialogs);
         if self.folder_focus && dialogs::focus_add_folder(&ctx, self.session.repos()) {
             self.folder_focus = false;
+        }
+    }
+}
+
+/// The page the sidebar has chosen and what its screens keep between frames: the Repositories screen, or the forks
+/// of a repository in its place while the core has them open.
+#[derive(Default)]
+pub(crate) struct Pages {
+    /// The page the sidebar has chosen.
+    pub(crate) page: Page,
+    /// Whether the sidebar is shown.
+    pub(crate) sidebar_shown: bool,
+    /// What the Repositories screen keeps between frames.
+    screen: Screen,
+    /// What the forks screen keeps between frames.
+    forks: forks_screen::Screen,
+}
+
+/// What a frame's screen draws, decided before the bake: the layout, the Repositories screen's controls or the
+/// forks' plan (never both), and the shell's title and status words for the forks.
+pub(crate) struct Planned {
+    layout: shell::Layout,
+    plan: Option<repos_screen::Plan>,
+    forks: Option<forks_screen::Plan>,
+    title: Option<String>,
+    on_repositories: bool,
+    status: Option<Status>,
+}
+
+impl Planned {
+    /// The glass panes of the shell and the screen.
+    pub(crate) fn wants(&self) -> shell::Wants {
+        let mut wants = shell::wants(&self.layout);
+        if let Some(plan) = &self.plan {
+            plan.add_wants(&mut wants);
+        }
+        wants
+    }
+}
+
+impl Pages {
+    /// What the chosen page draws in a window of `size`, measured with `painter`'s faces: the forks of a repository
+    /// while the core has them open and the page is Repositories, else the Repositories screen there.
+    pub(crate) fn plan(&self, painter: &egui::Painter, size: egui::Vec2, session: &Session) -> Planned {
+        let on_repositories = self.page == Page::Repositories;
+        let layout = shell::layout(size, self.sidebar_shown, on_repositories && repos_screen::has_toolbar(session));
+        let plan = if on_repositories { repos_screen::plan(painter, &layout, session) } else { None };
+        let view = session.repos().and_then(|repos| repos.forks.as_ref()).filter(|_| on_repositories);
+        Planned {
+            plan,
+            forks: view.map(|view| forks_screen::plan(view, layout.panel)),
+            title: view.and(session.repos()).and_then(forks_screen::title),
+            status: view.map(forks_screen::status),
+            layout,
+            on_repositories,
+        }
+    }
+
+    /// Draws the shell and the screen `planned` (this frame's [`Pages::plan`]) on `ui` and does what their presses
+    /// ask of `session`; `notice` stands in the status bar over the screen's words while it is given.
+    pub(crate) fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+        planned: &Planned,
+        session: &mut Session,
+        sheet: Option<&Sheet>,
+        mode: Mode,
+        notice: Option<Status>,
+    ) {
+        let ctx = ui.ctx().clone();
+        let status = notice.or_else(|| planned.status.clone()).or_else(|| repos_screen::status(session));
+        let waiting = session.repos().map_or(0, |repos| repos.queue.len());
+        let shown = Shown { mode, waiting, status: status.as_ref(), back: planned.title.as_deref() };
+        let back = shell::draw(ui, &planned.layout, &mut self.sidebar_shown, &mut self.page, shown);
+        // Under an open overlay the screen has no keyboard and takes no press.
+        let keys = !overlay::is_open(&ctx);
+        if let Some(forks_plan) = &planned.forks {
+            let asked = forks_screen::show(ui, &planned.layout, forks_plan, sheet, mode, &mut self.forks, keys);
+            if let Some(repos) = session.repos_mut() {
+                if back {
+                    repos.close_forks();
+                } else if let Some(command) = asked {
+                    forks_screen::apply(command, repos);
+                }
+            }
+        } else if planned.on_repositories {
+            repos_screen::show(ui, &planned.layout, planned.plan.as_ref(), session, sheet, mode, &mut self.screen, keys);
+        } else {
+            shell::placeholder(ui, planned.layout.panel, sheet, theme::palette(mode));
+        }
+        // Closed, the forks leave nothing behind: the next forks opened start at the top, their highlight followed.
+        if !session.repos().is_some_and(forks_screen::shown) {
+            self.forks = forks_screen::Screen::default();
         }
     }
 }
@@ -354,6 +406,69 @@ mod tests {
         assert_eq!(notice_status(notice, NOTICE_TIME), None);
         assert_eq!(notice_status(notice, NOTICE_TIME + std::time::Duration::from_secs(1)), None);
         assert_eq!(notice_status(None, std::time::Duration::ZERO), None);
+    }
+
+    /// Which screens one frame of the window's pages drew: the forks table's head ("Fork"), the Repositories table's
+    /// head ("Repository"), the placeholder of a page not built yet.
+    fn screens_drawn(ctx: &egui::Context, pages: &mut Pages, session: &mut Session, events: Vec<egui::Event>) -> [bool; 3] {
+        let size = egui::vec2(1440.0, 900.0);
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)), events, ..Default::default() };
+        let sheet =
+            Sheet { texture: egui::TextureId::User(0), uv: egui::Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)), edge: egui::Stroke::NONE };
+        let output = ctx.run_ui(input, |ui| {
+            let planned = pages.plan(ui.painter(), size, session);
+            pages.draw(ui, &planned, session, Some(&sheet), Mode::Light, None);
+        });
+        let said: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        output.drop_without_applying_deltas();
+        ["Fork", "Repository", "The screens come next."].map(|words| said.iter().any(|said| said == words))
+    }
+
+    /// A click at `at`, over three frames.
+    fn clicked(at: egui::Pos2) -> [Vec<egui::Event>; 3] {
+        let button =
+            |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        [vec![egui::Event::PointerMoved(at)], vec![button(true)], vec![button(false)]]
+    }
+
+    #[test]
+    fn one_screen_a_frame_as_the_forks_open_close_and_the_page_changes() {
+        const FORKS: [bool; 3] = [true, false, false];
+        const TABLE: [bool; 3] = [false, true, false];
+        const PLACEHOLDER: [bool; 3] = [false, false, true];
+        let ctx = crate::widgets::tests::context();
+        let mut repos = demo::repos();
+        demo::show(&mut repos, "forks").unwrap();
+        let mut session = Session::demo(repos);
+        let mut pages = Pages { sidebar_shown: true, ..Pages::default() };
+        let layout = shell::layout(egui::vec2(1440.0, 900.0), true, false);
+        assert_eq!(screens_drawn(&ctx, &mut pages, &mut session, Vec::new()), FORKS);
+        // The press on back: its frame still draws the forks, the next the table alone.
+        for events in clicked(layout.toggle.center()) {
+            assert_eq!(screens_drawn(&ctx, &mut pages, &mut session, events), FORKS);
+        }
+        assert!(session.repos().unwrap().forks.is_none(), "back closed nothing");
+        assert_eq!(screens_drawn(&ctx, &mut pages, &mut session, Vec::new()), TABLE);
+        // Open again, then away to Docker and back: the forks, the placeholder, the forks.
+        demo::show(session.repos_mut().unwrap(), "forks").unwrap();
+        assert_eq!(screens_drawn(&ctx, &mut pages, &mut session, Vec::new()), FORKS);
+        let row = |page: Page| shell::page_rows(layout.sidebar).into_iter().find(|(at, _)| *at == page).unwrap().1.center();
+        for events in clicked(row(Page::Docker)) {
+            screens_drawn(&ctx, &mut pages, &mut session, events);
+        }
+        assert_eq!(screens_drawn(&ctx, &mut pages, &mut session, Vec::new()), PLACEHOLDER);
+        for events in clicked(row(Page::Repositories)) {
+            screens_drawn(&ctx, &mut pages, &mut session, events);
+        }
+        assert_eq!(screens_drawn(&ctx, &mut pages, &mut session, Vec::new()), FORKS, "the forks are still open in the core");
+        assert!(pages.sidebar_shown, "the sidebar kept its state");
     }
 
     #[test]

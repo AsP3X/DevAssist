@@ -263,7 +263,7 @@ pub(crate) fn soft(palette: Palette, opacity: f32) -> Color32 {
 }
 
 /// The cell of `span` in the row at `row`.
-pub(crate) fn cell(row: Rect, span: Span) -> Rect {
+fn cell(row: Rect, span: Span) -> Rect {
     Rect::from_min_max(pos2(row.left() + span.left, row.top()), pos2(row.left() + span.right(), row.bottom()))
 }
 
@@ -317,7 +317,7 @@ pub(crate) fn draw_fill(painter: &Painter, fill: &Fill, fills: &[Color32], palet
 }
 
 /// Paints the line along the bottom of `row`.
-pub(crate) fn draw_line_under(painter: &Painter, row: Rect, palette: Palette) {
+fn draw_line_under(painter: &Painter, row: Rect, palette: Palette) {
     painter.rect_filled(Rect::from_min_max(pos2(row.left(), row.bottom() - HAIRLINE), row.max), 0.0, soft(palette, LINE_OPACITY));
 }
 
@@ -433,7 +433,7 @@ fn draw_group(ui: &Ui, row: Rect, columns: &Columns, group: &GroupLine, palette:
 }
 
 /// Paints `text` at the left of `x`, centred on `y`, unless it is empty; gives back where its right end is.
-pub(crate) fn draw_text(painter: &Painter, x: f32, y: f32, text: String, medium: bool, colour: Color32) -> f32 {
+fn draw_text(painter: &Painter, x: f32, y: f32, text: String, medium: bool, colour: Color32) -> f32 {
     if text.is_empty() {
         return x;
     }

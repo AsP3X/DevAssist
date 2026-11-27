@@ -1157,38 +1157,51 @@ fn graphic(shape: &RectShape, palette: Palette) -> Option<(&'static str, f64, Co
     None
 }
 
-/// What the names of the forks table's rule graphics start with.
-const RULE_GRAPHIC: &str = "graphic: ahead rule's";
-/// The fewest pixels a place of the forks table's rule measures: its pieces are hairlines and short bars (the origin
-/// mark of one row is 9 pixels above its tick), so a row's few are enough.
+/// The forks table's ahead rule's small tick, at each commit.
+const RULE_TICK_PLACE: &str = "graphic: ahead rule's tick (reported, not held)";
+/// Its taller tick, at every fifth commit.
+const RULE_FIFTH_PLACE: &str = "graphic: ahead rule's fifth tick";
+/// Its origin mark.
+const RULE_ORIGIN_PLACE: &str = "graphic: ahead rule's origin mark";
+/// The fewest pixels a place of the forks table's rule's hairlines measures (its ticks and its origin mark, never its
+/// bars, which keep the general least): the origin mark of one row is 9 pixels above its tick, so a row's few are
+/// enough.
 const LEAST_RULE_PIXELS: usize = 9;
+/// The short piece of a broken bar, at the far end of the forks rule.
+const RULE_BREAK_PLACE: &str = "graphic: ahead rule's broken bar, short piece";
+/// The fewest pixels the short piece of a broken bar measures: all of one ([`theme::RULE_BREAK_END`] by
+/// [`theme::RULE_BAR`]), as a screen may have one broken bar only; less is a piece measured short.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a piece of a few points")]
+const LEAST_BREAK_PIXELS: usize = (theme::RULE_BREAK_END * theme::RULE_BAR) as usize;
 
 /// A graphic of the forks table's ahead rule inside `panel`, as the table paints it ([`table::draw_forward`]): a
 /// tick, a fifth's tick, the origin mark, the bar, and the short piece of a broken bar. Each is held to 3.0, as
-/// graphics are. Gives its name, the contrast it needs, its colour, its rectangle and which pixels count.
+/// graphics are, but the small tick. Gives its name, the contrast it needs, its colour, its rectangle and which pixels
+/// count.
 fn rule_graphic(shape: &RectShape, palette: Palette, panel: Rect) -> Option<(&'static str, f64, Color32, Rect, Inside)> {
     let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
     let (rect, fill) = (shape.rect, shape.fill);
     if !panel.contains_rect(rect) {
         return None;
     }
-    // The ticks are a scale at the strength the design gives them (the Repositories table's rule has the same): they
-    // fall short of 3.0 everywhere, so they are reported, not held, until the controller rules (Task 4's report).
     let (name, least, area) =
         if near(rect.width(), theme::HAIRLINE) && near(rect.height(), theme::RULE_TICK) && fill == table::soft(palette, theme::RULE_TICK_OPACITY) {
-            ("graphic: ahead rule's tick (reported, not held)", 1.0, rect)
+            // The controller's ruling of 2026-11-27, pending the user: the small tick (0.28 of the text colour) is a
+            // scale aid, the bar, the origin mark and the number carry how far a fork is, and the Repositories table
+            // has had the same ticks unmeasured since the first plan; so it is reported, not held. Measured: 1.91 to
+            // 1.97 in the light mode, 2.00 to 2.07 in the dark, on every backdrop, both sizes, both renderings.
+            (RULE_TICK_PLACE, 1.0, rect)
         } else if near(rect.width(), theme::HAIRLINE)
             && near(rect.height(), theme::RULE_TICK_FIFTH)
             && fill == table::soft(palette, theme::RULE_FIFTH_OPACITY)
         {
-            ("graphic: ahead rule's fifth tick (reported, not held)", 1.0, rect)
+            (RULE_FIFTH_PLACE, LEAST_GRAPHIC, rect)
         } else if near(rect.width(), theme::RULE_ZERO_WIDTH) && near(rect.height(), theme::RULE_HEIGHT) && fill == palette.on_glass {
             // Measured above the fifth tick it is painted over: there it stands against the panel, below against the tick.
             let above = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - theme::RULE_TICK_FIFTH));
-            ("graphic: ahead rule's origin mark", LEAST_GRAPHIC, above)
+            (RULE_ORIGIN_PLACE, LEAST_GRAPHIC, above)
         } else if near(rect.height(), theme::RULE_BAR) && fill == palette.on_glass {
-            let name =
-                if near(rect.width(), theme::RULE_BREAK_END) { "graphic: ahead rule's broken bar, short piece" } else { "graphic: ahead rule's bar" };
+            let name = if near(rect.width(), theme::RULE_BREAK_END) { RULE_BREAK_PLACE } else { "graphic: ahead rule's bar" };
             (name, LEAST_GRAPHIC, rect)
         } else {
             return None;
@@ -1840,7 +1853,9 @@ fn rows_of(light: Vec<Taken>, dark: Vec<Taken>) -> Vec<ShotRow> {
             row.row.found.count
                 >= if row.row.name.contains("focus ring") {
                     LEAST_RING_PIXELS
-                } else if row.row.name.contains(RULE_GRAPHIC) {
+                } else if row.row.name.ends_with(RULE_BREAK_PLACE) {
+                    LEAST_BREAK_PIXELS
+                } else if [RULE_TICK_PLACE, RULE_FIFTH_PLACE, RULE_ORIGIN_PLACE].iter().any(|place| row.row.name.ends_with(place)) {
                     LEAST_RULE_PIXELS
                 } else {
                     LEAST_PIXELS
