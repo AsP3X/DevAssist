@@ -11,9 +11,9 @@ groups. A second tool manages Docker: containers, Compose projects, images
 and volumes, with live logs. It works with the keyboard and with the mouse.
 A window is being built; it shows your repositories and can update, watch,
 open, group and remove them, add them from GitHub, import clones you already
-have, move them to another folder and push one to another Git service. The
-forks and the settings are still done in the terminal app. It is not part of
-the downloads.
+have, move them to another folder and push one to another Git service. It
+shows the forks of a repository too and brings them up to date; the settings
+are still done in the terminal app. It is not part of the downloads.
 
 ```
  DevAssist   in 3 folders

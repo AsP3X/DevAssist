@@ -30,6 +30,19 @@ What changed in each version of DevAssist. The format follows
   and **Push to another service…** in a side menu.
 - `devassist-gui --demo --show` also opens `migrate`, `add`, `add-folder`,
   `import`, `move` and `push`.
+- **The window shows the forks of a repository.** `f`, or **Show the forks** in
+  the row's menu, opens a screen that takes the table's place, with each fork's
+  branches, pull requests, commits ahead of the original, newest commit and
+  state. It has a filter, the segments **All** and **With changes**, three
+  sorts, buttons that open a fork's folder or its page on GitHub, and a status
+  bar that sums the forks up and says when they were fetched. `Esc`,
+  `Backspace` and the round back button go back; `q` and `←` do not.
+- **The window fetches the forks.** **Fetch the forks** on that screen, and
+  **Clone the forks** or **Update the forks** and **Update the forks of all
+  repositories** in the row's menu, run a fetch whose progress dialog counts
+  the forks ("24 of 38 forks, 8 at a time") and says why it pauses and for how
+  long. **Update all forks** in the top row does the same as the last line.
+- `devassist-gui --demo --show` also opens `forks` and `forks-fetching`.
 
 ### Changed
 
@@ -61,8 +74,9 @@ What changed in each version of DevAssist. The format follows
   at the new place already, another repository of the same move goes there,
   or its move fails or is cancelled, the forks folder stays where it was,
   whole, the repository's move still stands, and the run ends with a fault
-  that names it. The window's Move dialog notes a forks folder that cannot
-  follow, and why. This holds in the terminal app too.
+  that names it. This holds in the terminal app too. The window's Move dialog
+  says in its line that the forks go along, and notes a forks folder that
+  cannot follow, and why.
 - The forks of a repository count as cloned only when the folder beside it is
   a forks folder DevAssist made, in the menu, for `f` and for "Update the
   forks of all repositories". Before, any folder called `<name>-fork` with a

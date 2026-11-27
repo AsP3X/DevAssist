@@ -289,7 +289,10 @@ this layout, which had the original's files at the top, is brought over the
 same way: those files go, unless you changed one, and the forks' folders
 appear.
 The folder is not put on the overview, and a folder of that name that is
-something else is left alone. Only commits are saved: titles and comments of
+something else is left alone: it is not taken for the forks, and cloning the
+forks into it is refused with "D:\code\api-fork is there already and does not
+hold the forks of ada/api". Only that repository's part of the run fails;
+the folder is not touched. Only commits are saved: titles and comments of
 pull requests are not. GitHub lists at most 10,000 forks of one repository
 here.
 
@@ -350,7 +353,8 @@ there. The heading counts them.
 | `Esc`, `←` | back to the repositories |
 
 A double-click opens the folder too. After a fetch the overview reads the
-folder again by itself.
+folder again by itself. The window has this overview too (see "The forks"
+under "The window").
 
 A limit or a timeout does not end the run. Without a sign-in GitHub answers
 only 60 requests an hour, enough to list about 6,000 forks. When that limit
@@ -554,8 +558,9 @@ is ticked, how many are ticked, with a button that clears the ticks.
 From the window you can update, watch, open, group and remove the repositories
 that are on the list, add repositories from GitHub, import clones you already
 have, move repositories to another folder and push one to another Git
-service. The forks, with everything about them, and Settings are still done in
-the terminal app. Folding a group is saved to the settings file, as in
+service. It also shows the forks of a repository, fetches them and brings them
+up to date (see "The forks" below). Settings are still done in the terminal
+app. Folding a group is saved to the settings file, as in
 the terminal app, and so are clones it takes over from an older place at
 start. What the program does by itself it also does here: it fetches when it
 starts, and it pulls the repositories you watch when their interval is over.
@@ -574,6 +579,7 @@ settings file that has a mistake it shows the mistake and loads nothing.
 | `Enter` | Open the menu of the highlighted row, as its "…" does; on a group's header, fold the group (with rows ticked, open the menu for them) |
 | `a` | Open Add, to find repositories on GitHub and clone them |
 | `i`, `I` | Open Import, to add the clones in a folder |
+| `f`, `F` | Open the forks of the highlighted repository, or of the one ticked, in the table's place |
 | `u` | Update the ticked rows, or the highlighted row (all of a highlighted group) |
 | `U` | Update every repository |
 | `w` | Turn the automatic pull on or off for the ticked rows, or the highlighted row |
@@ -589,16 +595,21 @@ settings file that has a mistake it shows the mistake and loads nothing.
 `U` is a capital letter. With Caps Lock on, `u` types `U` and updates every
 repository, as it does in the terminal app. A key that acts, such as `u`, `w`
 or `d`, acts once when it is held down. `w`, `o`, `m`, `l` and `s` also take
-their capital letter; `i` takes `I`; `a` and `d` only the small one.
+their capital letter; `i` takes `I` and `f` takes `F`; `a` and `d` only the
+small one.
 
 A click on a row highlights it, on its box ticks it, on a group's header
 highlights and folds it, and on the box in the head ticks every row shown. A
 row's "…" opens its menu. If the row is not ticked, the menu is for that row
 alone and the other ticks are cleared; if it is ticked, the menu is for every
 ticked row. In the top row, beside the window's own buttons, "Import"
-opens Import, "Update all" updates every repository, and "Add repository"
-opens Add; they are there with no repositories too. In a narrow window the
-buttons show their icons only. Once something is ticked, a bar above the table
+opens Import, "Update all" updates every repository, "Update all forks" brings
+the forks of every repository that has them cloned up to date, and "Add
+repository" opens Add; they are there with no repositories too. "Update all
+forks" does what "Update the forks of all repositories" does in the row's
+menu, whatever is ticked or highlighted; with no forks cloned anywhere it says
+"No forks are cloned yet. Clone the forks of a repository first." on the status
+line. In a narrow window the buttons show their icons only. Once something is ticked, a bar above the table
 says how many, with Update, Move to group, Open folder and Remove, and a
 button that clears the ticks. A double click on a button acts once. A double
 click on a row does not update, as it does in the terminal app.
@@ -625,6 +636,9 @@ menu:
 | Copy the path (the paths) | `c` |
 | Auto-pull on or off | `w` |
 | Fetch the pull requests | `p` |
+| Show the forks | `f` |
+| Clone the forks, or Update the forks | `n` |
+| Update the forks of all repositories | `a` |
 | Migrate | `t` |
 | Remove… | `d` |
 
@@ -632,7 +646,11 @@ menu:
 go to the first and the last line. `Enter` runs the highlighted line, a line's
 key runs that line, and `Esc` or `q` closes the menu. A click on a line runs
 it; a click outside the menu closes it and goes no further. Migrate opens a
-side menu (see below). The menu leaves out the forks' three lines.
+side menu (see below). The second of the forks' lines reads "Update the forks"
+once every repository the menu is for has its forks cloned, and "Clone the
+forks" otherwise. A rule sets the forks' three lines apart. "Show the forks"
+does what `f` does on the list (see "The forks" below), and "Update the forks
+of all repositories" does what "Update all forks" in the top row does.
 
 ### The dialogs
 
@@ -867,6 +885,108 @@ closes it.
 Migrate acts on the ticked rows when the menu was opened on a ticked row, and
 otherwise on that row alone. Move takes all of them. Push takes one.
 
+### The forks
+
+`f` on the list opens the forks of the highlighted repository, or of the one
+ticked, and so does **Show the forks** in the row's menu. They take the table's
+place, read from the `-fork` folder without asking GitHub (see "Cloning the
+forks"). The title says "Forks of" and the repository's name. The sidebar keeps
+Repositories lit, and the round button that hides or shows the sidebar is a
+back button ("Back to the repositories") while the forks are open.
+
+When the forks of the repository are not cloned, nothing opens: the status line
+says "The forks of homelab are not cloned yet. Clone the forks does it." With
+several repositories ticked, or none highlighted, it says "Highlight one
+repository to see its forks."
+
+In the top row, **Read again** and **Open the folder** share a capsule, and the
+main button is **Fetch the forks**. In a narrow window the capsule shows its
+icons only, and in a narrower one the main button too. Under it, the toolbar
+has a field "Filter by owner or name", the segments **All** and **With
+changes**, each with how many forks it holds, and a button with the sort at its
+right end. A click on the button changes the sort, in this order: "Most changes
+first" (forks with commits of their own first, the one furthest ahead on top),
+"Newest commit first" and "By name".
+
+Each fork is a row, in the order of the sort:
+
+| Column | What it says |
+|---|---|
+| Fork | The owner and name of the fork, as `bob/api` |
+| Branches | How many branches were fetched from it |
+| Pull requests | How many pull requests were fetched from it, or "None" |
+| Ahead of ada/main | How many commits its furthest branch is ahead ("3 ahead", with a rule that grows with the number), or "Nothing". The head names what the forks are compared with: the owner of the original and its default branch. When that cannot be read it says "Ahead of the original" |
+| Newest commit | The date of its newest commit, as "23 Nov 2026"; empty when nothing was fetched from it |
+| State | "Changes, folder", "No changes", "Not fetched" or "Gone from GitHub", as in the terminal app with a capital letter |
+
+The column of the sort has an arrow in its head. At the end of a row are two
+round buttons: **Open the folder**, for a fork that has a folder, and **Open
+on GitHub**, for one that is still there. In a narrow window columns are left
+out: first Newest commit, then Branches, then Pull requests.
+
+One fork is highlighted, with a tinted row. There are no ticks: the forks are
+only looked at. A click on a row highlights it, and a double click opens its
+folder. Where the panel has no row it says why, in these words:
+
+- "Reading the forks…" while the folder is read.
+- "The forks could not be read. r tries again." when it could not, with Git's
+  own words under it. **Read again** is the way on.
+- "No fork is in the folder yet. u fetches them." when the folder holds none.
+- "No fork matches. esc clears the filter, c shows the forks without changes."
+  when the filter or the segment hides every fork. Enter, `o` and `g` do
+  nothing then.
+
+The keys are the terminal app's, except where it says so:
+
+| Key | What it does |
+|---|---|
+| `↑` `↓`, `j` `k`, `PgUp` `PgDn`, `Home` `End` | Move the highlight |
+| `Enter`, `o` | Open the folder of the highlighted fork |
+| `g` | Open the highlighted fork on GitHub |
+| `u` | Fetch the forks of this repository |
+| `r`, `F5` | Read the folder again |
+| `s` | Change the sort |
+| `c` | Switch between All and With changes |
+| `/` | Put the keyboard in the filter |
+| `l` | Show the progress of a run again after it was hidden |
+| `Esc` | Clear the filter when it has text; else go back to the repositories |
+| `Backspace` | Go back to the repositories |
+
+`o`, `g`, `u`, `l`, `s` and `c` also take their capital letter. A key that acts
+acts once when it is held down; only the moving keys go on. `q` and `←` do not
+go back, as they do in the terminal app; `Esc`, `Backspace` and the back
+button do. A fork without a folder opens no folder, and one that is gone from
+GitHub opens no page; the status line says so.
+
+While the filter has the keyboard, letters, `Backspace` and `/` only type.
+`/` keeps what is in the filter. `Esc` clears its text, and with none left,
+gives the keyboard back to the list without going back. `Enter` and `↓` give
+it back too. The filter and the segment start the rows again at the top.
+
+The status bar says, at its left, what the program said since you last did
+something here, such as that a folder was opened or could not be. Otherwise it
+says the forks in one sentence, as "38 forks. 6 have changes and a folder. 1 is
+gone from GitHub. 61 branches and 9 pull requests are saved.", leaving out the
+parts that are none. At its right it names the forks' folder and when they were
+last fetched, as "Fetched 25 Nov 2026" (the day the collection's file of
+stamps was last written, in UTC). In a narrow window the folder, cut from its
+left, and the day give way first. While a run exists, a click on the status
+bar shows its dialog again, as `l` does.
+
+**Fetch the forks**, `u`, and the menu's lines that clone or update forks
+start a run, whose progress dialog has a count of the forks. Under its title it
+says where the forks go ("Into D:\code\api-fork. What the checkout has already
+is taken from disk, so only what the forks added is downloaded."), and above
+its output it counts: "24 of 38 forks, 8 at a time", with one bar. A fetch of
+one repository's forks has no list of tasks, as the count stands in its place;
+a run for several repositories keeps the list, and the count is of the
+repository being fetched now. When the fetch pauses, a line with a pause icon
+under the bar says why and for how long, counting down: "The fetch timed out.
+Paused, going on in 0:12." or "GitHub's limit is reached. Paused, going on in
+4:10." The line goes when the fetch goes on. Cancel, Hide, `Esc` and the
+closing of the dialog are as for any run. When the run ends, the forks are
+read again by themselves.
+
 ### The demo
 
 `--demo` holds all work. Every menu and dialog opens, but nothing is run,
@@ -874,7 +994,9 @@ opened, copied or written, and the status line says "This is a demo. Nothing is
 run or changed." With `--demo --show NAME` the window opens with one of them
 already open: `progress`, `remove`, `group`, `menu`, `migrate` (the menu with
 its side menu), `add`, `add-folder` (Add with the folder field's suggestions
-showing), `import`, `move` or `push`. The demo reads no folder and runs no
+showing), `import`, `move`, `push`, `forks` (the forks of `api`, with `bob`
+highlighted) or `forks-fetching` (those forks with a fetch of them held in the
+progress dialog). The demo reads no folder and runs no
 Git, so its folders are made up and its move changes nothing. A folder or an
 address you type into one of its dialogs is checked by its text alone: the
 demo does not look whether it is there.

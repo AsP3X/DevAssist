@@ -31,7 +31,8 @@ cargo run -- --config scratch.toml
 
 `devassist-gui` is a second program, a window in a "liquid glass" design. It
 shows your repositories and acts on them: update, watch, open, group and
-remove, and it adds, imports, moves and pushes them. What the program does
+remove, and it adds, imports, moves and pushes them, and shows and updates
+their forks. What the program does
 by itself it also does here: it fetches every repository when it starts, and
 it pulls the repositories you watch when their interval is over, as the
 terminal app does (see the window in [USAGE.md](USAGE.md)). It is not in the
@@ -57,7 +58,7 @@ frosted instead.
 | `--no-blur` | Does not blur the backdrop |
 | `--no-sidebar` | Opens with the sidebar hidden |
 | `--demo` | Shows twelve made-up repositories instead of yours. It reads no folder (a folder typed into a dialog is checked by its text alone), no settings file (so it opens in the default look, unless `--light`, `--dark` or `--backdrop` say otherwise) and asks no network, so it suits screenshots. All work is held (see below). |
-| `--show NAME` | With `--demo` only: opens one menu or dialog at start, so a picture can show it. The names are `progress`, `remove`, `group`, `menu`, `migrate` (the menu with its side menu), `add`, `add-folder` (Add with the folder field's suggestions showing), `import`, `move` and `push` |
+| `--show NAME` | With `--demo` only: opens one menu or dialog at start, so a picture can show it. The names are `progress`, `remove`, `group`, `menu`, `migrate` (the menu with its side menu), `add`, `add-folder` (Add with the folder field's suggestions showing), `import`, `move`, `push`, `forks` (the forks screen, with the forks of the demo's `api`) and `forks-fetching` (the same, with a fetch of those forks held in the progress dialog, 24 of 38 done and paused) |
 
 At start the window reads `theme`, `backdrop` and `blur` from the settings
 file. It cannot change them yet. A settings file with a mistake makes the
@@ -234,6 +235,8 @@ The terminal app reaches the core through re-exports, so `crate::atoms::sys`,
 | `repos/state.rs` | The repository overview's state and everything it does |
 | `repos/form.rs` | The settings dialog's form and what it turns into |
 | `repos/gitops.rs` | Everything that runs `git`: status, fetch, update, clone, remove |
+| `repos/forks.rs` | What the overview of forks says: the states, the dates, the counts and the sentence that sums them up |
+| `repos/forklines.rs` | The lines a fetch of forks writes about how far it is, and the facts read back out of them |
 | `repos/github.rs` | The GitHub API: listing repositories, the sign-in token |
 | `repos/gitprogress.rs` | Reading git's progress output |
 | `docker/state.rs` | The Docker tool's state and everything it does |
@@ -265,7 +268,7 @@ use. The root package turns it on as a dev-dependency.
 | `src/theme.rs` | Every colour, radius, size and duration |
 | `src/assets.rs` | The built-in fonts, icon font and backdrops |
 | `src/baker.rs` | Makes the glass panes as pictures and keeps them |
-| `src/shell.rs` | The frame: sidebar, panel and status bar. `shell::layout` is the one place that gives every rectangle |
+| `src/shell.rs` | The frame: sidebar, panel and status bar. `shell::layout` is the one place that gives every rectangle. While a screen of a page is open (the forks), the sidebar button's place holds the round button back, and `shell::draw` says when it was pressed |
 | `src/frost.rs` | Draws a frosted pane from the baker's sheet |
 | `src/session.rs` | What the window has loaded: the repositories, a settings file that could not be read, or the demo's |
 | `src/demo.rs` | The twelve repositories of `--demo` |
@@ -274,10 +277,11 @@ use. The root package turns it on as a dev-dependency.
 | `src/table.rs` | Draws the table and says what was clicked |
 | `src/widgets.rs` | The small pieces the screens are drawn with: checkbox, cut-off text, capsule of actions, text field, and the folder field with its suggestions (`folder_field`) |
 | `src/repos_screen.rs` | The Repositories screen: its toolbar, its keys and what it shows when there is no table |
+| `src/forks_screen.rs` | The forks of one repository, a screen of the Repositories page that takes the table's place while the core has an overview of forks open: its top row, toolbar, columns, keys and status bar |
 | `src/overlay.rs` | What every menu and dialog shares: the shield, the scrim, the pane's glass, the buttons and how Tab walks them |
 | `src/menu.rs` | The row's menu: its lines, in the core's words and keys, and the side menu of Migrate (its pane is placed by `overlay.rs`) |
 | `src/dialogs/mod.rs` | The bridge from the core's mode to the overlay, and the parts the dialogs share |
-| `src/dialogs/progress.rs` | The progress of a run |
+| `src/dialogs/progress.rs` | The progress of a run, and the count and pause of a fetch of forks |
 | `src/dialogs/remove.rs` | The question before repositories are forgotten or deleted |
 | `src/dialogs/group.rs` | Moving repositories into a group, and renaming a group |
 | `src/dialogs/add.rs` | Add: the search, the found repositories, the folder to clone into |
