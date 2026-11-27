@@ -112,21 +112,26 @@ impl App {
             return;
         };
         if view.filtering {
+            let mut filter = view.filter.clone();
             match key.code {
-                KeyCode::Esc => {
-                    view.filter.clear();
-                    view.filtering = false;
-                }
+                KeyCode::Esc => self.clear_fork_filter(),
                 KeyCode::Enter | KeyCode::Down | KeyCode::Up => view.filtering = false,
                 KeyCode::Backspace => {
-                    view.filter.pop();
+                    filter.pop();
+                    self.set_fork_filter(&filter);
                 }
-                KeyCode::Char(ch) => view.filter.push(ch),
+                KeyCode::Char(ch) => {
+                    filter.push(ch);
+                    self.set_fork_filter(&filter);
+                }
                 _ => {}
             }
-            view.scroll = 0;
+            if let Some(view) = self.forks.as_mut() {
+                view.scroll = 0;
+            }
             return;
         }
+        let (filtered, scroll) = (!view.filter.is_empty(), view.scroll);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.move_fork(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_fork(1),
@@ -142,7 +147,13 @@ impl App {
             KeyCode::Char('s') | KeyCode::Char('S') => self.cycle_fork_sort(),
             KeyCode::Char('c') | KeyCode::Char('C') => self.toggle_fork_changed_only(),
             KeyCode::Char('/') => self.start_fork_filter(),
-            KeyCode::Esc if !view.filter.is_empty() => view.filter.clear(),
+            KeyCode::Esc if filtered => {
+                self.clear_fork_filter();
+                // The list stays where it was, as it always did here.
+                if let Some(view) = self.forks.as_mut() {
+                    view.scroll = scroll;
+                }
+            }
             KeyCode::Esc | KeyCode::Left | KeyCode::Backspace | KeyCode::Char('q') => {
                 self.close_forks()
             }
@@ -1260,6 +1271,7 @@ mod tests {
                     fork("bob", 3, 10, true),
                     fork("cy", 9, 20, true),
                 ],
+                ..Default::default()
             }),
         });
         let owners = |app: &App| -> Vec<String> {

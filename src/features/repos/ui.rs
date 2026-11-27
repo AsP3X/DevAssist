@@ -14,7 +14,8 @@ use crate::atoms::ui::menu;
 use crate::atoms::ui::progress;
 use crate::atoms::ui::text::{fit, fit_end, join_facts, padded_row};
 use crate::features::repos::app::App;
-use crate::features::repos::gitops::{self, ForkInfo, LocalRepo};
+use crate::features::repos::forks::{DayForm, ForkState, day, fork_ahead};
+use crate::features::repos::gitops::{self, LocalRepo};
 use crate::features::repos::gitprogress::{self, split_progress};
 use crate::features::repos::settings::{Field, PROTOCOLS};
 use crate::features::repos::state::{
@@ -158,34 +159,6 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(vec![title, meta, third]), area);
 }
 
-/// "2026-11-24" for a time in seconds since 1970, in UTC.
-fn day(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400) + 719_468;
-    let era = days.div_euclid(146_097);
-    let of_era = days.rem_euclid(146_097);
-    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
-    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted = (5 * of_year + 2) / 153;
-    let day = of_year - (153 * shifted + 2) / 5 + 1;
-    let month = if shifted < 10 {
-        shifted + 3
-    } else {
-        shifted - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-/// What the state column says about a fork.
-fn fork_state(fork: &ForkInfo) -> &'static str {
-    match (fork.gone, fork.folder, fork.branches) {
-        (true, _, _) => "gone from GitHub",
-        (false, true, _) => "changes, folder",
-        (false, false, 0) => "not fetched",
-        (false, false, _) => "no changes",
-    }
-}
-
 /// The columns of the fork overview: the mark, the fork, its branches,
 /// its pull requests, how far it is ahead, its newest commit, its state.
 /// On a narrow screen the state goes first, then the date.
@@ -225,7 +198,7 @@ fn fork_detail(view: &ForksView) -> String {
         text.push_str("  ·  no longer on GitHub: it is not updated, what was fetched stays");
     }
     if fork.folder {
-        if let Some(ahead) = fork.ahead.filter(|ahead| *ahead > 0) {
+        if let Some(ahead) = fork_ahead(fork) {
             text.push_str(&format!(
                 "  ·  {} ahead of the original",
                 count(ahead, "commit", "commits")
@@ -263,23 +236,22 @@ fn draw_forks(frame: &mut Frame, app: &mut App, header: Rect, columns: Rect, lis
         ),
     ]);
     let rows = view.rows();
-    let changed = view.forks.iter().filter(|fork| fork.folder).count();
-    let gone = view.forks.iter().filter(|fork| fork.gone).count();
-    let branches: u32 = view.forks.iter().map(|fork| fork.branches).sum();
-    let pulls: u32 = view.forks.iter().map(|fork| fork.pulls).sum();
-    let mut meta = match view.forks.len() {
+    let counts = view.counts();
+    let mut meta = match counts.all {
         1 => "  1 fork".to_string(),
         count => format!("  {count} forks"),
     };
-    if rows.len() != view.forks.len() {
-        meta.push_str(&format!(" · {} shown", rows.len()));
+    if counts.shown != counts.all {
+        meta.push_str(&format!(" · {} shown", counts.shown));
     }
-    meta.push_str(&format!(" · {changed} with changes"));
-    if gone > 0 {
-        meta.push_str(&format!(" · {gone} gone from GitHub"));
+    meta.push_str(&format!(" · {} with changes", counts.changed));
+    if counts.gone > 0 {
+        meta.push_str(&format!(" · {} gone from GitHub", counts.gone));
     }
     meta.push_str(&format!(
-        " · {branches} branches · {pulls} pull requests · {}",
+        " · {} branches · {} pull requests · {}",
+        counts.branches,
+        counts.pulls,
         view.sort.label()
     ));
     if view.changed_only {
@@ -332,16 +304,8 @@ fn draw_forks(frame: &mut Frame, app: &mut App, header: Rect, columns: Rect, lis
         columns,
     );
 
-    if rows.is_empty() {
-        let text = if view.loading {
-            "  Reading the forks…"
-        } else if view.error.is_some() {
-            "  The forks could not be read. r tries again."
-        } else if view.forks.is_empty() {
-            "  No fork is in the folder yet. u fetches them."
-        } else {
-            "  No fork matches. esc clears the filter, c shows the forks without changes."
-        };
+    if let Some(message) = view.empty_message() {
+        let text = format!("  {message}");
         frame.render_widget(
             Paragraph::new(Span::styled(text, Style::default().fg(Color::DarkGray))),
             list,
@@ -366,15 +330,10 @@ fn draw_forks(frame: &mut Frame, app: &mut App, header: Rect, columns: Rect, lis
             height: 1,
         };
         let chosen = offset == selected;
-        let ahead = match fork.ahead {
-            Some(ahead) if fork.folder && ahead > 0 => ahead.to_string(),
-            _ => String::new(),
-        };
-        let date = if fork.date > 0 {
-            day(fork.date)
-        } else {
-            String::new()
-        };
+        let ahead = fork_ahead(fork)
+            .map(|ahead| ahead.to_string())
+            .unwrap_or_default();
+        let date = day(fork.date, DayForm::Digits);
         let cells = [
             if chosen { "▌ " } else { "  " }.to_string(),
             format!("{}/{}", fork.owner, fork.name),
@@ -382,7 +341,7 @@ fn draw_forks(frame: &mut Frame, app: &mut App, header: Rect, columns: Rect, lis
             fork.pulls.to_string(),
             ahead,
             date,
-            fork_state(fork).to_string(),
+            ForkState::of(fork).words().to_string(),
         ];
         let cells: Vec<&str> = cells.iter().map(String::as_str).collect();
         let line = padded_row(&cells, &widths, list.width as usize);
@@ -2491,11 +2450,9 @@ mod tests {
 
     #[test]
     fn the_fork_overview_lists_the_forks_of_a_repository() {
+        use crate::features::repos::gitops::ForkInfo;
         use crate::features::repos::state::ForkSort;
         use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-        assert_eq!(day(0), "1970-01-01");
-        assert_eq!(day(1_795_596_570), "2026-11-25");
-        assert_eq!(day(951_782_400), "2000-02-29");
 
         let root = std::env::temp_dir().join(format!("devassist-forkui-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

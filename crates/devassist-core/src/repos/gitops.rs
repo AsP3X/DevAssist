@@ -1457,7 +1457,7 @@ pub struct ForkInfo {
 }
 
 /// The forks a collection holds.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ForkList {
     /// The repository they are forks of, as `owner/name`.
     pub original: String,
@@ -1465,6 +1465,13 @@ pub struct ForkList {
     pub dest: PathBuf,
     /// By owner, in the order of the alphabet.
     pub forks: Vec<ForkInfo>,
+    /// What "ahead" is counted against: the original's owner and the
+    /// branch its `HEAD` in the collection points at, as `AsP3X/main`.
+    /// None when that cannot be read.
+    pub base: Option<String>,
+    /// When the forks were last fetched: the time the collection's stamps
+    /// file was written, in seconds since 1970. None without that file.
+    pub fetched: Option<i64>,
 }
 
 /// Reads the forks that were cloned beside the checkout `path`: what is
@@ -1565,10 +1572,26 @@ pub fn list_forks(path: &Path) -> Result<ForkList, String> {
             fork.pulls += 1;
         }
     }
+    // The branch "ahead" is counted against, by the original's HEAD.
+    let head = format!("refs/remotes/{first}/HEAD");
+    let base = git_lines(&dest, &["symbolic-ref", "-q", &head])
+        .ok()
+        .and_then(|lines| lines.into_iter().next())
+        .and_then(|target| {
+            let branch = target.strip_prefix(&format!("refs/remotes/{first}/"))?;
+            Some(format!("{first}/{branch}"))
+        });
+    let fetched = fs::metadata(stamps_file(&dest))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|since| i64::try_from(since.as_secs()).ok());
     Ok(ForkList {
         original,
         dest,
         forks: forks.into_values().collect(),
+        base,
+        fetched,
     })
 }
 
@@ -4479,6 +4502,59 @@ refs/remotes/fork/dev\tiii\t\t
         assert!(fork_url("git@github.com:ada/api.git", "bob", "api").starts_with("git@"));
         assert!(fork_url("https://github.com/ada/api", "bob", "api").starts_with("https://"));
         let _ = remove_tree(&root);
+    }
+
+    #[test]
+    fn a_forks_list_names_what_ahead_is_measured_against_and_when_it_was_fetched() {
+        let root = std::env::temp_dir().join(format!("devassist-forkbase-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _gone = Gone(root.clone());
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "trunk", "ada"]);
+        commit(&root.join("ada"), "one");
+        git(&root, &["clone", "-q", "ada", "bob"]);
+        git(&root, &["clone", "-q", "ada", "api"]);
+        let api = root.join("api");
+        let dest = forks_folder(&api).unwrap();
+        let original = ("ada".to_string(), "api".to_string());
+        let forks = [ForkSource {
+            owner: "bob".to_string(),
+            name: "api".to_string(),
+            stamp: "one".to_string(),
+        }];
+        let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
+        save_forks(&api, &dest, &original, &forks, &url_of, None, |_, _| {}).unwrap();
+        // The original's HEAD names its default branch, whichever Git
+        // made the collection.
+        git(
+            &dest,
+            &[
+                "symbolic-ref",
+                "refs/remotes/ada/HEAD",
+                "refs/remotes/ada/trunk",
+            ],
+        );
+        let stamps = stamps_file(&dest);
+        let written = fs::metadata(&stamps)
+            .and_then(|meta| meta.modified())
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let list = list_forks(&api).unwrap();
+        assert_eq!(list.base.as_deref(), Some("ada/trunk"));
+        assert_eq!(list.fetched, Some(i64::try_from(written).unwrap()));
+
+        // Without the HEAD and the stamps, neither is known.
+        git(
+            &dest,
+            &["symbolic-ref", "--delete", "refs/remotes/ada/HEAD"],
+        );
+        fs::remove_file(&stamps).unwrap();
+        let list = list_forks(&api).unwrap();
+        assert_eq!(list.base, None);
+        assert_eq!(list.fetched, None);
+        assert_eq!(list.forks.len(), 1, "the forks are read as before");
     }
 
     #[test]

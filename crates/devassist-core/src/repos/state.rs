@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::list;
 use crate::prompt::{self as pathprompt, PathPrompt};
+use crate::repos::forks::{self, ForkCounts};
 use crate::repos::form::Form;
 
 use crate::config::{self, Settings};
@@ -452,9 +453,71 @@ pub struct ForksView {
     pub filtering: bool,
     /// Only forks with commits of their own are shown.
     pub changed_only: bool,
+    /// What "ahead" is counted against, as the collection says it.
+    base: Option<String>,
+    /// When the forks were last fetched, in seconds since 1970.
+    fetched: Option<i64>,
 }
 
 impl ForksView {
+    /// The numbers of the overview: of every fork, and of the ones shown.
+    pub fn counts(&self) -> ForkCounts {
+        ForkCounts {
+            all: self.forks.len(),
+            shown: self.rows().len(),
+            changed: self.forks.iter().filter(|fork| fork.folder).count(),
+            gone: self.forks.iter().filter(|fork| fork.gone).count(),
+            branches: self.forks.iter().map(|fork| fork.branches).sum(),
+            pulls: self.forks.iter().map(|fork| fork.pulls).sum(),
+        }
+    }
+
+    /// The sentence that sums up the forks, as "38 forks. 6 have changes
+    /// and a folder. 1 is gone from GitHub. 61 branches and 9 pull
+    /// requests are saved.": the parts that are zero are left out.
+    pub fn summary(&self) -> String {
+        forks::summary(&self.counts())
+    }
+
+    /// Why the list shows no fork, or None when it shows some.
+    pub fn empty_message(&self) -> Option<String> {
+        if !self.rows().is_empty() {
+            return None;
+        }
+        let text = if self.loading {
+            "Reading the forks…"
+        } else if self.error.is_some() {
+            "The forks could not be read. r tries again."
+        } else if self.forks.is_empty() {
+            "No fork is in the folder yet. u fetches them."
+        } else {
+            "No fork matches. esc clears the filter, c shows the forks without changes."
+        };
+        Some(text.to_string())
+    }
+
+    /// What "ahead" is counted against, as `AsP3X/main`, when the
+    /// collection says it.
+    pub fn base(&self) -> Option<&str> {
+        self.base.as_deref()
+    }
+
+    /// When the forks were last fetched, in seconds since 1970.
+    pub fn fetched(&self) -> Option<i64> {
+        self.fetched
+    }
+
+    /// Takes what a read of the collection found.
+    fn take(&mut self, list: gitops::ForkList) {
+        self.loading = false;
+        self.error = None;
+        self.original = list.original;
+        self.dest = list.dest;
+        self.forks = list.forks;
+        self.base = list.base;
+        self.fetched = list.fetched;
+    }
+
     /// The forks the list shows, in its order.
     pub fn rows(&self) -> Vec<&gitops::ForkInfo> {
         let filter = self.filter.trim().to_lowercase();
@@ -615,6 +678,8 @@ pub struct Repos {
     pub forks: Option<ForksView>,
     #[doc(hidden)]
     pub forks_generation: u64,
+    /// Made-up forks a held session shows, by repository (`hold_forks`).
+    held_forks: HashMap<String, gitops::ForkList>,
     pub title: String,
     pub custom_title: Option<String>,
     pub config_path: PathBuf,
@@ -803,6 +868,7 @@ impl Repos {
             menu: None,
             forks: None,
             forks_generation: 0,
+            held_forks: HashMap::new(),
             title: settings.title,
             custom_title: settings.custom_title,
             config_path: settings.config_path,
@@ -1304,6 +1370,19 @@ impl Repos {
     /// Opens the overview of the forks of the highlighted repository,
     /// read from the folder they were cloned into.
     pub fn open_forks(&mut self) {
+        self.open_forks_with(true);
+    }
+
+    /// `open_forks`, whose notice for forks that are not cloned names no
+    /// key. For a window.
+    pub fn open_forks_plain(&mut self) {
+        self.open_forks_with(false);
+    }
+
+    /// Opens the fork overview; `key_hint` says whether the notice for
+    /// forks that are not cloned names the terminal's keys. Held, the
+    /// forks are the ones `hold_forks` gave, and no folder is looked at.
+    fn open_forks_with(&mut self, key_hint: bool) {
         self.mode = Mode::List;
         let repo = self
             .selected
@@ -1317,12 +1396,19 @@ impl Repos {
             self.notice("Highlight one repository to see its forks.", true);
             return;
         };
-        if !gitops::forks_cloned(&repo.path) {
+        let cloned = if self.work_held {
+            self.held_forks.contains_key(&repo.folder)
+        } else {
+            gitops::forks_cloned(&repo.path)
+        };
+        if !cloned {
+            let how = if key_hint {
+                "Enter, then n clones them."
+            } else {
+                "Clone the forks does it."
+            };
             self.notice(
-                format!(
-                    "The forks of {} are not cloned yet. Enter, then n clones them.",
-                    repo.folder
-                ),
+                format!("The forks of {} are not cloned yet. {how}", repo.folder),
                 true,
             );
             return;
@@ -1341,15 +1427,83 @@ impl Repos {
             filter: String::new(),
             filtering: false,
             changed_only: false,
+            base: None,
+            fetched: None,
         });
         self.load_forks();
     }
 
+    /// Gives a held session the forks it shows for the repository `repo`
+    /// (by row name), in place of a collection on disk: story data for a
+    /// demo. A later list for the same repository replaces this one. A
+    /// live session never looks at them.
+    pub fn hold_forks(&mut self, repo: &str, list: gitops::ForkList) {
+        self.held_forks.insert(repo.to_string(), list);
+    }
+
+    /// Filters the fork overview by `text`, from the top of the list. A
+    /// highlighted fork the filter hides gives way as `ForksView::chosen`
+    /// says. Nothing happens when the text is the same or no overview is
+    /// open.
+    pub fn set_fork_filter(&mut self, text: &str) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        if view.filter == text {
+            return;
+        }
+        view.filter = text.to_string();
+        view.scroll = 0;
+    }
+
+    /// Empties the fork overview's filter and ends its typing.
+    pub fn clear_fork_filter(&mut self) {
+        self.set_fork_filter("");
+        if let Some(view) = self.forks.as_mut() {
+            view.filtering = false;
+        }
+    }
+
+    /// Sorts the fork overview by `sort`, from the top of the list.
+    pub fn set_fork_sort(&mut self, sort: ForkSort) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        if view.sort != sort {
+            view.sort = sort;
+            view.scroll = 0;
+        }
+    }
+
+    /// Shows only the forks with commits of their own, or all of them,
+    /// from the top of the list.
+    pub fn set_fork_changed_only(&mut self, on: bool) {
+        let Some(view) = self.forks.as_mut() else {
+            return;
+        };
+        if view.changed_only != on {
+            view.changed_only = on;
+            view.scroll = 0;
+        }
+    }
+
     /// Reads the fork folder of the open overview again, in the background.
+    /// Held, it takes the forks `hold_forks` gave at once.
     pub fn load_forks(&mut self) {
         let Some(view) = self.forks.as_mut() else {
             return;
         };
+        if self.work_held {
+            self.forks_generation += 1;
+            match self.held_forks.get(&view.repo) {
+                Some(list) => view.take(list.clone()),
+                None => {
+                    view.loading = false;
+                    self.notice(HELD, false);
+                }
+            }
+            return;
+        }
         view.loading = true;
         view.error = None;
         self.forks_generation += 1;
@@ -1439,20 +1593,16 @@ impl Repos {
 
     /// Sorts the fork overview the next way.
     pub fn cycle_fork_sort(&mut self) {
-        let Some(view) = self.forks.as_mut() else {
-            return;
-        };
-        view.sort = view.sort.next();
-        view.scroll = 0;
+        if let Some(sort) = self.forks.as_ref().map(|view| view.sort.next()) {
+            self.set_fork_sort(sort);
+        }
     }
 
     /// Shows only the forks with commits of their own, or all of them.
     pub fn toggle_fork_changed_only(&mut self) {
-        let Some(view) = self.forks.as_mut() else {
-            return;
-        };
-        view.changed_only = !view.changed_only;
-        view.scroll = 0;
+        if let Some(on) = self.forks.as_ref().map(|view| !view.changed_only) {
+            self.set_fork_changed_only(on);
+        }
     }
 
     /// Starts typing a new filter for the fork overview.
@@ -1590,13 +1740,20 @@ impl Repos {
             self.notice("Select a repository first.", true);
             return;
         }
-        // Held (a demo), no folder is looked for: the forks are not cloned.
-        let forks_cloned = !self.work_held
-            && self
-                .installed
-                .iter()
-                .filter(|repo| repos.contains(&repo.folder))
-                .all(|repo| gitops::forks_cloned(&repo.path));
+        // Held (a demo), no folder is looked for: the forks are cloned
+        // where the story gave some (`hold_forks`).
+        let held = self.work_held;
+        let forks_cloned = self
+            .installed
+            .iter()
+            .filter(|repo| repos.contains(&repo.folder))
+            .all(|repo| {
+                if held {
+                    self.held_forks.contains_key(&repo.folder)
+                } else {
+                    gitops::forks_cloned(&repo.path)
+                }
+            });
         self.menu = Some(Menu {
             repos,
             selected: 0,
@@ -3240,8 +3397,10 @@ impl Repos {
     }
 
     /// Brings the forks of every repository up to date that has them
-    /// cloned beside it. The selection and the ticks play no part.
-    fn update_all_forks(&mut self) {
+    /// cloned beside it, one repository after another in the progress
+    /// dialog: "Update the forks of all repositories". The selection and
+    /// the ticks play no part.
+    pub fn update_all_forks(&mut self) {
         let folders: Vec<String> = self
             .installed
             .iter()
@@ -4496,14 +4655,12 @@ impl Repos {
                     return;
                 }
                 if let Some(view) = self.forks.as_mut() {
-                    view.loading = false;
                     match result {
-                        Ok(list) => {
-                            view.original = list.original;
-                            view.dest = list.dest;
-                            view.forks = list.forks;
+                        Ok(list) => view.take(list),
+                        Err(err) => {
+                            view.loading = false;
+                            view.error = Some(err);
                         }
-                        Err(err) => view.error = Some(err),
                     }
                 }
             }
@@ -6844,6 +7001,281 @@ mod tests {
         live.selected = Some("api".into());
         live.enter_row();
         assert!(reads() > before, "the menu did not look for the forks");
+    }
+
+    fn a_fork(
+        owner: &str,
+        branches: u32,
+        pulls: u32,
+        folder: bool,
+        gone: bool,
+    ) -> gitops::ForkInfo {
+        gitops::ForkInfo {
+            owner: owner.into(),
+            name: "api".into(),
+            branches,
+            pulls,
+            ahead: Some(2),
+            date: 1_795_392_000,
+            folder,
+            gone,
+        }
+    }
+
+    /// An open overview of these forks of acme/api.
+    fn fork_view(forks: Vec<gitops::ForkInfo>) -> ForksView {
+        ForksView {
+            repo: "api".into(),
+            path: PathBuf::from("api"),
+            original: "acme/api".into(),
+            dest: PathBuf::from("api-fork"),
+            forks,
+            loading: false,
+            error: None,
+            selected: None,
+            scroll: 0,
+            sort: ForkSort::Changed,
+            filter: String::new(),
+            filtering: false,
+            changed_only: false,
+            base: None,
+            fetched: None,
+        }
+    }
+
+    #[test]
+    fn the_overview_counts_every_fork_and_sums_them_up() {
+        let mut view = fork_view(vec![
+            a_fork("amy", 4, 1, true, false),
+            a_fork("bob", 1, 0, false, false),
+            a_fork("cy", 2, 3, false, true),
+        ]);
+        assert_eq!(
+            view.counts(),
+            ForkCounts {
+                all: 3,
+                shown: 3,
+                changed: 1,
+                gone: 1,
+                branches: 7,
+                pulls: 4,
+            }
+        );
+        let sentence = "3 forks. 1 has changes and a folder. 1 is gone from GitHub. 7 branches and 4 pull requests are saved.";
+        assert_eq!(view.summary(), sentence);
+        // The filter changes what is shown, not what there is.
+        view.filter = "amy".into();
+        assert_eq!(view.counts().shown, 1);
+        assert_eq!(view.counts().all, 3);
+        assert_eq!(view.summary(), sentence);
+        assert_eq!(fork_view(Vec::new()).summary(), "No forks.");
+    }
+
+    #[test]
+    fn the_empty_message_says_why_nothing_shows() {
+        let mut view = fork_view(Vec::new());
+        view.loading = true;
+        view.error = Some("broken".into());
+        assert_eq!(view.empty_message().as_deref(), Some("Reading the forks…"));
+        view.loading = false;
+        assert_eq!(
+            view.empty_message().as_deref(),
+            Some("The forks could not be read. r tries again.")
+        );
+        view.error = None;
+        assert_eq!(
+            view.empty_message().as_deref(),
+            Some("No fork is in the folder yet. u fetches them.")
+        );
+        view.forks = vec![a_fork("bob", 1, 0, false, false)];
+        assert_eq!(view.empty_message(), None, "a fork shows");
+        // Shown forks win over a read that is running again.
+        view.loading = true;
+        assert_eq!(view.empty_message(), None);
+        view.loading = false;
+        view.changed_only = true;
+        assert_eq!(
+            view.empty_message().as_deref(),
+            Some("No fork matches. esc clears the filter, c shows the forks without changes.")
+        );
+        view.changed_only = false;
+        view.filter = "nobody".into();
+        assert_eq!(
+            view.empty_message().as_deref(),
+            Some("No fork matches. esc clears the filter, c shows the forks without changes.")
+        );
+    }
+
+    #[test]
+    fn the_fork_filter_is_set_and_cleared_through_methods() {
+        let mut app = grouped_app();
+        // With no overview open, nothing happens.
+        app.set_fork_filter("cy");
+        app.clear_fork_filter();
+        app.set_fork_sort(ForkSort::Name);
+        app.set_fork_changed_only(true);
+        assert!(app.forks.is_none());
+
+        let mut view = fork_view(vec![
+            a_fork("bob", 1, 0, true, false),
+            a_fork("cy", 1, 0, false, false),
+        ]);
+        view.selected = Some("bob".into());
+        view.scroll = 5;
+        view.filtering = true;
+        app.forks = Some(view);
+        fn open(app: &Repos) -> &ForksView {
+            app.forks.as_ref().unwrap()
+        }
+        app.set_fork_filter("cy");
+        assert_eq!(open(&app).filter, "cy");
+        assert_eq!(open(&app).scroll, 0, "the list starts at the top");
+        assert!(open(&app).filtering, "the typing goes on");
+        // The highlighted fork is filtered out: the first one shown is it.
+        assert_eq!(open(&app).chosen().unwrap().owner, "cy");
+        // The same text changes nothing.
+        app.forks.as_mut().unwrap().scroll = 3;
+        app.set_fork_filter("cy");
+        assert_eq!(open(&app).scroll, 3);
+        app.clear_fork_filter();
+        assert_eq!(open(&app).filter, "");
+        assert!(!open(&app).filtering);
+        assert_eq!(open(&app).scroll, 0);
+
+        app.forks.as_mut().unwrap().scroll = 3;
+        app.set_fork_sort(ForkSort::Changed);
+        assert_eq!(open(&app).scroll, 3, "the sort it has already");
+        app.set_fork_sort(ForkSort::Name);
+        assert_eq!(open(&app).sort, ForkSort::Name);
+        assert_eq!(open(&app).scroll, 0);
+        app.forks.as_mut().unwrap().scroll = 3;
+        app.set_fork_changed_only(false);
+        assert_eq!(open(&app).scroll, 3, "all are shown already");
+        app.set_fork_changed_only(true);
+        assert!(open(&app).changed_only);
+        assert_eq!(open(&app).scroll, 0);
+        // The cycling and the toggling neighbours do the same.
+        app.cycle_fork_sort();
+        assert_eq!(open(&app).sort, ForkSort::Changed);
+        app.toggle_fork_changed_only();
+        assert!(!open(&app).changed_only);
+    }
+
+    #[test]
+    fn a_held_session_shows_the_forks_it_was_given_and_reads_no_disk() {
+        let (mut app, root) = held_app("forks-held");
+        let _temp = Temp(root.clone());
+        let mut other = installed("acme", "other");
+        other.path = root.join("other");
+        app.installed.push(other);
+        let list = gitops::ForkList {
+            original: "acme/tool".into(),
+            dest: PathBuf::from("story").join("tool-fork"),
+            forks: vec![
+                a_fork("bob", 3, 1, true, false),
+                a_fork("cy", 1, 0, false, false),
+            ],
+            base: Some("acme/main".into()),
+            fetched: Some(1_795_392_000),
+        };
+        app.hold_forks("tool", gitops::ForkList::default());
+        // A later list replaces the first.
+        app.hold_forks("tool", list.clone());
+        #[cfg(feature = "testing")]
+        let before = crate::sys::disk_reads_here();
+
+        // The menu knows the forks are there.
+        app.enter_row();
+        assert_eq!(
+            app.menu.as_ref().unwrap().label(MenuItem::Forks),
+            "Update the forks"
+        );
+        app.close_menu();
+        app.open_forks();
+        let view = app.forks.as_ref().expect("the overview is open");
+        assert!(!view.loading, "the forks are there at once");
+        assert_eq!(view.forks, list.forks);
+        assert_eq!(view.original, "acme/tool");
+        assert_eq!(view.dest, list.dest);
+        assert_eq!(view.base(), Some("acme/main"));
+        assert_eq!(view.fetched(), Some(1_795_392_000));
+        // Reading again takes the same list, at once.
+        app.forks.as_mut().unwrap().forks.clear();
+        app.load_forks();
+        let view = app.forks.as_ref().unwrap();
+        assert!(!view.loading);
+        assert_eq!(view.forks, list.forks);
+        app.close_forks();
+        app.open_forks_plain();
+        assert_eq!(app.forks.as_ref().unwrap().forks, list.forks);
+
+        // What would run or open something says the demo's words.
+        app.status.clear();
+        app.update_shown_forks();
+        assert_eq!(app.status, HELD);
+        assert!(app.queue.is_empty() && !app.busy && app.job.is_none());
+        app.status.clear();
+        app.open_fork_folder();
+        assert_eq!(app.status, HELD);
+        app.status.clear();
+        app.open_fork_on_github();
+        assert_eq!(app.status, HELD);
+        app.close_forks();
+
+        // A repository without made-up forks has none cloned.
+        app.selected = Some("other".into());
+        app.enter_row();
+        assert_eq!(
+            app.menu.as_ref().unwrap().label(MenuItem::Forks),
+            "Clone the forks"
+        );
+        app.close_menu();
+        app.open_forks();
+        assert!(app.forks.is_none());
+        assert_eq!(
+            app.status,
+            "The forks of other are not cloned yet. Enter, then n clones them."
+        );
+        app.open_forks_plain();
+        assert_eq!(
+            app.status,
+            "The forks of other are not cloned yet. Clone the forks does it."
+        );
+        #[cfg(feature = "testing")]
+        assert_eq!(
+            crate::sys::disk_reads_here(),
+            before,
+            "the held session looked at the disk"
+        );
+        // No read was sent to the worker.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            app.worker.drain().is_empty(),
+            "a read ran in the background"
+        );
+        assert!(!root.join("tool-fork").exists());
+    }
+
+    #[test]
+    fn show_the_forks_of_a_repository_without_them_says_so_plainly() {
+        let mut app = grouped_app();
+        app.selected = Some("api".into());
+        app.open_forks_plain();
+        assert!(app.forks.is_none());
+        assert_eq!(
+            app.status,
+            "The forks of api are not cloned yet. Clone the forks does it."
+        );
+        assert!(app.status_error);
+        // The terminal's words still name its keys.
+        app.open_forks();
+        assert_eq!(
+            app.status,
+            "The forks of api are not cloned yet. Enter, then n clones them."
+        );
+        app.marked = vec!["api".into(), "web".into()];
+        app.open_forks_plain();
+        assert_eq!(app.status, "Highlight one repository to see its forks.");
     }
 
     #[test]

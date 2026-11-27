@@ -1,3 +1,4 @@
+pub mod forks;
 pub mod form;
 pub mod github;
 pub mod gitops;
