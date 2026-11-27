@@ -660,7 +660,9 @@ pub fn palette(mode: Mode) -> Palette {
             selection: rgba(255, 255, 255, 0x24),
             accent: rgb(0x2a, 0x66, 0xd6),
             progress: rgb(0xc7, 0xd7, 0xf4),
-            focus: rgb(0x48, 0x7c, 0xdc),
+            // The user's decision, 2026-11-27: lightened from #487cdc so the ring holds 3.0 on the fetch dialog over the
+            // lake backdrop (was 2.92). The accent #2a66d6 mixed with white, in steps of 0.01: 0.16.
+            focus: rgb(0x4c, 0x7e, 0xdd),
             field: rgba(255, 255, 255, 0x1a),
             scrim: rgba(0, 0, 0, 0x73),
             warning: rgb(0xfa, 0xe1, 0xb0),
@@ -797,7 +799,7 @@ mod tests {
         assert_eq!(light.danger, Color32::from_rgb(0x83, 0x1c, 0x16));
         assert_eq!((light.progress, light.focus), (light.accent, light.accent));
         assert_eq!(dark.progress, Color32::from_rgb(0xc7, 0xd7, 0xf4));
-        assert_eq!(dark.focus, Color32::from_rgb(0x48, 0x7c, 0xdc));
+        assert_eq!(dark.focus, Color32::from_rgb(0x4c, 0x7e, 0xdd));
         assert_eq!(dark.danger, Color32::from_rgb(0xff, 0xc8, 0xc1));
         assert_eq!(light.ok, Color32::from_rgb(0x1c, 0x6b, 0x3a));
         assert_eq!(dark.ok, Color32::from_rgb(0x77, 0xdb, 0xa0));
