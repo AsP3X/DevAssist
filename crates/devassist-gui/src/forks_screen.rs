@@ -1025,6 +1025,12 @@ pub(crate) fn control_places(painter: &Painter, plan: &Plan) -> Vec<(String, Rec
     controls
 }
 
+/// Whether the screen's filter field has the keyboard in `ctx`, for the tests.
+#[cfg(test)]
+pub(crate) fn filter_focused(ctx: &Context) -> bool {
+    ctx.memory(|memory| memory.has_focus(filter_id()))
+}
+
 /// The words of the segment `plan` shows chosen: "All", or "With changes".
 #[cfg(test)]
 pub(crate) fn chosen_segment(plan: &Plan) -> &'static str {
@@ -1299,7 +1305,7 @@ pub(crate) mod tests {
 
         /// Whether the filter field has the keyboard.
         pub(crate) fn typing(&self) -> bool {
-            self.ctx.memory(|memory| memory.has_focus(filter_id()))
+            filter_focused(&self.ctx)
         }
 
         /// What the status bar says, and its colour.

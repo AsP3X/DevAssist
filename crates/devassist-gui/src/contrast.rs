@@ -734,7 +734,8 @@ enum Pointing {
     Control(&'static str),
     /// On a row's button: of the fork of this owner, the folder's (0) or GitHub's (1), on the hover's fill.
     RowButton(&'static str, usize),
-    /// Nowhere, the keyboard in the filter (`/` typed): the field with its focus ring.
+    /// Nowhere, the keyboard in the filter (`/` typed). The field draws no ring for it (only egui's caret, which is not
+    /// measured): its hint is measured with the keyboard there.
     Typing,
     /// Nowhere, in windows where the status bar's notes (the folder, the day of the fetch) give way to its sentence.
     Narrow,
@@ -814,7 +815,7 @@ struct Shot {
 /// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was); the
 /// Add and the Import dialog with their folder field's rows shown on their own glass, the first row lit and under
 /// the pointer; the progress dialog of a fetch of forks paused, counting, ended, and into a folder it cuts.
-const SHOTS: [Shot; 72] = [
+const SHOTS: [Shot; 73] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -846,6 +847,9 @@ const SHOTS: [Shot; 72] = [
     },
     // The same, ended while its dialog shows it (see `FETCH_FINISHED`): the last count, and Close.
     Shot { name: FETCH_FINISHED, over: Over::Dialog, set_up: |repos| demo::show(repos, demo::FORKS_FETCHING).unwrap() },
+    // A fetch of the forks of three repositories ("Update the forks of all repositories"): the dialog's task list,
+    // the count of the one being fetched.
+    Shot { name: "forks fetching several", over: Over::Dialog, set_up: set_up_fetch_several },
     // A fetch into a folder so deep that the line under the title cuts it from its left.
     Shot { name: "forks fetching long folder", over: Over::Dialog, set_up: set_up_fetch_long_folder },
     Shot {
@@ -1213,6 +1217,18 @@ fn set_up_fetch_long_folder(repos: &mut Repos) {
     ];
     let said: Vec<(&str, bool)> = lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect();
     repos.hold_fork_job("api", &said);
+}
+
+/// The repositories whose forks the shot of a fetch of several fetches, the first running.
+const FETCH_SEVERAL: [&str; 3] = ["api", "web", "portal"];
+
+/// The demo's forks of api open, with a held fetch of the forks of [`FETCH_SEVERAL`] counting the first's.
+fn set_up_fetch_several(repos: &mut Repos) {
+    set_up_forks(repos);
+    let into = repos.forks.as_ref().unwrap().dest.clone();
+    let lines = [(forklines::total(38, &into), false), (forklines::fetching(24, 38), true)];
+    let said: Vec<(&str, bool)> = lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect();
+    devassist_core::repos::state::testing::fork_job_of(repos, &FETCH_SEVERAL, &said);
 }
 
 /// The demo's forks of api open, as `--show forks` opens them.
@@ -1673,6 +1689,8 @@ struct Frame {
     forks: (Vec<(Rect, bool)>, Option<Rect>),
     /// The forks screen's chosen segment, where it was drawn.
     forks_chosen: Option<Rect>,
+    /// The forks' sort showed its icon alone.
+    forks_sort_compact: bool,
 }
 
 /// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
@@ -1771,18 +1789,24 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             add_lit: add_lit(&session, &rows),
             forks: (forks.rows.clone(), forks.pointer.map(|(_, rect)| rect).or(forks.typing)),
             forks_chosen: forks.chosen,
+            forks_sort_compact: forks.sort_compact,
         });
     }
-    if !shot.over.is_screen() {
-        assert!(overlay::is_open(&ctx) && !glass.is_empty(), "{}: its overlay is not drawn", shot.name);
-        // A side menu open in the core is baked and drawn beside its menu: its texts are measured on its own glass.
-        if session.repos().is_some_and(|repos| repos.migrate_highlight().is_some()) {
-            assert_eq!(glass.len(), 2, "{}: the side menu's glass is not baked", shot.name);
-        }
-    }
+    overlay_lands(shot, &ctx, glass.len(), &session);
     let last = last.unwrap();
     state_lands(shot, &last, size, mode);
     last
+}
+
+/// Checks that a shot of an overlay drew it, on its glass (`glass` panes baked), and a side menu open in the core of
+/// `session` on a glass of its own, where its texts are measured.
+fn overlay_lands(shot: &Shot, ctx: &Context, glass: usize, session: &Session) {
+    if !shot.over.is_screen() {
+        assert!(overlay::is_open(ctx) && glass > 0, "{}: its overlay is not drawn", shot.name);
+        if session.repos().is_some_and(|repos| repos.migrate_highlight().is_some()) {
+            assert_eq!(glass, 2, "{}: the side menu's glass is not baked", shot.name);
+        }
+    }
 }
 
 /// What the screen of `session` places in a window of `size`, measured with `painter`'s faces, as the window's pages
@@ -1830,6 +1854,8 @@ struct ForksShot {
     chosen: Option<Rect>,
     /// The filter field, where it was drawn, in a shot that types `/` to give it the keyboard.
     typing: Option<Rect>,
+    /// The sort showed its icon alone.
+    sort_compact: bool,
 }
 
 impl ForksShot {
@@ -1862,6 +1888,7 @@ impl ForksShot {
         let controls = forks_screen::control_places(ui.painter(), plan);
         let control = |words: &str| controls.iter().find(|(said, _)| said == words).map(|(_, rect)| *rect);
         self.chosen = control(forks_screen::chosen_segment(plan));
+        self.sort_compact = plan.toolbar.sort_compact;
         self.pointer = match shot.over {
             Over::Forks(Pointing::Control(words)) => {
                 let rect = control(words).unwrap_or_else(|| panic!("{}: no {words}", shot.name));
@@ -2058,10 +2085,11 @@ fn texts_in(last: &Frame, room: Rect) -> Vec<String> {
 }
 
 /// Checks that the frame `last` of `shot` draws what the shot's set-up makes the core say, so that the state the shot
-/// names is what was measured: a fetch's pause while the core reports one (and none once it goes on or the run ended),
-/// Close once it ended, the task list of a fetch of several; the forks' sentence for an empty panel, the sort's words
-/// and one arrow in the head row; with the keyboard in the filter, the focus there; in a narrow window, the status
-/// bar's sentence without its notes.
+/// names is what was measured: a fetch's count, its pause while the core reports one (and none once it goes on or the
+/// run ended), Close and no Cancel once it ended, the first two tasks of a fetch of several (the list scrolls in the
+/// smallest window); the forks' sentence for an empty panel, else the sort's arrow in the head row (none where the
+/// sorted column has given way); in the shots of the controls the sort's words, unless it shows its icon alone; with
+/// `/` typed, the keyboard in the filter; in a narrow window, the status bar's sentence without its notes.
 fn claims_land(shot: &Shot, last: &Frame, what: &str) {
     let mut probe = demo::repos();
     (shot.set_up)(&mut probe);
@@ -2080,6 +2108,12 @@ fn claims_land(shot: &Shot, last: &Frame, what: &str) {
         if finished {
             assert!(all.iter().any(|words| words == "Close") && !all.iter().any(|words| words == "Cancel"), "{what}: the run is not drawn ended");
         }
+        if shot.name == "forks fetching several" {
+            // The list scrolls in the smallest window: the running task and the one after it are in view.
+            for name in &FETCH_SEVERAL[..2] {
+                assert!(all.iter().any(|words| words == name), "{what}: the task list has no {name}");
+            }
+        }
     }
     let Over::Forks(pointing) = shot.over else { return };
     let view = probe.forks.as_ref().unwrap_or_else(|| panic!("{what}: the forks are not open"));
@@ -2097,11 +2131,11 @@ fn claims_land(shot: &Shot, last: &Frame, what: &str) {
     }
     if FORKS_CONTROL_SHOTS.contains(&shot.name) {
         let sort = widgets::capitalised(view.sort.label());
-        let compact = last.layout.toolbar.width() < 700.0;
-        assert!(compact || texts_in(last, last.layout.toolbar).contains(&sort), "{what}: the sort does not say {sort:?}");
+        // Where the toolbar gives way, the sort shows its icon alone (the forks' plan says so).
+        assert!(last.forks_sort_compact || texts_in(last, last.layout.toolbar).contains(&sort), "{what}: the sort does not say {sort:?}");
     }
     match pointing {
-        Pointing::Typing => assert!(last.ctx.memory(|memory| memory.focused().is_some()), "{what}: the filter has no keyboard"),
+        Pointing::Typing => assert!(forks_screen::filter_focused(&last.ctx), "{what}: the filter has no keyboard"),
         Pointing::Narrow => {
             let bar = texts_in(last, last.layout.status);
             assert!(bar.contains(&view.summary()), "{what}: the status bar does not say the forks' sentence: {bar:?}");
