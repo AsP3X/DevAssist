@@ -34,8 +34,8 @@ use crate::assets::Icon;
 use crate::baker::Drawn;
 use crate::overlay;
 use crate::theme::{
-    HAIRLINE, ICON, KEY_TEXT, MENU_CHEVRON, MENU_KEY_WIDTH, MENU_LINE, MENU_LINE_OPACITY, MENU_PAD, MENU_ROW, MENU_ROW_GAP, MENU_ROW_PAD,
-    MENU_ROW_RADIUS, MENU_WIDTH, Palette, SUBMENU_WIDTH, TEXT,
+    DIALOG_MARGIN, HAIRLINE, ICON, KEY_TEXT, MENU_CHEVRON, MENU_KEY_WIDTH, MENU_LINE, MENU_LINE_OPACITY, MENU_PAD, MENU_ROW, MENU_ROW_GAP,
+    MENU_ROW_PAD, MENU_ROW_RADIUS, MENU_WIDTH, Palette, SUBMENU_WIDTH, TEXT,
 };
 use crate::widgets::{self, draw_icon, font};
 
@@ -90,18 +90,40 @@ fn beside_words(item: MenuItem) -> f32 {
 }
 
 /// How wide the menu is whose lines' words are as wide as `lines` says: the theme's [`MENU_WIDTH`], or, when a line's
-/// words, icon and key need more, as wide as the longest needs (in whole points), its pane's padding included.
-fn width(lines: &[(MenuItem, f32)]) -> f32 {
-    lines.iter().map(|(item, words)| 2.0 * MENU_PAD + beside_words(*item) + words.ceil()).fold(MENU_WIDTH, f32::max)
+/// words, icon and key need more, as wide as the longest needs (in whole points), its pane's padding included; never
+/// wider than `most` ([`widest`]): a line whose words need more is cut with an ellipsis there, all of its words on
+/// hover ([`cut_words`]).
+fn width(lines: &[(MenuItem, f32)], most: f32) -> f32 {
+    lines.iter().map(|(item, words)| 2.0 * MENU_PAD + beside_words(*item) + words.ceil()).fold(MENU_WIDTH, f32::max).min(most)
 }
 
-/// How wide the menu of `repos` is, its lines' words (for its chosen repositories) measured with `painter`'s faces.
-pub(crate) fn pane_width(painter: &Painter, repos: &Repos) -> f32 {
+/// The widest a menu may be in `window`: the window's width inside the margin a menu keeps from its edges
+/// (`overlay::menu_rect`).
+fn widest(window: Rect) -> f32 {
+    (window.width() - 2.0 * DIALOG_MARGIN).max(0.0)
+}
+
+/// How wide the menu of `repos` is in `window`, its lines' words (for its chosen repositories) measured with
+/// `painter`'s faces.
+pub(crate) fn pane_width(painter: &Painter, repos: &Repos, window: Rect) -> f32 {
     let words_font = font(TEXT, FontFamily::Proportional);
     let many = repos.chosen().len() > 1;
     let lines: Vec<(MenuItem, f32)> =
         SHOWN.iter().map(|item| (*item, widgets::width(painter, words(*item, many, repos.menu.as_ref()), &words_font))).collect();
-    width(&lines)
+    width(&lines, widest(window))
+}
+
+/// The room the words of `item`'s line at `row` have: from after its icon to the gap before its key.
+fn words_room(row: Rect, item: MenuItem) -> f32 {
+    let left = row.left() + MENU_ROW_PAD + ICON + MENU_ROW_GAP;
+    key_right(row, item) - MENU_KEY_WIDTH - MENU_ROW_GAP - left
+}
+
+/// The words `words` of `item`'s line at `row` as they are drawn when they do not fit its room ([`words_room`]): cut
+/// with an ellipsis; `None` when they are drawn whole.
+fn cut_words(ui: &Ui, row: Rect, item: MenuItem, words: &str) -> Option<String> {
+    let said = widgets::ellipsis(words, &font(TEXT, FontFamily::Proportional), words_room(row, item), ui);
+    (said != words).then_some(said)
 }
 
 /// Runs `item`, a line that opens no side menu, for `repos`'s chosen repositories, as the core's `Repos::run_menu`
@@ -180,7 +202,7 @@ impl Places {
 /// measured with `painter`'s faces ([`pane_width`]), with its side menu while the core's Migrate menu is open.
 #[must_use]
 pub fn plan(painter: &Painter, window: Rect, anchor: Rect, repos: &Repos) -> Places {
-    place(window, anchor, repos.migrate_highlight().is_some(), pane_width(painter, repos))
+    place(window, anchor, repos.migrate_highlight().is_some(), pane_width(painter, repos, window))
 }
 
 /// Where a menu `width` wide stands in `window` for the button at `anchor`: under it, its right edge on the button's
@@ -237,8 +259,9 @@ pub(crate) fn demo_size() -> Vec2 {
     crate::demo::show(&mut repos, "menu").unwrap_or_default();
     let ctx = crate::widgets::tests::context();
     let mut width = 0.0;
-    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), ..Default::default() };
-    ctx.run_ui(input, |ui| width = pane_width(ui.painter(), &repos)).drop_without_applying_deltas();
+    let window = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
+    let input = egui::RawInput { screen_rect: Some(window), ..Default::default() };
+    ctx.run_ui(input, |ui| width = pane_width(ui.painter(), &repos, window)).drop_without_applying_deltas();
     vec2(width, height())
 }
 
@@ -397,6 +420,7 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
     let mut leave = false;
     let mut done = None;
     let moving = ui.input(|input| input.pointer.delta() != Vec2::ZERO);
+    let many = repos.chosen().len() > 1;
     for (index, row) in rows.iter().enumerate() {
         let response = ui.interact(row.intersect(places.pane), row_id(index), Sense::CLICK);
         if moving && response.hovered() {
@@ -405,6 +429,11 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
         }
         if fresh(ui, &response) {
             done = Some(if open && index == migrate { Done::Back } else { Done::Run(SHOWN[index]) });
+        }
+        // A line cut to the window's room has all of its words on hover.
+        let whole = words(SHOWN[index], many, repos.menu.as_ref());
+        if cut_words(ui, *row, SHOWN[index], whole).is_some() {
+            response.on_hover_text(whole);
         }
     }
     if let Some(pane) = side {
@@ -432,7 +461,7 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
         repos.highlight_migrate(MigrateItem::ALL[side_at]);
     }
 
-    draw_menu(ui, places.pane, at, repos.chosen().len() > 1, repos.menu.as_ref(), palette);
+    draw_menu(ui, places.pane, at, many, repos.menu.as_ref(), palette);
     // Not in a frame that closes it: no pane stands for a side menu that is gone.
     if let Some(side) = side.filter(|_| on_side && done.is_none()) {
         overlay::submenu_glass(ui, drawn);
@@ -777,13 +806,14 @@ mod tests {
         // the key, the key; and the pane's own padding.
         let beside = 2.0 * MENU_PAD + 2.0 * MENU_ROW_PAD + ICON + 2.0 * MENU_ROW_GAP + MENU_KEY_WIDTH;
         // Lines that fit the theme's width: the theme's width.
-        assert_eq!(width(&[(MenuItem::Update, 40.0), (MenuItem::Remove, 60.0)]), MENU_WIDTH);
-        assert_eq!(width(&[(MenuItem::Update, MENU_WIDTH - beside)]), MENU_WIDTH);
+        let most = f32::INFINITY;
+        assert_eq!(width(&[(MenuItem::Update, 40.0), (MenuItem::Remove, 60.0)], most), MENU_WIDTH);
+        assert_eq!(width(&[(MenuItem::Update, MENU_WIDTH - beside)], most), MENU_WIDTH);
         // A line whose words need more: as wide as it needs, in whole points.
-        assert_eq!(width(&[(MenuItem::AllForks, 220.0), (MenuItem::Update, 40.0)]), beside + 220.0);
-        assert_eq!(width(&[(MenuItem::AllForks, 219.4)]), beside + 220.0);
+        assert_eq!(width(&[(MenuItem::AllForks, 220.0), (MenuItem::Update, 40.0)], most), beside + 220.0);
+        assert_eq!(width(&[(MenuItem::AllForks, 219.4)], most), beside + 220.0);
         // Migrate's chevron takes its room after the key.
-        assert_eq!(width(&[(MenuItem::Migrate, 220.0)]), beside + 220.0 + MENU_CHEVRON + MENU_ROW_GAP);
+        assert_eq!(width(&[(MenuItem::Migrate, 220.0)], most), beside + 220.0 + MENU_CHEVRON + MENU_ROW_GAP);
         // The demo's menu: the core's longest line needs more than the theme's width, and every line is drawn whole.
         let measured = demo_width();
         assert!(measured > MENU_WIDTH, "{measured}");
@@ -795,6 +825,43 @@ mod tests {
             let drawn = window.texts.iter().find(|(words, ..)| words == said);
             assert!(drawn.is_some_and(|(_, _, cut)| !cut), "{said} is cut or missing");
         }
+    }
+
+    #[test]
+    fn a_line_too_long_for_the_window_is_cut_not_clipped() {
+        // A made-up label far longer than the smallest window allows: the menu is as wide as the window leaves it, no
+        // wider; it stands whole in the window, and the line's words are cut with an ellipsis to the room left of its
+        // key (all of them on hover, `hover_cut`).
+        let window = Rect::from_min_size(Pos2::ZERO, vec2(960.0, 600.0));
+        let most = widest(window);
+        assert_eq!(most, 960.0 - 2.0 * crate::theme::DIALOG_MARGIN);
+        assert_eq!(width(&[(MenuItem::AllForks, 2000.0), (MenuItem::Update, 40.0)], most), most);
+        // Lines that fit keep the width they need.
+        assert_eq!(width(&[(MenuItem::Update, 40.0)], most), MENU_WIDTH);
+        let anchor = Rect::from_min_max(pos2(900.0, 120.0), pos2(932.0, 152.0));
+        let places = place(window, anchor, false, most);
+        assert!(window.contains_rect(places.pane) && (places.pane.width() - most).abs() < f32::EPSILON, "{places:?}");
+        let words = "Update the forks of every repository that has them cloned beside it, one after another, a made-up line \
+                     far longer than any line of the core's, so long that the smallest window cannot hold it";
+        let row = layout(places.pane).0[line_of(MenuItem::AllForks)];
+        let ctx = crate::widgets::tests::context();
+        let input = egui::RawInput { screen_rect: Some(window), ..Default::default() };
+        let mut drawn = (String::new(), None);
+        ctx.run_ui(input, |ui| {
+            let face = font(TEXT, FontFamily::Proportional);
+            let said = widgets::ellipsis(words, &face, words_room(row, MenuItem::AllForks), ui);
+            drawn = (said.clone(), cut_words(ui, row, MenuItem::AllForks, words));
+            assert!(widgets::width(ui.painter(), &said, &face) <= words_room(row, MenuItem::AllForks) + 1e-3);
+        })
+        .drop_without_applying_deltas();
+        assert!(drawn.0.ends_with('…') && drawn.0.len() < words.len(), "{:?}", drawn.0);
+        assert_eq!(drawn.1.as_deref(), Some(drawn.0.as_str()), "the hover is not given where the words are cut");
+        // The demo's own lines are whole at 960: no hover there.
+        let row = layout(places.pane).0[line_of(MenuItem::Update)];
+        let mut whole = Some(String::new());
+        ctx.run_ui(egui::RawInput { screen_rect: Some(window), ..Default::default() }, |ui| whole = cut_words(ui, row, MenuItem::Update, "Update"))
+            .drop_without_applying_deltas();
+        assert_eq!(whole, None);
     }
 
     #[test]
