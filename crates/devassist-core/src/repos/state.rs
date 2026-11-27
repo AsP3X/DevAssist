@@ -1746,19 +1746,15 @@ impl Repos {
             return;
         }
         // Held (a demo), no folder is looked for: the forks are cloned
-        // where the story gave some (`hold_forks`).
-        let held = self.work_held;
-        let forks_cloned = self
-            .installed
-            .iter()
-            .filter(|repo| repos.contains(&repo.folder))
-            .all(|repo| {
-                if held {
-                    self.held_forks.contains_key(&repo.folder)
-                } else {
-                    gitops::forks_cloned(&repo.path)
-                }
-            });
+        // where the story gave some (`hold_forks`), for every name chosen.
+        let forks_cloned = if self.work_held {
+            repos.iter().all(|name| self.held_forks.contains_key(name))
+        } else {
+            self.installed
+                .iter()
+                .filter(|repo| repos.contains(&repo.folder))
+                .all(|repo| gitops::forks_cloned(&repo.path))
+        };
         self.menu = Some(Menu {
             repos,
             selected: 0,
@@ -3406,10 +3402,19 @@ impl Repos {
     /// dialog: "Update the forks of all repositories". The selection and
     /// the ticks play no part.
     pub fn update_all_forks(&mut self) {
+        // Held (a demo), no folder is looked for: the forks are cloned
+        // where the story gave some (`hold_forks`).
+        let held = self.work_held;
         let folders: Vec<String> = self
             .installed
             .iter()
-            .filter(|repo| gitops::forks_cloned(&repo.path))
+            .filter(|repo| {
+                if held {
+                    self.held_forks.contains_key(&repo.folder)
+                } else {
+                    gitops::forks_cloned(&repo.path)
+                }
+            })
             .map(|repo| repo.folder.clone())
             .collect();
         self.mode = Mode::List;
@@ -3418,6 +3423,9 @@ impl Repos {
                 "No forks are cloned yet. Clone the forks of a repository first.",
                 true,
             );
+            return;
+        }
+        if self.held() {
             return;
         }
         self.submit(Queued::Forks(folders));
@@ -7324,6 +7332,54 @@ mod tests {
             "a read ran in the background"
         );
         assert!(!root.join("tool-fork").exists());
+    }
+
+    #[test]
+    fn a_held_session_updates_all_forks_from_its_story_alone() {
+        let (mut app, root) = held_app("forks-all-held");
+        let _temp = Temp(root.clone());
+        #[cfg(feature = "testing")]
+        let before = crate::sys::disk_reads_here();
+        // No story forks: none are cloned.
+        app.update_all_forks();
+        assert_eq!(
+            app.status,
+            "No forks are cloned yet. Clone the forks of a repository first."
+        );
+        assert!(app.status_error);
+        // With them, it is the demo's notice, and nothing runs.
+        app.hold_forks("tool", gitops::ForkList::default());
+        app.status.clear();
+        app.update_all_forks();
+        assert_eq!(app.status, HELD);
+        assert!(app.queue.is_empty() && !app.busy && app.job.is_none());
+        assert!(app.mode == Mode::List);
+        #[cfg(feature = "testing")]
+        assert_eq!(
+            crate::sys::disk_reads_here(),
+            before,
+            "the held session looked at the disk"
+        );
+    }
+
+    #[test]
+    fn a_held_menu_counts_the_forks_of_every_chosen_name() {
+        let (mut app, root) = held_app("forks-menu-held");
+        let _temp = Temp(root.clone());
+        app.hold_forks("tool", gitops::ForkList::default());
+        app.enter_row();
+        assert_eq!(
+            app.menu.as_ref().unwrap().label(MenuItem::Forks),
+            "Update the forks"
+        );
+        app.close_menu();
+        // A chosen name that is no row has no forks in the story.
+        app.selected = Some("ghost".into());
+        app.enter_row();
+        assert_eq!(
+            app.menu.as_ref().unwrap().label(MenuItem::Forks),
+            "Clone the forks"
+        );
     }
 
     /// What a worker would send of a job, sent by hand.

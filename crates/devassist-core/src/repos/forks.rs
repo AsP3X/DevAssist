@@ -199,6 +199,19 @@ mod tests {
         assert_eq!(day(1_780_358_400, DayForm::Words), "2 Jun 2026");
         assert_eq!(day(1_780_358_399, DayForm::Words), "1 Jun 2026");
         assert_eq!(day(1_780_358_400, DayForm::Digits), "2026-06-02");
+        // The turn of a year.
+        assert_eq!(day(1_798_761_599, DayForm::Words), "31 Dec 2026");
+        assert_eq!(day(1_798_761_599, DayForm::Digits), "2026-12-31");
+        assert_eq!(day(1_798_761_600, DayForm::Words), "1 Jan 2027");
+        assert_eq!(day(1_798_761_600, DayForm::Digits), "2027-01-01");
+        // March after a common February and after a leap one.
+        assert_eq!(day(1_803_859_200, DayForm::Words), "1 Mar 2027");
+        assert_eq!(day(1_835_395_200, DayForm::Words), "29 Feb 2028");
+        assert_eq!(day(1_835_481_600, DayForm::Words), "1 Mar 2028");
+        assert_eq!(day(1_835_481_600, DayForm::Digits), "2028-03-01");
+        // Before 1970.
+        assert_eq!(day(-1, DayForm::Words), "31 Dec 1969");
+        assert_eq!(day(-1, DayForm::Digits), "1969-12-31");
     }
 
     #[test]
