@@ -1208,8 +1208,12 @@ pub struct ForksFolderMoved {
 /// error when it cannot go, whose `MoveFailed::says` is a clause: its
 /// configuration cannot be read (`cannot_read`), something is at the
 /// target already ("something is at D:\code\api-fork already"), the move
-/// failed, or it was cancelled ("cancelled", and `MoveFailed::cancelled`);
-/// the forks folder is then where it was, whole.
+/// failed, or it was cancelled (`MoveFailed::cancelled`); the forks folder
+/// is then where it was, whole. A cancel before the move began, or one
+/// that stopped a copy whose partial copy was removed again, says
+/// "cancelled"; a copy the cancel stopped whose partial copy stays comes
+/// back as the copy's whole error, which names that partial copy, with
+/// `cancelled: true` all the same.
 ///
 /// Nothing else in a collection names a place the fetch of the forks
 /// reads: the checkout it was first filled from is read only when the
@@ -1438,7 +1442,7 @@ fn worktree_entry(git_file: &Path) -> Option<String> {
 
 /// Whether work on `path` is to stop: the run was cancelled (in tests also
 /// through `seams::cancel_within`).
-fn stopped(path: &Path) -> bool {
+pub(crate) fn stopped(path: &Path) -> bool {
     #[cfg(any(test, feature = "testing"))]
     if seams::cancelled(path) {
         return true;

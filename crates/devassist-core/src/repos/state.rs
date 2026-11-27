@@ -2102,7 +2102,9 @@ impl Repos {
             // An error of its own while a cancel is up does not count.
             let mut cut_short = false;
             for (index, (name, from)) in repos.iter().enumerate() {
-                if process::was_cancelled() {
+                // Asked of the checkout about to move: a test cancels here
+                // through it (`gitops::seams::cancel_within`).
+                if gitops::stopped(from) {
                     return Err(cancelled_leaving(&left));
                 }
                 send(tx, JobEvent::Start(index));
@@ -9132,7 +9134,10 @@ mod tests {
             ..test_settings()
         });
         let web = far_checkout(&mut app, &case, "web");
-        gitops::seams::cancel_within(&web);
+        // Within the copy, past the check before the checkout moves.
+        std::fs::create_dir_all(web.join("sub")).unwrap();
+        std::fs::write(web.join("sub").join("note"), "note").unwrap();
+        gitops::seams::cancel_within(&web.join("sub"));
         let there = case.join("there");
         gitops::seams::refuse(&there.join("web"));
         app.move_checkouts(vec![("web".into(), web)], there.clone());
@@ -9149,6 +9154,34 @@ mod tests {
             said_with_a_cancel_up(&app),
             (format!("Cancelled. {partial}"), true)
         );
+
+        // The cancel came between two checkouts: the next one never starts,
+        // and the run that ends at that check did not run to the end.
+        let case = root.join("between");
+        let mut app = Repos::empty(Settings {
+            config_path: case.join("devassist.toml"),
+            ..test_settings()
+        });
+        let api = far_checkout(&mut app, &case, "api");
+        let web = far_checkout(&mut app, &case, "web");
+        gitops::seams::cancel_within(&web);
+        let there = case.join("there");
+        let repos = vec![("api".into(), api), ("web".into(), web.clone())];
+        app.move_checkouts(repos, there.clone());
+        finish(&mut app);
+        let job = app.job.as_ref().unwrap();
+        assert_eq!(
+            job.items[1].state,
+            crate::task::job::ItemState::Waiting,
+            "web started after the cancel"
+        );
+        assert_eq!(job.result, Some(Err("cancelled".into())));
+        assert!(
+            !app.job_whole,
+            "a move that ended at the cancel check said it ran to the end"
+        );
+        assert!(there.join("api").join("readme").is_file() && web.join("readme").is_file());
+        assert_eq!(said_with_a_cancel_up(&app), ("Cancelled.".into(), false));
 
         // The pure ends, for the record.
         let dir = Path::new("/srv/new");
