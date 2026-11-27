@@ -8,7 +8,8 @@
 //! under it, while the fetch pauses, a pause icon with the core's sentence. The line under its title says where they
 //! go (`Repos::fork_job_into`), its folder cut from the left when it would take more than [`INTO_LINES`] lines. A
 //! fetch of one repository's forks shows no task list (the count stands in its place); a run of several keeps it,
-//! above the count of the one fetched now. A run that has ended keeps its last count while its dialog shows it.
+//! above the count of the one fetched now. Between two repositories of a run and once the run has ended, the core
+//! gives the last count, without a pause, whether or not the dialog was shown meanwhile; the next run starts afresh.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -46,39 +47,16 @@ fn counted(progress: &ForkProgress) -> String {
 
 /// What the progress dialog shows of a fetch of forks: how far it is, and the collection the forks go into.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Fetch {
+struct Fetch {
     /// How far it is, in the core's numbers and words.
     progress: ForkProgress,
     /// The collection, once the core knows it.
     into: Option<PathBuf>,
-    /// The run it is of (`Repos::job_stamp`).
-    stamp: u64,
 }
 
-/// The fetch of forks `repos`'s run is, as the core says it now.
-fn fetch_now(repos: &Repos) -> Option<Fetch> {
-    repos.fork_progress().map(|progress| Fetch { progress, into: repos.fork_job_into(), stamp: repos.job_stamp() })
-}
-
-/// The fetch of forks the dialog of `repos`'s run shows: the core's now, or else `kept`, the last one the dialog showed,
-/// when it is of this same run: between two repositories of a run of several (until the next one says its total) and
-/// once the run has ended (the core says no more of it). Another run never shows it. A kept count shows no pause: a
-/// pause belongs to the moment it was said, so only one the core reports now is drawn.
-fn fetch_shown(repos: &Repos, kept: Option<&Fetch>) -> Option<Fetch> {
-    repos.job.as_ref()?;
-    fetch_now(repos).or_else(|| {
-        let mut kept = kept.filter(|kept| kept.stamp == repos.job_stamp()).cloned()?;
-        kept.progress.pause = None;
-        Some(kept)
-    })
-}
-
-/// Keeps in `dialogs` the fetch of forks `repos`'s run is now, so the dialog shows its run's last count until the next
-/// one, or, once the run has ended, until it closes.
-fn keep_fetch(repos: &Repos, dialogs: &mut Dialogs) {
-    if let Some(now) = fetch_now(repos) {
-        dialogs.fetch = Some(now);
-    }
+/// The fetch of forks the dialog of `repos`'s run shows, as the core says it now.
+fn fetch_shown(repos: &Repos) -> Option<Fetch> {
+    repos.fork_progress().map(|progress| Fetch { progress, into: repos.fork_job_into() })
 }
 
 /// The face of the count's words and its pause's.
@@ -218,11 +196,11 @@ fn places_with(window: Rect, header: f32, tasks: Option<usize>, count: Option<f3
     Places { pane, header, tasks: tasks_rect, count, output, buttons }
 }
 
-/// Where the progress dialog of `repos`'s run stands in `window`, its header laid out with `painter`'s faces; `kept`
-/// is the fetch of forks the dialog showed last. `None` without a run.
-pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, kept: Option<&Fetch>) -> Option<Plan> {
+/// Where the progress dialog of `repos`'s run stands in `window`, its header laid out with `painter`'s faces. `None`
+/// without a run.
+pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Option<Plan> {
     let job = repos.job.as_ref()?;
-    let fetch = fetch_shown(repos, kept);
+    let fetch = fetch_shown(repos);
     let width = if fetch.is_some() { FETCH_WIDTH } else { PROGRESS_WIDTH } - 2.0 * DIALOG_PAD;
     let line = match fetch.as_ref().and_then(|fetch| fetch.into.as_ref()) {
         Some(folder) => into_line(painter, &folder.display().to_string(), width),
@@ -323,8 +301,7 @@ struct Done {
 /// The progress dialog at `places`, with `header`, for `repos`'s run, on the overlay in `ui`; `scrim` is whether
 /// the scrim was clicked in this frame.
 pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Repos, palette: Palette, dialogs: &mut Dialogs, scrim: bool) {
-    keep_fetch(repos, dialogs);
-    let fetch = fetch_shown(repos, dialogs.fetch.as_ref());
+    let fetch = fetch_shown(repos);
     let Some(job) = repos.job.as_ref() else { return };
     let running = job.running();
     let buttons = progress_buttons(job);
@@ -966,20 +943,20 @@ mod tests {
         assert!(window.texts.iter().any(|(words, ..)| *words == line), "{:?}", window.texts);
         assert_eq!(window.said(), ["Cancel", "Hide"]);
 
-        // A run that ends keeps its last numbers while its dialog shows it.
+        // A run that ends keeps its last numbers.
         window.session.repos_mut().unwrap().job.as_mut().unwrap().finish(Ok("Updated the forks of api.".to_owned()), false);
-        assert_eq!(window.repos().fork_progress(), None, "the core says nothing more of it");
         window.frame(Vec::new());
         let ended = parts(&window);
         assert_eq!(ended.count, Some(count));
         assert_eq!(texts_in(&window, count), ["24 of 38 forks, 8 at a time"]);
         assert_eq!(window.said(), ["Close"]);
-        // Shown again later, it is the plain dialog of how the run ended.
+        // Closed and shown again later, it still says the run's last count.
         window.press("Close");
         window.session.repos_mut().unwrap().show_job();
         window.frame(Vec::new());
         window.frame(Vec::new());
-        assert!(window.open() && parts(&window).count.is_none());
+        assert!(window.open() && parts(&window).count == Some(count));
+        assert_eq!(texts_in(&window, count), ["24 of 38 forks, 8 at a time"]);
     }
 
     #[test]
@@ -1074,6 +1051,28 @@ mod tests {
     }
 
     #[test]
+    fn a_fetch_that_ends_while_hidden_shows_its_last_count_when_shown_again() {
+        use devassist_core::repos::state::testing;
+        let mut window = Window::new(fetch_session(&fetched(false)));
+        window.frame(Vec::new());
+        window.press("Hide");
+        assert!(!window.open());
+        // Hidden, it counts on, pauses, and ends; no frame draws the dialog meanwhile.
+        let repos = window.session.repos_mut().unwrap();
+        repos.on_msg(Msg::Job(JobEvent::Line(forklines::fetching(37, 38), true)));
+        repos.on_msg(Msg::Job(JobEvent::Line(forklines::paused("The fetch timed out", 30), false)));
+        testing::fork_job_end(repos);
+        window.frame(Vec::new());
+        window.typed(Key::L, "l");
+        window.frame(Vec::new());
+        assert!(window.open() && !window.job().running());
+        let count = parts(&window).count.expect("the ended fetch lost its count");
+        assert_eq!(texts_in(&window, count), ["37 of 38 forks, 8 at a time"], "an old count, or a pause");
+        assert!(window.texts.iter().any(|(words, ..)| *words == into_line(&into().display().to_string())));
+        assert_eq!(window.said(), ["Close"]);
+    }
+
+    #[test]
     fn a_count_belongs_to_its_own_run() {
         use devassist_core::repos::state::testing;
         let mut window = Window::new(fetch_session(&fetched(false)));
@@ -1112,7 +1111,6 @@ mod tests {
         let api = into_line(&into().display().to_string());
         // web starts: until it says its total, api's count and folder stay.
         testing::fork_job_next(window.session.repos_mut().unwrap(), &[]);
-        assert_eq!(window.repos().fork_progress(), None);
         window.frame(Vec::new());
         let still = parts(&window).count.expect("the count dropped out between repositories");
         assert_eq!(still, count, "the dialog moved");

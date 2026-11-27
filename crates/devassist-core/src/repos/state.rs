@@ -4533,18 +4533,27 @@ impl Repos {
         self.fork_watch = Some(ForkWatch::default());
     }
 
-    /// How far the fetch of forks that runs now is: the task running now,
-    /// once its lines have said how many forks there are. None while no
-    /// job runs, for a job that is not a fetch of forks, before the total
-    /// is known, and once the job has ended.
+    /// How far the fetch of forks that `job` is stands: the task running
+    /// now, once its lines have said how many forks there are; between two
+    /// tasks of a run of several, until the next says its total, the count
+    /// of the one before; once the run has ended, its last count. A count
+    /// that is not the running task's shows no pause: a pause belongs to
+    /// the moment it was said. None without a job, for a job that is not a
+    /// fetch of forks, and before any task said its total; the next job
+    /// starts from nothing.
     pub fn fork_progress(&self) -> Option<ForkProgress> {
-        self.running_fork_watch()?.progress()
+        let job = self.job.as_ref()?;
+        let mut progress = self.fork_watch.as_ref()?.progress()?;
+        if !job.running() {
+            progress.pause = None;
+        }
+        Some(progress)
     }
 
-    /// The collection folder the fetch of forks that runs now fetches
-    /// into, for the task running now, once its lines have said it.
+    /// The collection folder of the count `fork_progress` gives.
     pub fn fork_job_into(&self) -> Option<PathBuf> {
-        self.running_fork_watch()?.folder().map(Path::to_path_buf)
+        self.job.as_ref()?;
+        self.fork_watch.as_ref()?.folder().map(Path::to_path_buf)
     }
 
     /// Which run `job` is: a number that changes each time a run with a
@@ -4552,12 +4561,6 @@ impl Repos {
     /// run is not taken for another's.
     pub fn job_stamp(&self) -> u64 {
         self.job_stamp
-    }
-
-    /// What the lines of the fetch of forks said, while one runs.
-    fn running_fork_watch(&self) -> Option<&ForkWatch> {
-        self.job.as_ref().filter(|job| job.running())?;
-        self.fork_watch.as_ref()
     }
 
     /// Gives a held session a fetch of forks that runs for `repo` (by row
@@ -8529,11 +8532,12 @@ mod tests {
                 Some("The fetch timed out. Paused, going on in 0:12.")
             )
         );
-        // The next repository starts from nothing.
+        // The next repository: until it says its total, the last count
+        // stands, without its pause.
         job_says(&mut app, JobEvent::Done(0, "38 forks".into()));
         job_says(&mut app, JobEvent::Start(1));
-        assert_eq!(app.fork_progress(), None);
-        assert_eq!(app.fork_job_into(), None);
+        assert_eq!(app.fork_progress(), fork_fetch(24, 38, None));
+        assert_eq!(app.fork_job_into(), Some(dest.clone()));
         let docs = PathBuf::from("/srv/code").join("docs-fork");
         job_line(
             &mut app,
@@ -8542,15 +8546,57 @@ mod tests {
         );
         job_line(&mut app, "Fetching forks:  33% (1/3)", true);
         assert_eq!(app.fork_progress(), fork_fetch(1, 3, None));
-        assert_eq!(app.fork_job_into(), Some(docs));
-        // A run that has ended says nothing of it.
+        assert_eq!(app.fork_job_into(), Some(docs.clone()));
+        // A run that has ended keeps its last count.
         app.job.as_mut().unwrap().finish(Ok("Done.".into()), false);
-        assert_eq!(app.fork_progress(), None);
-        assert_eq!(app.fork_job_into(), None);
+        assert_eq!(app.fork_progress(), fork_fetch(1, 3, None));
+        assert_eq!(app.fork_job_into(), Some(docs));
     }
 
     #[test]
-    fn the_facts_outlast_the_kept_lines_and_end_with_the_run() {
+    fn an_ended_fetch_keeps_its_last_count_until_the_next_job_starts() {
+        let lines = [
+            ("38 forks, into api-fork", false),
+            ("Fetching forks:  63% (24/38)", true),
+            ("The fetch timed out. Paused for 0:30.", false),
+        ];
+        let ended = |end: JobEvent, result: Result<String, String>| {
+            let mut app = grouped_app();
+            let job = gitprogress::job("Updating the forks of api", vec!["api".into()], 0);
+            app.start_fork_job("Updating the forks of api…".into(), job, |_| {
+                Ok("Done.".into())
+            });
+            job_says(&mut app, JobEvent::Start(0));
+            for (line, progress) in lines {
+                job_line(&mut app, line, progress);
+            }
+            // Hidden while it runs; it ends with a pause still up.
+            app.hide_job();
+            job_says(&mut app, end);
+            app.job.as_mut().unwrap().finish(result, false);
+            app
+        };
+        for mut app in [
+            ended(JobEvent::Done(0, "38 forks".into()), Ok("Done.".into())),
+            ended(JobEvent::Failed(0, "lost".into()), Err("Failed.".into())),
+            // A run that ends with no word from its task.
+            ended(JobEvent::Line(String::new(), false), Ok("Done.".into())),
+        ] {
+            // Shown again: the run's last count, and no pause.
+            app.show_job();
+            assert_eq!(app.fork_progress(), fork_fetch(24, 38, None));
+            assert_eq!(app.fork_job_into(), Some(PathBuf::from("api-fork")));
+            // The next job starts from nothing.
+            app.busy = false;
+            let job = Job::new("Updating", vec!["api".into()], 0);
+            app.start_job("Updating api…".into(), Some(job), |_| Ok("Done.".into()));
+            assert_eq!(app.fork_progress(), None);
+            assert_eq!(app.fork_job_into(), None);
+        }
+    }
+
+    #[test]
+    fn the_facts_outlast_the_kept_lines_and_stand_once_the_run_ended() {
         let mut app = grouped_app();
         let job = gitprogress::job("Updating the forks of api", vec!["api".into()], 0);
         app.start_fork_job("Updating the forks of api…".into(), job, |_| {
@@ -8576,7 +8622,7 @@ mod tests {
         job_line(&mut app, "3 forks, into other-fork", false);
         job_line(&mut app, "The fetch timed out. Paused for 0:10.", false);
         assert_eq!(app.fork_watch.as_ref().unwrap().progress(), before);
-        assert_eq!(app.fork_progress(), None);
+        assert_eq!(app.fork_progress(), fork_fetch(30, 600, None));
     }
 
     #[test]
@@ -8765,13 +8811,10 @@ mod tests {
         assert_eq!(job.title, "Updating the forks of 2 repositories");
         assert_eq!(app.fork_progress(), fork_fetch(0, 38, None));
         let stamp = app.job_stamp();
-        // The next task starts from nothing, in the same run.
+        // The next task, in the same run, has said nothing yet: the count
+        // before stands.
         testing::fork_job_next(&mut app, &[]);
-        assert_eq!(
-            app.fork_progress(),
-            None,
-            "the next task has said nothing yet"
-        );
+        assert_eq!(app.fork_progress(), fork_fetch(0, 38, None));
         assert_eq!(app.job.as_ref().unwrap().shown(), 1);
         assert_eq!(app.job_stamp(), stamp);
         testing::fork_job_next(&mut app, &[("3 forks, into docs-fork", false)]);
@@ -8793,7 +8836,7 @@ mod tests {
                     .iter()
                     .all(|item| item.state == crate::task::job::ItemState::Done)
         );
-        assert_eq!(app.fork_progress(), None);
+        assert_eq!(app.fork_progress(), fork_fetch(0, 3, None));
     }
 
     #[test]

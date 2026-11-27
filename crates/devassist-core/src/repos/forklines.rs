@@ -149,7 +149,9 @@ struct Pause {
 }
 
 /// What the lines of the task running now in a fetch of forks said so
-/// far. A new task starts from nothing, and an ended one says nothing.
+/// far. A new task starts from nothing; until it says its total, and
+/// once the run's last task has ended, the count of the last task that
+/// said one stands, without its pause.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ForkWatch {
     /// The task the facts are of.
@@ -157,6 +159,9 @@ pub(crate) struct ForkWatch {
     /// The collection, and the forks counted so far of how many: known
     /// once the task has said its total.
     said: Option<(PathBuf, u32, u32)>,
+    /// `said` of the last task that ended, or that a new task took over
+    /// from, having said its total.
+    last: Option<(PathBuf, u32, u32)>,
     /// The pauses heard that have not said "Going on." yet, oldest first.
     pauses: Vec<Pause>,
     /// A count of forks came after the newest pause line.
@@ -179,7 +184,7 @@ impl ForkWatch {
     }
 
     /// Hears what the job heard: a task that starts starts from nothing,
-    /// and one that ends leaves nothing.
+    /// and one that ends leaves only its count.
     pub(crate) fn on(&mut self, event: &JobEvent) {
         self.on_at(event, Instant::now());
     }
@@ -190,12 +195,14 @@ impl ForkWatch {
             JobEvent::Start(index) => {
                 *self = Self {
                     task: Some(*index),
+                    last: self.said.take().or_else(|| self.last.take()),
                     held: self.held,
                     ..Self::default()
                 };
             }
             JobEvent::Done(index, _) | JobEvent::Failed(index, _) if self.task == Some(*index) => {
                 *self = Self {
+                    last: self.said.take().or_else(|| self.last.take()),
                     held: self.held,
                     ..Self::default()
                 };
@@ -246,14 +253,24 @@ impl ForkWatch {
         }
     }
 
-    /// How far the task is, once it has said how many forks there are.
+    /// How far the task is, once it has said how many forks there are;
+    /// before that, and once it has ended, the last count said (`last`),
+    /// with no pause: a pause belongs to the task that said it.
     pub(crate) fn progress(&self) -> Option<ForkProgress> {
         self.progress_at(Instant::now())
     }
 
     /// `progress`, at `now`.
     fn progress_at(&self, now: Instant) -> Option<ForkProgress> {
-        let (_, done, total) = self.said.as_ref()?;
+        let Some((_, done, total)) = self.said.as_ref() else {
+            let (_, done, total) = self.last.as_ref()?;
+            return Some(ForkProgress {
+                done: *done,
+                total: *total,
+                at_a_time: at_a_time(*total),
+                pause: None,
+            });
+        };
         // Held, the clock stands where the last line left it.
         let now = match self.heard {
             Some(heard) if self.held => heard,
@@ -273,15 +290,24 @@ impl ForkWatch {
         Some(ForkProgress {
             done: *done,
             total: *total,
-            at_a_time: FORK_JOBS.min(*total as usize).max(1),
+            at_a_time: at_a_time(*total),
             pause,
         })
     }
 
-    /// The collection the task fetches into, once it has said so.
+    /// The collection the task fetches into, once it has said so; before
+    /// that, and once it has ended, that of the last count (`progress`).
     pub(crate) fn folder(&self) -> Option<&Path> {
-        self.said.as_ref().map(|(into, _, _)| into.as_path())
+        self.said
+            .as_ref()
+            .or(self.last.as_ref())
+            .map(|(into, _, _)| into.as_path())
     }
+}
+
+/// How many of `total` forks are fetched at the same time.
+fn at_a_time(total: u32) -> usize {
+    FORK_JOBS.min(total as usize).max(1)
 }
 
 /// "1:05" for 65 seconds, "1:01:05" from an hour on.
@@ -595,22 +621,43 @@ mod tests {
     }
 
     #[test]
-    fn a_task_that_ends_says_nothing_more() {
+    fn a_task_that_ends_leaves_its_count_and_no_pause() {
         let start = Instant::now();
         let lines = [
             (0, "38 forks, into api-fork"),
             (1, "Fetching forks:  63% (24/38)"),
+            (2, "The fetch timed out. Paused for 0:30."),
         ];
+        let counted = |watch: &ForkWatch| {
+            watch
+                .progress_at(at(start, 3))
+                .map(|progress| (progress.done, progress.total, progress.pause))
+        };
         let mut watch = heard(start, &lines);
         // The end of another task changes nothing.
-        watch.on_at(&JobEvent::Done(1, "done".into()), at(start, 2));
-        assert!(watch.progress_at(at(start, 2)).is_some());
-        watch.on_at(&JobEvent::Done(0, "38 forks".into()), at(start, 2));
-        assert_eq!(watch.progress_at(at(start, 2)), None);
-        assert_eq!(watch.folder(), None);
+        watch.on_at(&JobEvent::Done(1, "done".into()), at(start, 3));
+        assert!(counted(&watch).is_some_and(|(.., pause)| pause.is_some()));
+        watch.on_at(&JobEvent::Done(0, "38 forks".into()), at(start, 3));
+        assert_eq!(counted(&watch), Some((24, 38, None)));
+        assert_eq!(watch.folder(), Some(Path::new("api-fork")));
         let mut watch = heard(start, &lines);
-        watch.on_at(&JobEvent::Failed(0, "fatal".into()), at(start, 2));
-        assert_eq!(watch.progress_at(at(start, 2)), None);
+        watch.on_at(&JobEvent::Failed(0, "fatal".into()), at(start, 3));
+        assert_eq!(counted(&watch), Some((24, 38, None)));
+        // The next task's lines are its own once it says its total; until
+        // then the last count stands.
+        watch.on_at(&JobEvent::Start(1), at(start, 4));
+        assert_eq!(counted(&watch), Some((24, 38, None)));
+        watch.on_at(
+            &JobEvent::Line("3 forks, into docs-fork".into(), false),
+            at(start, 4),
+        );
+        assert_eq!(counted(&watch), Some((0, 3, None)));
+        assert_eq!(watch.folder(), Some(Path::new("docs-fork")));
+        // A task that ends before it said a total leaves the count before.
+        watch.on_at(&JobEvent::Done(1, "3 forks".into()), at(start, 5));
+        watch.on_at(&JobEvent::Start(2), at(start, 5));
+        watch.on_at(&JobEvent::Failed(2, "fatal".into()), at(start, 5));
+        assert_eq!(counted(&watch), Some((0, 3, None)));
     }
 
     #[test]
