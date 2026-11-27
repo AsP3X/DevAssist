@@ -51,6 +51,9 @@ const AHEAD_OF_THE_ORIGINAL: &str = "Ahead of the original";
 const NO_PULLS: &str = "None";
 /// A fork with nothing ahead of the original.
 const NOTHING_AHEAD: &str = "Nothing";
+/// A fork with a folder whose ahead could not be counted (Git older than 2.41, or the original's `HEAD` unreadable):
+/// not known. The core has no word for it, and the terminal leaves the place blank.
+const AHEAD_NOT_KNOWN: &str = "\u{2014}";
 /// The top row's action: read the forks' folder again.
 const READ_AGAIN: &str = "Read again";
 /// The top row's action and a row's button: open the folder of the fork (the highlighted one, or the row's).
@@ -103,8 +106,9 @@ pub fn shown(repos: &Repos) -> bool {
 }
 
 /// What the status bar says while the forks show; `None` while they do not. Its words: what the core said since the
-/// person last did something to the forks (`Repos::fork_notice`), in the danger colour when it is an error; else,
-/// while rows show, an error of the last read (until a read goes well); else the core's sentence about the forks.
+/// person last did something to the forks (`Repos::fork_notice`), in the danger colour when it is an error; else an
+/// error of the last read (until a read goes well: the core takes the rows away with it, and the panel says it too);
+/// else the core's sentence about the forks.
 /// They are kept whole; the folder of the forks (cut from its left) and, when the core knows it, the day they were
 /// fetched give way first in a narrow window.
 #[must_use]
@@ -119,7 +123,7 @@ pub fn status(repos: &Repos) -> Option<Status> {
     }
     let (text, error) = match (repos.fork_notice(), &view.error) {
         (Some((said, error)), _) => (said.to_owned(), error),
-        (None, Some(error)) if !view.rows().is_empty() => (widgets::capitalised(error.trim()), true),
+        (None, Some(error)) => (widgets::capitalised(error.trim()), true),
         (None, _) => (view.summary(), false),
     };
     Some(Status { text, error, notes, keep_text: true, path })
@@ -166,7 +170,7 @@ pub(crate) struct Row {
     pub(crate) pulls: Cell,
     /// The commits it is ahead, for the rule: 0 for nothing to show.
     pub(crate) ahead: u32,
-    /// "{n} ahead", or "Nothing".
+    /// "{n} ahead", "Nothing", or a dash where it could not be counted.
     pub(crate) ahead_words: Cell,
     /// The day of its newest commit; empty when nothing was fetched from it.
     pub(crate) newest: Cell,
@@ -281,7 +285,11 @@ fn row(fork: &ForkInfo, chosen: bool) -> Row {
     let quiet = matches!(state, ForkState::Unchanged | ForkState::NotFetched);
     let pulls = if fork.pulls == 0 { Cell::new(NO_PULLS, Tone::Quiet) } else { Cell::new(fork.pulls.to_string(), Tone::Plain) };
     let commits = fork_ahead(fork).unwrap_or(0);
-    let ahead_words = if commits > 0 { Cell::new(ahead(commits), Tone::Medium) } else { Cell::new(NOTHING_AHEAD, Tone::Quiet) };
+    let ahead_words = match (commits, fork.folder && fork.ahead.is_none()) {
+        (0, true) => Cell::new(AHEAD_NOT_KNOWN, Tone::Quiet),
+        (0, false) => Cell::new(NOTHING_AHEAD, Tone::Quiet),
+        (commits, _) => Cell::new(ahead(commits), Tone::Medium),
+    };
     let words = widgets::capitalised(state.words());
     let (state, state_icon) = match state {
         ForkState::Changes => (Cell::new(words, Tone::Medium), Some(Icon::Folder)),
@@ -1423,6 +1431,11 @@ pub(crate) mod tests {
         let r = row(&fetched_nothing, false);
         assert_eq!((r.newest.text.as_str(), r.state.clone()), ("", Cell::new("Not fetched", Tone::Quiet)));
         assert_eq!(row(&ForkInfo { date: -86_400, ..fork("x") }, false).newest.text, "");
+        // A fork with a folder whose ahead could not be counted (an older Git, or the original's HEAD unreadable):
+        // not known, so not "Nothing".
+        let uncounted = row(&ForkInfo { folder: true, ahead: None, ..fork("x") }, false);
+        assert_eq!((uncounted.ahead, uncounted.ahead_words), (0, Cell::new("\u{2014}", Tone::Quiet)));
+        assert_eq!(row(&ForkInfo { folder: true, ahead: Some(0), ..fork("x") }, false).ahead_words, Cell::new("Nothing", Tone::Quiet));
         assert_eq!(plan.ahead_head, "Ahead of acme/main");
         assert_eq!(plan.empty, None);
     }
@@ -1631,12 +1644,12 @@ pub(crate) mod tests {
         assert_eq!(said.notes.len(), 2, "the notes stay");
         repos.move_fork(1);
         assert_eq!(status(&repos).unwrap().text, view(&repos).summary(), "the highlight moved: the forks' sentence again");
-        // An error while rows show is on the status bar, in the danger colour, until a read goes well.
+        // An error of a read is on the status bar, in the danger colour, until a read goes well; its rows went.
         let generation = repos.forks_generation;
         repos.on_msg(Msg::Forks { generation, result: Err("the folder of the forks could not be read".to_owned()) });
         let said = status(&repos).unwrap();
         assert_eq!((said.text.as_str(), said.error), ("The folder of the forks could not be read", true));
-        assert_ne!(view(&repos).rows().len(), 0);
+        assert_eq!(view(&repos).rows().len(), 0, "the old rows stayed");
         repos.load_forks();
         assert_eq!(status(&repos).unwrap().text, view(&repos).summary(), "read again, and well");
         assert!(!status(&repos).unwrap().error);
