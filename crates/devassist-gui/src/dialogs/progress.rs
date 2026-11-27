@@ -62,10 +62,15 @@ fn fetch_now(repos: &Repos) -> Option<Fetch> {
 
 /// The fetch of forks the dialog of `repos`'s run shows: the core's now, or else `kept`, the last one the dialog showed,
 /// when it is of this same run: between two repositories of a run of several (until the next one says its total) and
-/// once the run has ended (the core says no more of it). Another run never shows it.
+/// once the run has ended (the core says no more of it). Another run never shows it. A kept count shows no pause: a
+/// pause belongs to the moment it was said, so only one the core reports now is drawn.
 fn fetch_shown(repos: &Repos, kept: Option<&Fetch>) -> Option<Fetch> {
     repos.job.as_ref()?;
-    fetch_now(repos).or_else(|| kept.filter(|kept| kept.stamp == repos.job_stamp()).cloned())
+    fetch_now(repos).or_else(|| {
+        let mut kept = kept.filter(|kept| kept.stamp == repos.job_stamp()).cloned()?;
+        kept.progress.pause = None;
+        Some(kept)
+    })
 }
 
 /// Keeps in `dialogs` the fetch of forks `repos`'s run is now, so the dialog shows its run's last count until the next
@@ -1121,6 +1126,51 @@ mod tests {
         let count = parts(&window).count.expect("no count");
         assert_eq!(texts_in(&window, count), ["0 of 3 forks, 3 at a time"]);
         assert!(window.texts.iter().any(|(words, ..)| *words == into_line(&web.display().to_string())));
+    }
+
+    #[test]
+    fn a_kept_count_shows_no_pause_the_fetch_no_longer_reports() {
+        use devassist_core::repos::state::testing;
+        let height_without = {
+            let mut plain = Window::new(super::super::testing::fetch_session_of(&["api", "web"], &fetched(false)));
+            plain.frame(Vec::new());
+            parts(&plain).count.unwrap().height()
+        };
+        // A run of two: api paused when last drawn, then api ends and web has said nothing yet.
+        let mut window = Window::new(super::super::testing::fetch_session_of(&["api", "web"], &fetched(true)));
+        window.frame(Vec::new());
+        let count = parts(&window).count.unwrap();
+        assert_eq!(texts_in(&window, count).len(), 3, "the pause is not drawn");
+        testing::fork_job_next(window.session.repos_mut().unwrap(), &[]);
+        window.frame(Vec::new());
+        let between = parts(&window).count.expect("the count dropped out");
+        assert_eq!(texts_in(&window, between), ["24 of 38 forks, 8 at a time"], "an old pause is shown");
+        assert!((between.height() - height_without).abs() < 1e-3, "the pane keeps the old pause's room");
+        // A single fetch that ends right after a pause: its last count, no pause.
+        let mut window = Window::new(fetch_session(&fetched(true)));
+        window.frame(Vec::new());
+        testing::fork_job_end(window.session.repos_mut().unwrap());
+        window.frame(Vec::new());
+        assert!(!window.job().running());
+        let ended = parts(&window).count.expect("the finished dialog lost its count");
+        assert_eq!(texts_in(&window, ended), ["24 of 38 forks, 8 at a time"]);
+        assert_eq!(window.said(), ["Close"]);
+    }
+
+    #[test]
+    fn the_last_task_of_a_run_of_several_keeps_its_count_when_the_run_ends() {
+        use devassist_core::repos::state::testing;
+        let mut window = Window::new(super::super::testing::fetch_session_of(&["api", "web"], &fetched(false)));
+        window.frame(Vec::new());
+        let web = forklines::total(3, &into().with_file_name("web-fork"));
+        let done = forklines::fetching(2, 3);
+        testing::fork_job_next(window.session.repos_mut().unwrap(), &[(web.as_str(), false), (done.as_str(), true)]);
+        window.frame(Vec::new());
+        testing::fork_job_end(window.session.repos_mut().unwrap());
+        window.frame(Vec::new());
+        assert!(!window.job().running());
+        let count = parts(&window).count.expect("the finished dialog lost its count");
+        assert_eq!(texts_in(&window, count), ["2 of 3 forks, 3 at a time"]);
     }
 
     #[test]

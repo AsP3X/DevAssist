@@ -5483,6 +5483,18 @@ pub mod testing {
         }
     }
 
+    /// Ends the held fetch of forks (`fork_job_of`): the task that runs
+    /// ends well, then the run, as a worker's last messages would end it.
+    pub fn fork_job_end(repos: &mut Repos) {
+        let Some(now) = repos.job.as_ref().map(Job::shown) else {
+            return;
+        };
+        repos.on_msg(Msg::Job(JobEvent::Done(now, "fetched".into())));
+        if let Some(job) = repos.job.as_mut() {
+            job.finish(Ok("Updated the forks.".into()), false);
+        }
+    }
+
     /// Opens the fork overview of `repo` (by row name) on `list`, as a
     /// read of its collection would have found it, without reading
     /// anything: for the window's tests of what a core that is not held
@@ -8561,6 +8573,17 @@ mod tests {
         assert_eq!(app.fork_progress(), fork_fetch(0, 3, None));
         assert_eq!(app.fork_job_into(), Some(PathBuf::from("docs-fork")));
         assert!(app.job.as_ref().unwrap().running());
+        // The last task ends, and the run with it.
+        testing::fork_job_end(&mut app);
+        let job = app.job.as_ref().unwrap();
+        assert!(
+            !job.running()
+                && job
+                    .items
+                    .iter()
+                    .all(|item| item.state == crate::task::job::ItemState::Done)
+        );
+        assert_eq!(app.fork_progress(), None);
     }
 
     #[test]
