@@ -1958,6 +1958,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_fork_without_a_folder_has_no_folder_button_and_enter_says_why() {
+        // The count of programs made ready is the whole process's: the tests that run git take turns with this one.
+        let _live = crate::session::tests::live_git();
         // A core that is not held: what it is asked of a fork without a folder or a gone one is a refusal in its
         // words, and nothing is opened. (Nothing here asks it to open a fork that could be opened.)
         let mut repos = Repos::empty(testing::test_settings());
