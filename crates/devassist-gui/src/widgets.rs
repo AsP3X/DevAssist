@@ -298,8 +298,8 @@ pub(crate) fn segment_rects(painter: &Painter, rect: Rect, segments: &[Segment<'
 }
 
 /// Draws a segmented control at `rect`, whose glass is baked ([`add_glass`]), as the design's `segments` draws it:
-/// each segment's words in the medium face, its count after them small and quiet, the chosen one on the
-/// selection's fill and another under the pointer on the hover's. Like every control of a screen it senses clicks
+/// each segment's words in the medium face, its count after them small and quiet (the chosen one's a little stronger,
+/// `chosen_count`), the chosen one on the selection's fill and another under the pointer on the hover's. Like every control of a screen it senses clicks
 /// but never takes the keyboard's focus. Says which segment was pressed.
 pub fn segments(ui: &mut Ui, rect: Rect, segments: &[Segment<'_>], palette: Palette) -> Option<usize> {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
@@ -324,7 +324,8 @@ pub fn segments(ui: &mut Ui, rect: Rect, segments: &[Segment<'_>], palette: Pale
             palette.on_glass,
         );
         let x = drawn.right() + SEGMENT_COUNT_GAP;
-        painter.text(pos2(x, place.center().y), Align2::LEFT_CENTER, segment.count, count_face.clone(), palette.quiet);
+        let count_ink = if segment.chosen { palette.chosen_count } else { palette.quiet };
+        painter.text(pos2(x, place.center().y), Align2::LEFT_CENTER, segment.count, count_face.clone(), count_ink);
         if response.clicked() {
             pressed = Some(index);
         }

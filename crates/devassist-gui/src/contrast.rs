@@ -1122,6 +1122,7 @@ fn colour_name(colour: Color32, mode: Mode) -> String {
         (p.on_glass, "on-glass"),
         (p.on_dark_glass, "white"),
         (p.quiet, "quiet"),
+        (p.chosen_count, "chosen count"),
         (p.danger, "danger"),
         (p.warning, "warning"),
         (p.accent, "accent"),

@@ -53,6 +53,21 @@ pub fn quiet_opacity(mode: Mode) -> f32 {
         Mode::Dark => QUIET_OPACITY_DARK,
     }
 }
+/// How strong the count on the chosen segment of a segmented control is in the light mode, of the full text colour:
+/// above the quiet strength, the least step of 0.01 that holds 6.0 for its 12-point ink on the chosen segment's fill
+/// on every backdrop (the controller's ruling of 2026-11-27: the text is nudged, never the fill). The count on a
+/// segment that is not chosen stays quiet.
+pub const CHOSEN_COUNT_OPACITY_LIGHT: f32 = 0.79;
+
+/// How strong the count on the chosen segment is in `mode`, of the full text colour: in the dark mode the quiet
+/// strength, which holds there.
+#[must_use]
+pub fn chosen_count_opacity(mode: Mode) -> f32 {
+    match mode {
+        Mode::Light => CHOSEN_COUNT_OPACITY_LIGHT,
+        Mode::Dark => QUIET_OPACITY_DARK,
+    }
+}
 /// How far up from the window's bottom the veil keeps its lower strength, as a share of the height; above, it
 /// rises evenly to its strength at the top.
 pub const VEIL_KNEE: f32 = 0.45;
@@ -560,6 +575,8 @@ pub struct Palette {
     pub on_dark_glass: Color32,
     /// Secondary text on glass: `on_glass` at [`quiet_opacity`].
     pub quiet: Color32,
+    /// The count on the chosen segment of a segmented control: `on_glass` at [`chosen_count_opacity`].
+    pub chosen_count: Color32,
     /// The fill of a selected row.
     pub selection: Color32,
     /// The accent colour.
@@ -601,6 +618,7 @@ pub fn palette(mode: Mode) -> Palette {
             on_glass: rgb(0x00, 0x00, 0x00),
             on_dark_glass: Color32::WHITE,
             quiet: rgb(0x00, 0x00, 0x00).gamma_multiply(quiet_opacity(mode)),
+            chosen_count: rgb(0x00, 0x00, 0x00).gamma_multiply(chosen_count_opacity(mode)),
             selection: rgba(0, 0, 0, 0x1f),
             accent: rgb(0x0a, 0x47, 0xa3),
             progress: rgb(0x0a, 0x47, 0xa3),
@@ -621,6 +639,7 @@ pub fn palette(mode: Mode) -> Palette {
             on_glass: rgb(0xff, 0xff, 0xff),
             on_dark_glass: Color32::WHITE,
             quiet: rgb(0xff, 0xff, 0xff).gamma_multiply(quiet_opacity(mode)),
+            chosen_count: rgb(0xff, 0xff, 0xff).gamma_multiply(chosen_count_opacity(mode)),
             selection: rgba(255, 255, 255, 0x24),
             accent: rgb(0x2a, 0x66, 0xd6),
             progress: rgb(0xc7, 0xd7, 0xf4),
