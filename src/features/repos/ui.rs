@@ -2536,6 +2536,57 @@ mod tests {
     }
 
     #[test]
+    fn a_read_of_the_forks_that_fails_shows_the_error_and_no_old_rows() {
+        use crate::features::repos::gitops::{ForkInfo, ForkList};
+        use crate::features::repos::state::testing;
+
+        // A checkout whose forks folder is gone: nothing is there to read.
+        let gone =
+            std::env::temp_dir().join(format!("devassist-forkui-gone-{}", std::process::id()));
+        let mut app = app(false);
+        let mut api = local("api", false);
+        api.path = gone.join("api");
+        app.installed = vec![api];
+        let bob = ForkInfo {
+            owner: "bob".into(),
+            name: "api".into(),
+            branches: 3,
+            pulls: 2,
+            ahead: Some(7),
+            date: 1_795_596_570,
+            folder: true,
+            gone: false,
+        };
+        let list = ForkList {
+            original: "AsP3X/api".into(),
+            dest: gone.join("api-fork"),
+            forks: vec![bob],
+            ..ForkList::default()
+        };
+        testing::open_forks_of(&mut app, "api", list);
+        assert!(render(&mut app, 120, 20).contains("bob/api"));
+        // Read again: it fails, the rows go, and both the list and the line
+        // under the status say so.
+        app.load_forks();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.forks.as_ref().is_some_and(|view| view.loading) {
+            assert!(std::time::Instant::now() < until, "the read did not end");
+            app.drain();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let text = render(&mut app, 120, 20);
+        assert!(!text.contains("bob/api"), "{text}");
+        for expected in [
+            " Forks of AsP3X/api ",
+            "0 forks · 0 with changes",
+            "The forks could not be read. r tries again.",
+            "The forks are not cloned yet.",
+        ] {
+            assert!(text.contains(expected), "{expected}\n{text}");
+        }
+    }
+
+    #[test]
     fn the_overview_has_a_column_for_the_pull_requests_by_state() {
         let mut app = app(false);
         let api = crate::features::repos::gitops::LocalRepo {

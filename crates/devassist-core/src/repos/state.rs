@@ -2181,8 +2181,18 @@ impl Repos {
     }
 
     /// A checkout is in another folder now: everything that names it by
-    /// its path follows, and the settings are saved.
+    /// its path follows, and the settings are saved. An open overview of
+    /// its forks reads them at the new place from then on; where they are
+    /// (`dest`) the next read says: the new place once the forks folder
+    /// went along, else the old one, where it stayed.
     fn on_moved(&mut self, from: &Path, to: PathBuf) {
+        if let Some(view) = self
+            .forks
+            .as_mut()
+            .filter(|view| paths::same_path(&view.path, from))
+        {
+            view.path = to.clone();
+        }
         for path in self.checkouts.iter_mut().chain(self.watched.iter_mut()) {
             if paths::same_path(path, from) {
                 *path = to.clone();
@@ -4903,7 +4913,9 @@ impl Repos {
                     match result {
                         Ok(list) => view.take(list),
                         Err(err) => {
+                            // Nothing that was read before is acted on.
                             view.loading = false;
+                            view.forks.clear();
                             view.error = Some(err);
                         }
                     }
@@ -7736,6 +7748,101 @@ mod tests {
         assert!(there.join("api-fork").join("bob").is_file());
         assert!(!root.join("here").join("api-fork").exists());
         assert!(app.checkouts.contains(&there.join("api")));
+    }
+
+    /// Drains `app` until its open overview of the forks is read.
+    fn forks_read(app: &mut Repos) {
+        let until = Instant::now() + Duration::from_secs(60);
+        while app.forks.as_ref().is_some_and(|view| view.loading) {
+            assert!(Instant::now() < until, "the forks were not read");
+            app.drain();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `api_with_forks` whose collection is a real one, as `save_forks`
+    /// leaves it, with bob's fork named in it (nothing is fetched).
+    fn api_with_read_forks(root: &Path) -> (Repos, PathBuf) {
+        let (app, old) = api_with_forks(root);
+        let forks = root.join("here").join("api-fork");
+        std::fs::remove_dir_all(forks.join(".git")).unwrap();
+        git(&forks, &["init", "-q"]);
+        git(&forks, &["config", "devassist.forksof", "acme/api"]);
+        let bob = root.join("bob");
+        git(&forks, &["remote", "add", "bob", bob.to_str().unwrap()]);
+        (app, old)
+    }
+
+    fn owners(app: &Repos) -> Vec<String> {
+        let view = app.forks.as_ref().expect("the overview is open");
+        view.forks.iter().map(|fork| fork.owner.clone()).collect()
+    }
+
+    #[test]
+    fn an_open_overview_of_the_forks_follows_its_repository_when_it_moves() {
+        let temp = Temp::new("move-open-forks");
+        let root = temp.0.clone();
+        let (mut app, old) = api_with_read_forks(&root);
+        app.selected = Some("api".into());
+        app.open_forks_plain();
+        forks_read(&mut app);
+        assert_eq!(owners(&app), ["bob"]);
+        let there = root.join("there");
+        app.move_checkouts(vec![("api".into(), old)], there.clone());
+        finish(&mut app);
+        forks_read(&mut app);
+        let view = app.forks.as_ref().unwrap();
+        assert_eq!(view.path, there.join("api"));
+        assert_eq!(view.dest, there.join("api-fork"));
+        assert_eq!(view.error, None);
+        assert_eq!(owners(&app), ["bob"]);
+        // Read again, it reads the new place.
+        app.load_forks();
+        forks_read(&mut app);
+        assert_eq!(app.forks.as_ref().unwrap().error, None);
+        assert_eq!(owners(&app), ["bob"]);
+
+        // A forks folder that stays: the overview names where it stayed,
+        // and its rows go with the read that fails at the new place.
+        let case = root.join("stays");
+        let (mut app, old) = api_with_read_forks(&case);
+        let there = case.join("there");
+        std::fs::create_dir_all(there.join("api-fork")).unwrap();
+        app.selected = Some("api".into());
+        app.open_forks_plain();
+        forks_read(&mut app);
+        assert_eq!(owners(&app), ["bob"]);
+        app.move_checkouts(vec![("api".into(), old)], there.clone());
+        finish(&mut app);
+        forks_read(&mut app);
+        let view = app.forks.as_ref().unwrap();
+        assert_eq!(view.path, there.join("api"));
+        assert_eq!(view.dest, case.join("here").join("api-fork"));
+        assert!(view.error.is_some());
+        assert!(owners(&app).is_empty(), "stale rows stayed");
+    }
+
+    #[test]
+    fn a_read_of_the_forks_that_fails_takes_the_old_rows_away() {
+        let mut app = grouped_app();
+        let list = gitops::ForkList {
+            original: "acme/api".into(),
+            dest: PathBuf::from("api-fork"),
+            forks: vec![a_fork("bob", 3, 1, true, false)],
+            ..gitops::ForkList::default()
+        };
+        testing::open_forks_of(&mut app, "api", list);
+        assert_eq!(owners(&app), ["bob"]);
+        let generation = app.forks_generation;
+        app.on_msg(Msg::Forks {
+            generation,
+            result: Err("The forks are not cloned yet.".into()),
+        });
+        let view = app.forks.as_ref().unwrap();
+        assert!(view.forks.is_empty(), "stale rows stayed");
+        assert!(view.rows().is_empty());
+        assert_eq!(view.error.as_deref(), Some("The forks are not cloned yet."));
+        assert!(!view.loading);
     }
 
     #[test]
