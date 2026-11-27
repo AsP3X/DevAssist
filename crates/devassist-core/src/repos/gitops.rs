@@ -1070,6 +1070,17 @@ pub fn move_checkout(
     to: &Path,
     mut on_line: impl FnMut(&str, bool),
 ) -> Result<Option<String>, String> {
+    move_folder(from, to, &mut on_line)
+}
+
+/// Moves the folder `from` to `to`, a path that must be free: a rename on
+/// the same drive, else `copy_then_delete`. What `move_checkout` does, for
+/// a checkout and for its forks folder alike.
+fn move_folder(
+    from: &Path,
+    to: &Path,
+    on_line: &mut dyn FnMut(&str, bool),
+) -> Result<Option<String>, String> {
     if !from.is_dir() {
         return Err(format!("{} is not there any more", from.display()));
     }
@@ -1085,14 +1096,115 @@ pub fn move_checkout(
     }
     #[cfg(any(test, feature = "testing"))]
     if seams::far(from) {
-        return copy_then_delete(from, to, &mut on_line);
+        return copy_then_delete(from, to, on_line);
     }
     match fs::rename(from, to) {
         Ok(()) => return Ok(None),
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(err) => return Err(format!("could not move {}: {err}", from.display())),
     }
-    copy_then_delete(from, to, &mut on_line)
+    copy_then_delete(from, to, on_line)
+}
+
+/// What moving a forks folder along did, besides moving it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ForksFolderMoved {
+    /// Why its fork folders could not be repaired at the new place.
+    pub unrepaired: Option<String>,
+    /// The old folder could not be deleted after the copy, as
+    /// `move_checkout` says it.
+    pub left: Option<String>,
+}
+
+/// Takes the forks folder of a checkout along to where the checkout went:
+/// moves `<from_checkout>-fork` to `<to_checkout>-fork` the way
+/// `move_checkout` moves a checkout, then repairs the fork folders in it
+/// (Git worktrees of the collection, which name each other by their
+/// paths). None when there is no forks folder. An error, as a clause, when
+/// it cannot go: something is at the target already ("something is at
+/// D:\code\api-fork already"), the move failed, or it was cancelled
+/// ("cancelled"); the forks folder is then where it was, whole.
+///
+/// Nothing else in a collection names a place the fetch of the forks
+/// reads: the checkout it was first filled from is read only when the
+/// collection is made, and is named after that in Git's own records of
+/// that fetch alone (`FETCH_HEAD` and a reflog message).
+pub fn move_forks_folder(
+    from_checkout: &Path,
+    to_checkout: &Path,
+    mut on_line: impl FnMut(&str, bool),
+) -> Result<Option<ForksFolderMoved>, String> {
+    let (Some(from), Some(to)) = (forks_folder(from_checkout), forks_folder(to_checkout)) else {
+        return Ok(None);
+    };
+    crate::sys::note_read();
+    if !from.is_dir() {
+        return Ok(None);
+    }
+    if stopped(&from) {
+        return Err("cancelled".into());
+    }
+    if fs::symlink_metadata(&to).is_ok() {
+        return Err(format!("something is at {} already", to.display()));
+    }
+    let left = move_folder(&from, &to, &mut on_line).map_err(|err| {
+        // A cancelled copy whose partial copy was removed again.
+        if err == format!("could not copy to {}: cancelled", to.display()) {
+            "cancelled".to_string()
+        } else {
+            err
+        }
+    })?;
+    on_line("Repairing the fork folders…", true);
+    Ok(Some(ForksFolderMoved {
+        unrepaired: repair_fork_folders(&to).err(),
+        left,
+    }))
+}
+
+/// Tells the fork collection `dest` and the fork folders in it where each
+/// other is, after the folder has moved: `git worktree repair` with the
+/// path of every fork folder, run in the collection. Why it failed, as a
+/// clause, when it did.
+fn repair_fork_folders(dest: &Path) -> Result<(), String> {
+    let folders: Vec<PathBuf> = fs::read_dir(dest)
+        .map_err(|err| format!("{}: {err}", dest.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join(".git").is_file())
+        .collect();
+    if folders.is_empty() {
+        return Ok(());
+    }
+    let mut cmd = git_command();
+    cmd.arg("-C")
+        .arg(dest)
+        .args(["worktree", "repair", "--"])
+        .args(&folders);
+    match cmd.output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let said = last_line(&String::from_utf8_lossy(&output.stderr));
+            let said = said.trim_end_matches('.');
+            Err(if said.is_empty() {
+                format!("git exited with {}", output.status)
+            } else {
+                said.to_string()
+            })
+        }
+        Err(err) => Err(format!("could not start git ({err})")),
+    }
+}
+
+/// Whether work on `path` is to stop: the run was cancelled (in tests also
+/// through `seams::cancel_within`).
+fn stopped(path: &Path) -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    if seams::cancelled(path) {
+        return true;
+    }
+    let _ = path;
+    process::was_cancelled()
 }
 
 /// Whether two paths are on one volume, so that `move_checkout` between
@@ -1250,7 +1362,7 @@ fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(
     fs::create_dir_all(to).map_err(|err| format!("{}: {err}", to.display()))?;
     let entries = fs::read_dir(from).map_err(|err| format!("{}: {err}", from.display()))?;
     for entry in entries {
-        if process::was_cancelled() {
+        if stopped(from) {
             return Err("cancelled".into());
         }
         let entry = entry.map_err(|err| format!("{}: {err}", from.display()))?;
@@ -3247,11 +3359,13 @@ pub mod seams {
     struct Set {
         refused: Vec<PathBuf>,
         far: Vec<PathBuf>,
+        cancelled: Vec<PathBuf>,
     }
 
     static SET: Mutex<Set> = Mutex::new(Set {
         refused: Vec::new(),
         far: Vec::new(),
+        cancelled: Vec::new(),
     });
 
     fn with<T>(act: impl FnOnce(&mut Set) -> T) -> T {
@@ -3271,6 +3385,17 @@ pub mod seams {
     /// another drive.
     pub fn as_if_another_drive(path: &Path) {
         with(|set| set.far.push(path.to_path_buf()));
+    }
+
+    /// From now on, moving the folder `path` or anything in it reads as
+    /// cancelled, as if the run had been, without cancelling the runs of
+    /// other tests.
+    pub fn cancel_within(path: &Path) {
+        with(|set| set.cancelled.push(path.to_path_buf()));
+    }
+
+    pub(super) fn cancelled(path: &Path) -> bool {
+        with(|set| set.cancelled.iter().any(|known| path.starts_with(known)))
     }
 
     pub(super) fn refused(path: &Path) -> bool {
@@ -4667,6 +4792,256 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!((never.branches, never.date, never.folder), (0, 0, false));
         assert!(list_forks(&root.join("ada")).is_err());
         let _ = remove_tree(&root);
+    }
+
+    /// A checkout `root/here/api` whose forks are collected beside it:
+    /// `bob` has a commit of its own, and with it a folder; `eve` has none.
+    /// The forks to fetch, and the address of each, come back with it.
+    fn checkout_with_forks(root: &Path) -> (PathBuf, Vec<ForkSource>) {
+        fs::create_dir_all(root.join("here")).unwrap();
+        git(root, &["init", "-q", "-b", "main", "ada"]);
+        commit(&root.join("ada"), "one");
+        git(root, &["clone", "-q", "ada", "bob"]);
+        commit(&root.join("bob"), "bobs");
+        git(root, &["clone", "-q", "ada", "eve"]);
+        git(&root.join("here"), &["clone", "-q", "../ada", "api"]);
+        let api = root.join("here").join("api");
+        let forks: Vec<ForkSource> = ["bob", "eve"]
+            .map(|owner| ForkSource {
+                owner: owner.to_string(),
+                name: "api".to_string(),
+                stamp: format!("{owner} 1"),
+            })
+            .into();
+        let dest = forks_folder(&api).unwrap();
+        let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
+        let original = ("ada".to_string(), "api".to_string());
+        let saved = save_forks(&api, &dest, &original, &forks, &url_of, None, |_, _| {}).unwrap();
+        assert_eq!((saved.fetched, saved.folders), (2, 1));
+        (api, forks)
+    }
+
+    /// The lines of the files in `dir` and below it that name `path`, with
+    /// either kind of slash, as `file: line`. Git's objects are not read.
+    fn naming(dir: &Path, path: &Path) -> Vec<String> {
+        let needle = path.display().to_string().replace('\\', "/");
+        let mut found = Vec::new();
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let file = entry.path();
+            if file.is_dir() {
+                if file.file_name() != Some(OsStr::new("objects")) {
+                    found.extend(naming(&file, path));
+                }
+            } else if let Ok(bytes) = fs::read(&file) {
+                for line in String::from_utf8_lossy(&bytes).lines() {
+                    if line.replace('\\', "/").contains(&needle) {
+                        found.push(format!("{}: {line}", file.display()));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The forks of `api`, fetched again from the folders of `root`, with
+    /// the stamps they were fetched with first.
+    fn fetch_again(root: &Path, api: &Path, forks: &[ForkSource]) -> ForksSaved {
+        let url_of = |owner: &str, _: &str| root.join(owner).display().to_string();
+        let original = ("ada".to_string(), "api".to_string());
+        let dest = forks_folder(api).unwrap();
+        save_forks(api, &dest, &original, forks, &url_of, None, |_, _| {}).unwrap()
+    }
+
+    /// What a forks folder holds at its top, by name.
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// The forks folder of `api` works where it is: it is cloned, lists
+    /// bob with his folder, bob's folder is a working Git folder there,
+    /// and nothing in it names `old` (the collection's former place).
+    fn works_at(api: &Path, old: &Path) {
+        let dest = forks_folder(api).unwrap();
+        assert!(forks_cloned(api));
+        let list = list_forks(api).unwrap();
+        let bob = list.forks.iter().find(|fork| fork.owner == "bob").unwrap();
+        assert!(bob.folder, "{list:?}");
+        let status = git_command()
+            .arg("-C")
+            .arg(dest.join("bob"))
+            .arg("status")
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let worktrees = git_lines(&dest, &["worktree", "list", "--porcelain"]).unwrap();
+        let bob_at = dest.join("bob").display().to_string().replace('\\', "/");
+        assert!(
+            worktrees
+                .iter()
+                .any(|line| line.replace('\\', "/") == format!("worktree {bob_at}")),
+            "{worktrees:?}"
+        );
+        assert_eq!(naming(&dest, old), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_move_takes_the_forks_folder_along_and_its_fork_folders_still_work() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-move-forks-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let (old, forks) = checkout_with_forks(&root);
+        let old_forks = forks_folder(&old).unwrap();
+
+        // On the same drive: the checkout, then its forks folder.
+        let new = root.join("there").join("api");
+        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        let mut lines = Vec::new();
+        let moved = move_forks_folder(&old, &new, |line, _| lines.push(line.to_string()));
+        assert_eq!(moved, Ok(Some(ForksFolderMoved::default())), "{lines:?}");
+        assert!(!old_forks.exists(), "the old forks folder is still there");
+        works_at(&new, &old_forks);
+        // A fetch from the new place takes up where the old one stopped:
+        // nothing has changed, nothing is fetched, nothing is made anew.
+        let before = entries(&forks_folder(&new).unwrap());
+        let again = fetch_again(&root, &new, &forks);
+        assert!(!again.created);
+        assert_eq!((again.fetched, again.unchanged, again.folders), (0, 2, 1));
+        assert_eq!(entries(&forks_folder(&new).unwrap()), before);
+        works_at(&new, &old_forks);
+
+        // Onto another drive: everything is copied, then the old one goes.
+        let far = root.join("far").join("api");
+        let new_forks = forks_folder(&new).unwrap();
+        assert_eq!(move_checkout(&new, &far, |_, _| {}), Ok(None));
+        seams::as_if_another_drive(&new_forks);
+        let mut lines = Vec::new();
+        let moved = move_forks_folder(&new, &far, |line, _| lines.push(line.to_string()));
+        assert_eq!(moved, Ok(Some(ForksFolderMoved::default())), "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.starts_with("Copying files")),
+            "{lines:?}"
+        );
+        assert!(!new_forks.exists(), "the old forks folder is still there");
+        works_at(&far, &new_forks);
+        let again = fetch_again(&root, &far, &forks);
+        assert_eq!((again.fetched, again.unchanged, again.folders), (0, 2, 1));
+    }
+
+    #[test]
+    fn a_forks_folder_that_cannot_follow_stays_whole_and_the_run_says_so() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-forks-stay-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let (old, _) = checkout_with_forks(&root);
+        let old_forks = forks_folder(&old).unwrap();
+        let before = entries(&old_forks);
+
+        // Something is at the target already: neither is touched.
+        let new = root.join("there").join("api");
+        let taken = forks_folder(&new).unwrap();
+        fs::create_dir_all(&taken).unwrap();
+        fs::write(taken.join("mine"), "mine").unwrap();
+        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_forks_folder(&old, &new, |_, _| {}),
+            Err(format!("something is at {} already", taken.display()))
+        );
+        assert_eq!(entries(&taken), ["mine"]);
+        assert_eq!(entries(&old_forks), before);
+        assert!(old_forks.join("bob").join("bobs").is_file());
+
+        // Cancelled before it starts: it stays where it is, whole.
+        let other = root.join("other").join("api");
+        assert_eq!(move_checkout(&new, &other, |_, _| {}), Ok(None));
+        let new_forks = forks_folder(&new).unwrap();
+        remove_tree(&taken).unwrap();
+        fs::rename(&old_forks, &new_forks).unwrap();
+        seams::cancel_within(&new_forks);
+        assert_eq!(
+            move_forks_folder(&new, &other, |_, _| {}),
+            Err("cancelled".to_string())
+        );
+        assert_eq!(entries(&new_forks), before);
+        assert!(!forks_folder(&other).unwrap().exists());
+
+        // Cancelled while it is copied onto another drive: the partial copy
+        // goes, the old one stays whole.
+        let last = root.join("last").join("api");
+        assert_eq!(move_checkout(&other, &last, |_, _| {}), Ok(None));
+        let other_forks = forks_folder(&other).unwrap();
+        fs::rename(&new_forks, &other_forks).unwrap();
+        seams::as_if_another_drive(&other_forks);
+        seams::cancel_within(&other_forks.join("bob"));
+        assert_eq!(
+            move_forks_folder(&other, &last, |_, _| {}),
+            Err("cancelled".to_string())
+        );
+        assert_eq!(entries(&other_forks), before);
+        assert!(other_forks.join("bob").join("bobs").is_file());
+        assert!(
+            !forks_folder(&last).unwrap().exists(),
+            "the partial copy stayed"
+        );
+    }
+
+    #[test]
+    fn fork_folders_that_cannot_be_repaired_are_said_and_the_folder_has_moved() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-forks-unrepaired-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let (old, _) = checkout_with_forks(&root);
+        let old_forks = forks_folder(&old).unwrap();
+        // Bob's folder no longer says where its repository is.
+        fs::write(old_forks.join("bob").join(".git"), "nonsense").unwrap();
+        let new = root.join("there").join("api");
+        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        let moved = move_forks_folder(&old, &new, |_, _| {}).unwrap().unwrap();
+        let why = moved.unrepaired.expect("the repair failed");
+        assert!(!why.is_empty() && !why.ends_with('.'), "{why}");
+        assert_eq!(moved.left, None);
+        assert!(!old_forks.exists());
+        assert!(forks_cloned(&new), "the forks folder moved all the same");
+    }
+
+    #[test]
+    fn a_repository_without_forks_moves_as_before() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-move-no-forks-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let old = root.join("here").join("api");
+        fs::create_dir_all(root.join("here")).unwrap();
+        git(&root.join("here"), &["init", "-q", "-b", "main", "api"]);
+        commit(&old, "one");
+        let new = root.join("there").join("api");
+        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        let mut lines = Vec::new();
+        assert_eq!(
+            move_forks_folder(&old, &new, |line, _| lines.push(line.to_string())),
+            Ok(None)
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+        assert!(
+            !forks_folder(&new).unwrap().exists(),
+            "a forks folder was made"
+        );
+        // A file of that name is no forks folder either.
+        fs::write(forks_folder(&old).unwrap(), "notes").unwrap();
+        assert_eq!(move_forks_folder(&old, &new, |_, _| {}), Ok(None));
+        assert!(forks_folder(&old).unwrap().is_file());
     }
 
     #[test]

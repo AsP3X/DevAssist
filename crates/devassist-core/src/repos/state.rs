@@ -2053,6 +2053,14 @@ impl Repos {
                     continue;
                 }
                 send_line(tx, &format!("{} → {}", from.display(), to.display()), false);
+                // Said before the checkout moves: it moves all the same.
+                if let (Some(forks), Some(target)) =
+                    (gitops::forks_folder(from), gitops::forks_folder(&to))
+                    && forks.is_dir()
+                    && std::fs::symlink_metadata(&target).is_ok()
+                {
+                    send_line(tx, &forks_cannot_follow(name, &target), false);
+                }
                 let moving = gitops::move_checkout(from, &to, |line, progress| {
                     send_line(tx, line, progress)
                 });
@@ -2061,9 +2069,9 @@ impl Repos {
                         moved += 1;
                         let _ = tx.send(Msg::Moved {
                             from: from.clone(),
-                            to,
+                            to: to.clone(),
                         });
-                        let note = match warning {
+                        let mut note = match warning {
                             Some(warning) => {
                                 send_line(tx, &warning, false);
                                 left.push(warning);
@@ -2071,6 +2079,18 @@ impl Repos {
                             }
                             None => "moved",
                         };
+                        let forks = gitops::move_forks_folder(from, &to, |line, progress| {
+                            send_line(tx, line, progress)
+                        });
+                        if forks.is_err() {
+                            note = "moved, its forks folder stayed";
+                        }
+                        for (words, stays) in forks_moved_words(name, from, &to, forks) {
+                            send_line(tx, &words, false);
+                            if stays {
+                                left.push(words);
+                            }
+                        }
                         send(tx, JobEvent::Done(index, note.into()));
                     }
                     Err(err) => {
@@ -2587,6 +2607,33 @@ impl Repos {
             });
         }
         lines
+    }
+
+    /// The names of the checkouts of the open move question that move but
+    /// whose forks folder will not go along: they have one, and something
+    /// is at the place it would go already (`gitops::move_forks_folder`
+    /// refuses it). Ask it where `move_lines` is asked: it looks at the
+    /// disk on every call. Empty while no move question is open, and while
+    /// work is held (it reads nothing then).
+    pub fn move_forks_blocked(&self) -> Vec<String> {
+        if self.work_held {
+            return Vec::new();
+        }
+        self.move_lines()
+            .into_iter()
+            .filter(|line| !line.there && !line.taken)
+            .filter(|line| {
+                let Some(to) = &line.to else { return false };
+                crate::sys::note_read();
+                let (Some(forks), Some(target)) =
+                    (gitops::forks_folder(&line.from), gitops::forks_folder(to))
+                else {
+                    return false;
+                };
+                forks.is_dir() && std::fs::symlink_metadata(target).is_ok()
+            })
+            .map(|line| line.name)
+            .collect()
     }
 
     /// Whether the open move question would take a checkout onto another
@@ -4814,6 +4861,59 @@ fn moved_words(
     }
 }
 
+/// The line a move says before the checkout of `name` moves, when its
+/// forks folder will not be able to follow it: something is at `target`.
+fn forks_cannot_follow(name: &str, target: &Path) -> String {
+    format!(
+        "The forks folder of {name} cannot follow: something is at {} already.",
+        target.display()
+    )
+}
+
+/// What a move says of the forks folder of `name`, whose checkout moved
+/// from `from` to `to`, once `gitops::move_forks_folder` gave `moved`: the
+/// job's lines, each with whether it joins what the run left behind (and
+/// so ends it as an error). Nothing without a forks folder.
+fn forks_moved_words(
+    name: &str,
+    from: &Path,
+    to: &Path,
+    moved: Result<Option<gitops::ForksFolderMoved>, String>,
+) -> Vec<(String, bool)> {
+    let folder = |path: &Path| gitops::forks_folder(path).unwrap_or_default();
+    let (old, new) = (folder(from), folder(to));
+    match moved {
+        Ok(None) => Vec::new(),
+        Ok(Some(moved)) => {
+            let mut words = vec![(
+                format!("Its forks folder went along to {}.", new.display()),
+                false,
+            )];
+            words.extend(moved.left.map(|left| (left, true)));
+            words.extend(moved.unrepaired.map(|why| {
+                (
+                    format!(
+                        "The forks folder of {name} moved to {}, but its fork folders could not be \
+                         repaired: {why}. Run git worktree repair in {} before the forks are fetched again.",
+                        new.display(),
+                        new.display()
+                    ),
+                    true,
+                )
+            }));
+            words
+        }
+        Err(why) => vec![(
+            format!(
+                "The forks folder of {name} stayed at {}: {}.",
+                old.display(),
+                why.trim_end_matches('.')
+            ),
+            true,
+        )],
+    }
+}
+
 /// The error of a run that was cancelled with something `left` on the
 /// disk: the status line says "Cancelled." and then what was left.
 fn cancelled_leaving(left: &[String]) -> String {
@@ -7018,6 +7118,154 @@ mod tests {
         assert!(there.join("api").join("readme").is_file());
     }
 
+    /// A session with one checkout, api, at `root/here/api`, a file in it,
+    /// and a forks folder beside it with a file of its own; its settings
+    /// are kept in `root`. Where api is comes back with it.
+    fn api_with_forks(root: &Path) -> (Repos, PathBuf) {
+        let old = root.join("here").join("api");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("readme"), "api").unwrap();
+        let forks = root.join("here").join("api-fork");
+        std::fs::create_dir_all(&forks).unwrap();
+        std::fs::write(forks.join("bob"), "bob").unwrap();
+        let settings = Settings {
+            config_path: root.join("devassist.toml"),
+            ..test_settings()
+        };
+        let mut app = Repos::empty(settings);
+        let mut repo = installed("acme", "api");
+        repo.path = old.clone();
+        app.checkouts.push(old.clone());
+        app.installed.push(repo);
+        (app, old)
+    }
+
+    /// The lines the progress dialog shows for its first task.
+    fn first_lines(app: &Repos) -> Vec<String> {
+        app.job.as_ref().unwrap().items[0]
+            .output
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_move_takes_the_forks_folder_along_and_says_so_in_a_line() {
+        let temp = Temp::new("move-forks");
+        let root = temp.0.clone();
+        let (mut app, old) = api_with_forks(&root);
+        let there = root.join("there");
+        app.move_checkouts(vec![("api".into(), old.clone())], there.clone());
+        finish(&mut app);
+        assert_eq!(app.status, format!("Moved api to {}.", there.display()));
+        assert!(!app.status_error);
+        let went = format!(
+            "Its forks folder went along to {}.",
+            there.join("api-fork").display()
+        );
+        assert!(first_lines(&app).contains(&went), "{:?}", first_lines(&app));
+        assert!(there.join("api-fork").join("bob").is_file());
+        assert!(!root.join("here").join("api-fork").exists());
+        assert!(app.checkouts.contains(&there.join("api")));
+    }
+
+    #[test]
+    fn a_forks_folder_that_cannot_follow_is_left_behind_and_the_move_stands() {
+        let temp = Temp::new("move-forks-stay");
+        let root = temp.0.clone();
+        let (mut app, old) = api_with_forks(&root);
+        let there = root.join("there");
+        std::fs::create_dir_all(there.join("api-fork")).unwrap();
+        app.move_checkouts(vec![("api".into(), old.clone())], there.clone());
+        finish(&mut app);
+        let from = root.join("here").join("api-fork");
+        let to = there.join("api-fork");
+        let words = format!(
+            "Moved api to {}. The forks folder of api stayed at {}: something is at {} already.",
+            there.display(),
+            from.display(),
+            to.display()
+        );
+        assert_eq!(app.status, words);
+        assert!(app.status_error, "it is said as a fault");
+        assert_eq!(app.job.as_ref().unwrap().result, Some(Err(words)));
+        assert!(app.job_close_at.is_none(), "the dialog waits to be closed");
+        let early = format!(
+            "The forks folder of api cannot follow: something is at {} already.",
+            to.display()
+        );
+        assert!(
+            first_lines(&app).contains(&early),
+            "{:?}",
+            first_lines(&app)
+        );
+        // The checkout moved all the same; its forks folder is whole.
+        assert!(app.checkouts.contains(&there.join("api")));
+        assert!(there.join("api").join("readme").is_file());
+        assert!(from.join("bob").is_file());
+
+        // Cancelled after the checkout moved: the forks folder stays, and
+        // the run says so as it ends.
+        let (mut app, old) = api_with_forks(&root.join("again"));
+        let from = root.join("again").join("here").join("api-fork");
+        gitops::seams::cancel_within(&from);
+        let there = root.join("again").join("there");
+        app.move_checkouts(vec![("api".into(), old)], there.clone());
+        finish(&mut app);
+        let stayed = format!(
+            "The forks folder of api stayed at {}: cancelled.",
+            from.display()
+        );
+        assert_eq!(
+            app.status,
+            format!("Moved api to {}. {stayed}", there.display())
+        );
+        assert!(from.join("bob").is_file() && !there.join("api-fork").exists());
+        assert_eq!(
+            finished_words(
+                Err(cancelled_leaving(std::slice::from_ref(&stayed))),
+                true,
+                false
+            ),
+            (format!("Cancelled. {stayed}"), true)
+        );
+    }
+
+    #[test]
+    fn the_move_question_names_the_forks_folders_that_cannot_follow() {
+        let temp = Temp::new("move-forks-blocked");
+        let root = temp.0.clone();
+        let (mut app, old) = api_with_forks(&root);
+        let mut web = installed("acme", "web");
+        web.folder = "web".into();
+        web.path = root.join("here").join("web");
+        std::fs::create_dir_all(&web.path).unwrap();
+        app.checkouts.push(web.path.clone());
+        app.installed.push(web);
+        app.installed[0].folder = "api".into();
+        assert!(app.move_forks_blocked().is_empty(), "no question is open");
+        app.marked = vec!["api".into(), "web".into()];
+        app.run_migrate(MigrateItem::Folder);
+        let there = root.join("there");
+        app.set_path_input(&there.display().to_string());
+        assert!(
+            app.move_forks_blocked().is_empty(),
+            "nothing is at the target"
+        );
+        // Something at api's target: api's forks cannot follow. web has no
+        // forks folder, whatever is at its target.
+        std::fs::create_dir_all(there.join("api-fork")).unwrap();
+        std::fs::create_dir_all(there.join("web-fork")).unwrap();
+        assert_eq!(app.move_forks_blocked(), ["api"]);
+        // A checkout that does not move takes nothing along.
+        app.set_path_input(&old.parent().unwrap().display().to_string());
+        assert!(app.move_forks_blocked().is_empty());
+        // Held, nothing is read and nothing is said.
+        app.hold_work();
+        app.set_path_input(&there.display().to_string());
+        assert!(app.move_forks_blocked().is_empty());
+    }
+
     /// The dialogs' checks of a held session look at no folder; live, the
     /// same checks do, and are counted.
     #[cfg(feature = "testing")]
@@ -7050,6 +7298,7 @@ mod tests {
             app.close_path();
             app.run_migrate(MigrateItem::Folder);
             app.set_path_input(&folder);
+            let _ = app.move_forks_blocked();
             app.run(Action::Confirm);
             app.close_path();
             app.remotes_state = RemoteState::Ready;
@@ -7684,6 +7933,55 @@ mod tests {
         assert_eq!(
             finished_words(Err(cancelled_leaving(&[])), true, false),
             ("Cancelled.".into(), false)
+        );
+    }
+
+    #[test]
+    fn what_a_move_says_of_a_forks_folder() {
+        let (old, new) = (Path::new("/srv/old"), Path::new("/srv/new"));
+        let (from, to) = (old.join("api"), new.join("api"));
+        let (old_forks, new_forks) = (old.join("api-fork"), new.join("api-fork"));
+        let (old_forks, new_forks) = (old_forks.display(), new_forks.display());
+        assert!(forks_moved_words("api", &from, &to, Ok(None)).is_empty());
+        let went = (
+            format!("Its forks folder went along to {new_forks}."),
+            false,
+        );
+        let plain = Ok(Some(gitops::ForksFolderMoved::default()));
+        assert_eq!(
+            forks_moved_words("api", &from, &to, plain),
+            std::slice::from_ref(&went)
+        );
+        let not_deleted = format!("The old folder {old_forks} could not be deleted: busy.");
+        let moved = gitops::ForksFolderMoved {
+            unrepaired: Some("error: .git file broken".into()),
+            left: Some(not_deleted.clone()),
+        };
+        assert_eq!(
+            forks_moved_words("api", &from, &to, Ok(Some(moved))),
+            [
+                went,
+                (not_deleted, true),
+                (
+                    format!(
+                        "The forks folder of api moved to {new_forks}, but its fork folders could \
+                         not be repaired: error: .git file broken. Run git worktree repair in \
+                         {new_forks} before the forks are fetched again."
+                    ),
+                    true
+                ),
+            ]
+        );
+        assert_eq!(
+            forks_moved_words("api", &from, &to, Err("cancelled".into())),
+            [(
+                format!("The forks folder of api stayed at {old_forks}: cancelled."),
+                true
+            )]
+        );
+        assert_eq!(
+            forks_cannot_follow("api", &new.join("api-fork")),
+            format!("The forks folder of api cannot follow: something is at {new_forks} already.")
         );
     }
 

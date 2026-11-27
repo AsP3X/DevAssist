@@ -9,16 +9,18 @@
 //! (its title names them by the remove dialog's rule, [`super::remove::named`]), "Move into" over the folder field and
 //! the quiet hint under it (the core's reason in its place when it refused the folder), "What moves": a box with a
 //! row for each checkout (its folder, an arrow, where it goes; "is there already" or "cannot move there" at the
-//! right of one that stays), which scrolls past [`MOVE_ROWS`] rows, the note on another drive when the core can tell
-//! that the move copies, and the buttons. The main button counts the rows that move, and is off while none can.
+//! right of one that stays), which scrolls past [`MOVE_ROWS`] rows, a note naming the checkouts whose forks folder
+//! cannot follow them (something is at its target: `Repos::move_forks_blocked`), the note on another drive when the
+//! core can tell that the move copies, and the buttons. The main button counts the rows that move, and is off while
+//! none can.
 //!
 //! What differs between the purposes is said in one place ([`words`]): the title, the quiet line, the words over
 //! the field and the main button's. A purpose the dialog does not show has no words, and the bridge shows no
 //! dialog for it.
 //!
 //! The field has the focus when the dialog opens. Its text is the core's (`Repos::set_path_input` as it is typed); the
-//! folders that match, and for a move each checkout's row (`Repos::move_lines`) and whether it crosses to another
-//! drive (`Repos::move_crosses_volumes`), are asked for once when it opens and again only when the text changes
+//! folders that match, and for a move each checkout's row (`Repos::move_lines`), whose forks folders stay and whether
+//! it crosses to another drive (`Repos::move_crosses_volumes`), are asked for once when it opens and again only when the text changes
 //! (they read the disk). Enter in the field (with no suggestion lit) and the main button ask the core to go ahead
 //! (`Action::Confirm`): when it refuses the folder, the dialog stays with the core's reason under the field, in the
 //! danger colour, until the text changes; else the dialog closes: an import runs in the core on the window's thread
@@ -58,7 +60,7 @@ const IMPORT_BUTTON: &str = "Import";
 /// Move's words over the field.
 const MOVE_LABEL: &str = "Move into";
 /// Move's quiet line.
-const MOVE_LINE: &str = "Each keeps its folder name, its group, the automatic pull and the saved pull requests.";
+const MOVE_LINE: &str = "Each keeps its folder name, its group, the automatic pull, the saved pull requests and its forks.";
 /// Move's hint under the field, in the quiet colour.
 const MOVE_HINT: &str = "A folder that does not exist yet is created.";
 /// Move's main button for one row that moves (and while none can).
@@ -153,6 +155,16 @@ fn drive_note(root: Option<&str>) -> String {
     )
 }
 
+/// The note on the forks folders that stay where they are, for the checkouts `names` whose forks folder cannot follow
+/// them (`Repos::move_forks_blocked`), named by the title's rule; none when every one can.
+fn forks_note(names: &[String]) -> Option<String> {
+    match names {
+        [] => None,
+        [name] => Some(format!("The forks folder of {name} stays where it is: something is at the target already.")),
+        many => Some(format!("The forks folders of {} stay where they are: something is at their targets already.", remove::named(many))),
+    }
+}
+
 /// How the line under the field is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tone {
@@ -196,6 +208,9 @@ pub(super) struct State {
     crosses: Option<bool>,
     /// For a move, why the folder typed cannot be used (`Repos::path_reason`), asked for with them.
     reason: Option<String>,
+    /// For a move, the checkouts whose forks folder cannot follow them (`Repos::move_forks_blocked`), asked for with
+    /// them.
+    forks: Vec<String>,
 }
 
 impl State {
@@ -215,7 +230,13 @@ impl State {
         self.crosses = if self.lines.is_empty() { None } else { repos.move_crosses_volumes() };
         // Only a move says why while typing; Import's line is the refusal alone.
         self.reason = if self.lines.is_empty() { None } else { repos.path_reason() };
+        self.forks = if self.lines.is_empty() { Vec::new() } else { repos.move_forks_blocked() };
         self.text = text;
+    }
+
+    /// The note on the forks folders that stay where they are, when one cannot follow its checkout.
+    fn forks_stay(&self) -> Option<String> {
+        forks_note(&self.forks)
     }
 
     /// The note on another drive, when the core can tell that the move crosses to one.
@@ -245,6 +266,12 @@ pub(super) fn reason_box(places: Places, repos: &Repos, state: &State) -> Option
     if refused || state.reason.is_some() { places.note.or(places.hint) } else { None }
 }
 
+/// Has the Move dialog's `state` note that the forks folders of `names` cannot follow them, as `follow` asks the core.
+#[cfg(test)]
+pub(super) fn note_forks_stay(state: &mut State, names: &[&str]) {
+    state.forks = names.iter().map(|name| (*name).to_owned()).collect();
+}
+
 /// The parts of the folder dialog.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Places {
@@ -262,6 +289,8 @@ pub(super) struct Places {
     pub(super) hint: Option<Rect>,
     /// Move: the box of the rows, one a checkout.
     pub(super) list: Option<Rect>,
+    /// Move: the note on the forks folders that stay where they are, when one cannot follow its checkout.
+    pub(super) forks: Option<Rect>,
     /// Move: the note on another drive, when the core can tell that the move crosses to one.
     pub(super) drive: Option<Rect>,
     /// The row of the buttons.
@@ -276,13 +305,15 @@ enum Under {
         /// How tall the reason is, when it refused the folder.
         refused: Option<f32>,
     },
-    /// Move: the line under the field, `below` points tall, a box of `lines` rows, and the note on another drive,
-    /// `drive` points tall, when it shows.
+    /// Move: the line under the field, `below` points tall, a box of `lines` rows, the note on the forks folders that
+    /// stay, `forks` points tall, and the note on another drive, `drive` points tall, each when it shows.
     Move {
         /// How tall the line under the field is.
         below: f32,
         /// How many checkouts move.
         lines: usize,
+        /// How tall the note on the forks folders that stay is, when it shows.
+        forks: Option<f32>,
         /// How tall the note on another drive is, when it shows.
         drive: Option<f32>,
     },
@@ -302,13 +333,13 @@ fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places
         Under::Import { refused } => refused.unwrap_or_default(),
         Under::Move { below, .. } => below,
     };
-    let (under_field, list_want, list_least, drive_want) = match under {
+    let (under_field, list_want, list_least, notes_want) = match under {
         Under::Import { refused } => (refused.map_or(0.0, |refused| ADD_FOLDER_GAP + refused), 0.0, 0.0, 0.0),
-        Under::Move { below, lines, drive } => (
+        Under::Move { below, lines, forks, drive } => (
             ADD_FOLDER_GAP + below,
             DIALOG_GAP + list_height(lines.min(MOVE_ROWS)),
             DIALOG_GAP + list_height(lines.min(MOVE_LEAST_ROWS)),
-            drive.map_or(0.0, |drive| DIALOG_GAP + drive),
+            [forks, drive].into_iter().flatten().map(|note| DIALOG_GAP + note).sum(),
         ),
     };
     let fixed = 2.0 * DIALOG_PAD
@@ -318,7 +349,7 @@ fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places
         + ADD_FOLDER_GAP
         + DIALOG_FIELD_HEIGHT
         + under_field
-        + drive_want
+        + notes_want
         + DIALOG_GAP
         + BUTTON_HEIGHT;
     let spare = (window.height() - 2.0 * DIALOG_MARGIN - fixed).max(0.0);
@@ -336,20 +367,22 @@ fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places
         Under::Import { refused } => (refused.map(|_| below), None),
         Under::Move { .. } => (None, Some(below)),
     };
-    let (list, drive) = match under {
-        Under::Import { .. } => (None, None),
-        Under::Move { drive, .. } => {
+    let (list, forks, drive) = match under {
+        Under::Import { .. } => (None, None, None),
+        Under::Move { forks, drive, .. } => {
             let list = at(below.bottom() + DIALOG_GAP, (list_room - DIALOG_GAP).max(0.0));
-            (Some(list), drive.map(|drive| at(list.bottom() + DIALOG_GAP, drive)))
+            let forks = forks.map(|forks| at(list.bottom() + DIALOG_GAP, forks));
+            let drive = drive.map(|drive| at(forks.unwrap_or(list).bottom() + DIALOG_GAP, drive));
+            (Some(list), forks, drive)
         }
     };
     let buttons = Rect::from_min_max(pos2(inside.left(), (inside.bottom() - BUTTON_HEIGHT).max(inside.top())), inside.max);
-    Places { pane, header, label, field, note, hint, list, drive, buttons }
+    Places { pane, header, label, field, note, hint, list, forks, drive, buttons }
 }
 
-/// The note on another drive naming `root`, laid out with `painter`'s faces: quiet 12-point text that wraps at
-/// [`MOVE_NOTE_WIDTH`], at the design's line height.
-fn drive_galley(painter: &Painter, note: &str) -> Arc<Galley> {
+/// A note under a move's rows (on the forks folders that stay, on another drive), laid out with `painter`'s faces:
+/// quiet 12-point text that wraps at [`MOVE_NOTE_WIDTH`], at the design's line height.
+fn note_galley(painter: &Painter, note: &str) -> Arc<Galley> {
     let mut job = LayoutJob::simple(note.to_owned(), font(TEXT_SMALL, FontFamily::Proportional), Color32::PLACEHOLDER, MOVE_NOTE_WIDTH);
     for section in &mut job.sections {
         section.format.line_height = Some(TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT);
@@ -370,7 +403,8 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, state: &State
         Purpose::Move(_) => Under::Move {
             below: below.unwrap_or_else(|| line_height(TEXT_SMALL)),
             lines: state.lines.len(),
-            drive: state.other_drive().map(|note| drive_galley(painter, &note).size().y),
+            forks: state.forks_stay().map(|note| note_galley(painter, &note).size().y),
+            drive: state.other_drive().map(|note| note_galley(painter, &note).size().y),
         },
         _ => Under::Import { refused: below },
     };
@@ -438,12 +472,10 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     if let Some(rect) = places.list {
         list(ui, rect, &state.lines, palette, dialogs);
     }
-    if let (Some(rect), Some(note)) = (places.drive, state.other_drive()) {
-        let note = drive_galley(ui.painter(), &note);
-        let painter = ui.painter();
-        let first_line = TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT;
-        widgets::draw_icon(painter, pos2(rect.left() + ICON / 2.0, rect.top() + first_line / 2.0), Icon::HardDrive, ICON, palette.quiet);
-        painter.galley(pos2(rect.left() + ICON + LIST_GAP, rect.top()), note, palette.quiet);
+    for (place, note, icon) in [(places.forks, state.forks_stay(), Icon::GitBranch), (places.drive, state.other_drive(), Icon::HardDrive)] {
+        if let (Some(rect), Some(note)) = (place, note) {
+            move_note(ui.painter(), rect, &note, icon, palette);
+        }
     }
 
     let widths = [widgets::button_width(ui, CANCEL), widgets::button_width(ui, &words.button)];
@@ -458,6 +490,14 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     done.accept &= words.on;
     act(ui, repos, &mut state, &done);
     dialogs.folder = Some(state);
+}
+
+/// Draws a note under a move's rows at `rect` with `painter`: `icon` by its first line, then `note`, quiet.
+fn move_note(painter: &Painter, rect: Rect, note: &str, icon: Icon, palette: Palette) {
+    let galley = note_galley(painter, note);
+    let first_line = TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT;
+    widgets::draw_icon(painter, pos2(rect.left() + ICON / 2.0, rect.top() + first_line / 2.0), icon, ICON, palette.quiet);
+    painter.galley(pos2(rect.left() + ICON + LIST_GAP, rect.top()), galley, palette.quiet);
 }
 
 /// Draws a move's `lines` in the box at `rect`, scrolled by the wheel: for each, the folder's icon, where it is, an
@@ -984,6 +1024,54 @@ mod tests {
     }
 
     #[test]
+    fn the_line_says_a_move_keeps_the_forks_and_the_note_names_those_that_stay() {
+        assert_eq!(MOVE_LINE, "Each keeps its folder name, its group, the automatic pull, the saved pull requests and its forks.");
+        let names = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        assert_eq!(forks_note(&[]), None);
+        assert_eq!(forks_note(&names(&["api"])).as_deref(), Some("The forks folder of api stays where it is: something is at the target already."));
+        assert_eq!(
+            forks_note(&names(&["api", "web"])).as_deref(),
+            Some("The forks folders of api and web stay where they are: something is at their targets already.")
+        );
+        // At its longest, five repositories counted, it takes two lines (as the dialog's places allow for).
+        let longest = forks_note(&names(&["a", "b", "c", "d", "e"])).unwrap();
+        assert!(longest.starts_with("The forks folders of 5 repositories stay"), "{longest}");
+        let mut rows = 0;
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        crate::widgets::tests::context().run_ui(input, |ui| rows = note_galley(ui.painter(), &longest).rows.len()).drop_without_applying_deltas();
+        assert_eq!(rows, 2, "{longest}");
+        // The demo's Move is held: it reads no folder, and has no note.
+        let window = move_dialog(&["api", "web"], OTHER);
+        assert_eq!(state(&window).forks, Vec::<String>::new());
+        assert_eq!(parts(&window).forks, None);
+    }
+
+    #[test]
+    fn a_forks_folder_that_cannot_follow_is_noted_under_the_rows() {
+        // A live session (not held): the core looks at the disk.
+        let root = Temp(std::env::temp_dir().join(format!("devassist-gui-move-forks-{}", std::process::id())));
+        let mut window = live_move(&root.0);
+        std::fs::create_dir_all(root.0.join("here").join("api-fork")).unwrap();
+        let there = root.0.join("there");
+        type_over(&mut window, &there.display().to_string());
+        assert_eq!(parts(&window).forks, None, "nothing is at the target");
+        let tall = parts(&window).pane.height();
+        std::fs::create_dir_all(there.join("api-fork")).unwrap();
+        // Asked again as the text changes.
+        type_over(&mut window, &format!("{}{}", there.display(), std::path::MAIN_SEPARATOR));
+        assert_eq!(state(&window).forks, ["api"]);
+        let places = parts(&window);
+        let (list, forks) = (places.list.unwrap(), places.forks.expect("the note on the forks folder"));
+        assert!(forks.top() >= list.bottom() && forks.bottom() <= places.buttons.top() && places.pane.contains_rect(forks));
+        assert!(places.pane.height() > tall, "the dialog did not make room for the note");
+        let said = forks_note(&["api".to_owned()]).unwrap();
+        assert!(window.texts.iter().any(|(words, rect, cut)| *words == said && !cut && forks.contains_rect(*rect)), "the note is not drawn");
+        // Both still move: the note only says what stays.
+        assert_eq!(window.said(), ["Cancel", "Move 2 repositories"]);
+        window.session.close();
+    }
+
+    #[test]
     fn a_folder_that_cannot_be_used_says_why_while_typing() {
         // A live session (not held): the core looks at the disk.
         let root = Temp(std::env::temp_dir().join(format!("devassist-gui-move-why-{}", std::process::id())));
@@ -1065,16 +1153,24 @@ mod tests {
         // the buttons stay inside the pane; in the design's window it shows six.
         let small = Rect::from_min_size(Pos2::ZERO, vec2(MIN_WINDOW[0], MIN_WINDOW[1]));
         let big = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]));
-        // The line under the field at three lines: a long reason.
-        let fifty = Under::Move { below: 3.0 * line_height(TEXT_SMALL), lines: 50, drive: Some(3.0 * TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT) };
-        for (window, rows) in [(small, 0), (small, 6), (big, 0), (big, 6)] {
-            let places = folder_places(window, 45.0, rows, fifty);
+        // The notes at their longest: the forks note naming five repositories in two lines, the drive's in three.
+        let lines = |count: f32| Some(count * TEXT_SMALL * MOVE_NOTE_LINE_HEIGHT);
+        // The line under the field at three lines (a long reason: nothing moves then, so no forks note), or the hint
+        // with both notes.
+        let reason = Under::Move { below: 3.0 * line_height(TEXT_SMALL), lines: 50, forks: None, drive: lines(3.0) };
+        let notes = Under::Move { below: line_height(TEXT_SMALL), lines: 50, forks: lines(2.0), drive: lines(3.0) };
+        let cases = [(small, 0), (small, 6), (big, 0), (big, 6)];
+        for (window, rows, under) in cases.into_iter().flat_map(|(window, rows)| [reason, notes].map(|under| (window, rows, under))) {
+            let places = folder_places(window, 45.0, rows, under);
             let (list, drive, hint) = (places.list.unwrap(), places.drive.unwrap(), places.hint.unwrap());
             assert!(window.contains_rect(places.pane), "{window:?} {rows}");
-            for part in [places.header, places.label, places.field, hint, list, drive, places.buttons] {
+            for part in [places.header, places.label, places.field, hint, list, drive, places.buttons].into_iter().chain(places.forks) {
                 assert!(places.pane.contains_rect(part), "{window:?} {rows}: {part:?} outside {:?}", places.pane);
             }
-            assert!(places.field.bottom() <= hint.top() && hint.bottom() <= list.top() && list.bottom() <= drive.top());
+            assert!(places.field.bottom() <= hint.top() && hint.bottom() <= list.top());
+            let forks = places.forks.unwrap_or(list);
+            assert!(list.bottom() <= forks.top() || forks == list);
+            assert!(forks.bottom() <= drive.top());
             assert!(drive.bottom() <= places.buttons.top(), "{window:?} {rows}");
             let least = if window == small { MOVE_LEAST_ROWS } else { MOVE_ROWS };
             assert!(list.height() >= list_height(least) - 1e-3, "{window:?} {rows}: {list:?}");

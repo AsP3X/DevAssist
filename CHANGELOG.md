@@ -50,6 +50,15 @@ What changed in each version of DevAssist. The format follows
   exists, as a path does.
 - Moving and copying onto another drive keeps a symbolic link as a link on
   Linux and macOS, and refuses a pipe or a socket instead of waiting on it.
+- **A move takes a repository's forks folder along.** `<name>-fork` beside the
+  repository moves with it, the same way (a rename, or a copy and then a
+  delete onto another drive), and its fork folders are repaired with
+  `git worktree repair` so they work at the new place. Before, it stayed
+  behind and the moved repository's forks read as not cloned. When something
+  is at the new place already, or its move fails or is cancelled, the forks
+  folder stays where it was, whole, the repository's move still stands, and
+  the run ends with a fault that names it. The window's Move dialog notes a
+  forks folder that cannot follow. This holds in the terminal app too.
 
 ## [0.7.0] - 2026-11-26
 

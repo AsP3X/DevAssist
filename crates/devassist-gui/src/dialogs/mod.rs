@@ -504,6 +504,15 @@ pub(crate) fn reason_box(plan: &Plan, repos: &Repos, dialogs: &Dialogs) -> Optio
     }
 }
 
+/// Has the open Move dialog say that the forks folders of `names` cannot follow them, as a live core finds it when
+/// something is at their targets (`Repos::move_forks_blocked`): a held demo reads no folder, so never says so itself.
+#[cfg(test)]
+pub(crate) fn note_forks_stay(dialogs: &mut Dialogs, names: &[&str]) {
+    if let Some(state) = dialogs.folder.as_mut() {
+        folder::note_forks_stay(state, names);
+    }
+}
+
 /// Gives the keyboard's focus to the Add dialog's folder field, when the Add dialog is open on `repos`; says
 /// whether it did. For a picture of its suggestions (`--show add-folder`).
 pub fn focus_add_folder(ctx: &Context, repos: Option<&Repos>) -> bool {

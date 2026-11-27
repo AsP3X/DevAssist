@@ -674,14 +674,15 @@ struct Shot {
 /// the row that lists the account); the screen without repositories (its panel's two lines, the top row), the top row
 /// where it gives way, and the Import dialog as the demo opens it and with a folder the core refused; the screen with
 /// the pointer on the top row's "Add repository"; the Move dialog as the demo opens it (its rows, the note on another
-/// drive), with rows that are there already and that cannot move, with no usable folder (its quiet targets, the main
+/// drive), and with the note that a forks folder stays where it is ([`MOVE_FORKS_STAY`]), with rows that are there
+/// already and that cannot move, with no usable folder (its quiet targets, the main
 /// button off; why the folder cannot be used, in the place of the hint), and with a folder the core refused; the
 /// Import dialog refusing a long path, its reason wrapped across the dialog's width; and the Push dialog as the demo
 /// opens it (its label, address, note, facts with their checks and crosses, buttons), with no address (the field's
 /// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was); the
 /// Add and the Import dialog with their folder field's rows shown on their own glass, the first row lit and under
 /// the pointer.
-const SHOTS: [Shot; 36] = [
+const SHOTS: [Shot; 37] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -816,6 +817,8 @@ const SHOTS: [Shot; 36] = [
     },
     Shot { name: "add repository hovered", over: Over::MainHovered, set_up: |_| {} },
     Shot { name: "move", over: Over::Dialog, set_up: |repos| demo::show(repos, "move").unwrap() },
+    // The same, with api's forks folder unable to follow (its note under the rows: see `MOVE_FORKS_STAY`).
+    Shot { name: MOVE_FORKS_STAY, over: Over::Dialog, set_up: |repos| demo::show(repos, "move").unwrap() },
     Shot {
         // api and web are in the folder already; notes moves there.
         name: "move there already",
@@ -878,6 +881,11 @@ const SHOTS: [Shot; 36] = [
     Shot { name: "import folder rows lit", over: Over::Rows(RowsShot::Lit), set_up: set_up_import_rows },
     Shot { name: "import folder rows hovered", over: Over::Rows(RowsShot::Hovered), set_up: set_up_import_rows },
 ];
+
+/// The shot of the Move dialog noting that api's forks folder stays where it is. A held demo reads no folder, so its
+/// core never finds a forks folder that cannot follow: the note is given to the dialog as a live core would have it
+/// (`dialogs::note_forks_stay`) once the dialog is open.
+const MOVE_FORKS_STAY: &str = "move forks stay";
 
 /// The open folder question with this test's program typed, a file with a long path, and the core's refusal of it as
 /// a live core gives it when Enter is pressed (`prompt::resolve`'s own words, asked of the disk here, by the test, not
@@ -1194,6 +1202,9 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
+            if shot.name == MOVE_FORKS_STAY {
+                dialogs::note_forks_stay(&mut dialogs, &["api"]);
+            }
             let planned = dialogs::before(&ctx, session.repos(), repos_screen::menu_anchor(&screen), &mut dialogs);
             found = planned.as_ref().and_then(dialogs::add_found_box);
             reason = planned.as_ref().zip(session.repos()).and_then(|(plan, repos)| dialogs::reason_box(plan, repos, &dialogs));

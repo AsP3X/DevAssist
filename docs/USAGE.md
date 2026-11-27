@@ -401,6 +401,27 @@ original as it was. A move is refused when the target folder exists already.
 Close programs that have files of the repository open first: Windows does not
 move a folder that is in use.
 
+The forks go along. When the repository has a forks folder beside it
+(`D:\code\api-fork`, see "Cloning the forks"), it moves after the repository to the same
+place under the new folder (`E:\work\api-fork`), the same way: renamed on the
+same drive, copied and then deleted onto another. Its fork folders are then
+repaired with `git worktree repair`, so they work at the new place, and the
+next fetch of the forks takes up where the last one stopped. The progress
+dialog says "Its forks folder went along to E:\work\api-fork."
+
+When something is at that place already, the forks folder cannot follow. The
+progress dialog says so before the repository moves ("The forks folder of api
+cannot follow: something is at E:\work\api-fork already."), and the
+repository moves all the same. The forks folder stays where it was, whole, as
+it does when its move fails or is cancelled. The run then ends with a fault
+that names it, which the progress dialog and the status line keep: "Moved api
+to E:\work. The forks folder of api stayed at D:\code\api-fork: something is
+at E:\work\api-fork already." If the forks folder moved but its fork folders
+could not be repaired (`git worktree repair` needs Git 2.30 or newer), the
+run ends with a fault that says so and asks you to run `git worktree repair`
+in the forks folder before the forks are fetched again: a fetch does not
+repair them.
+
 ### Migrate: pushing a repository to another service
 
 **Push to another service…** (`s`) in the same submenu puts a complete copy
@@ -716,7 +737,9 @@ folder picker of the system.
 chosen repositories into it. The dialog's title names them ("Move api and web
 to another folder", "Move 5 repositories to another folder"), and its field
 "Move into" starts at the folder the first one is in. Each repository keeps
-its folder name, its group, the automatic pull and the saved pull requests.
+its folder name, its group, the automatic pull, the saved pull requests and
+its forks: its forks folder goes along and its fork folders are repaired, as
+in the terminal app (see "Migrate: moving a repository to another folder").
 
 Under the field a box has a row for each repository: where it
 is now, an arrow and where it goes. A row can say:
@@ -733,7 +756,10 @@ window can tell that the move takes repositories to another drive, a note
 says so ("E: is another drive."; only on Windows is the drive named, elsewhere
 it reads "That folder is on another drive."), that everything is copied first and the
 original is deleted only after the copy is complete, and that programs with
-files of the repositories open should be closed first.
+files of the repositories open should be closed first. When something is at
+the place a repository's forks folder would go, a note under the rows says
+that it stays: "The forks folder of api stays where it is: something is at
+the target already." The repository itself still moves.
 
 The main button counts only the rows that move: "Move" for one, "Move 3
 repositories" for three. It is off while none can move. `Enter` in the field
@@ -752,7 +778,9 @@ settings follow it), and the run ends with a fault that names the folder left
 behind: "Moved api to E:\work. The old folder D:\code\api could not be
 deleted: …". The progress dialog then stays open until you close it, and the
 status line keeps the sentence. Delete what is left of the old folder
-yourself. The repositories stay on the list.
+yourself. The repositories stay on the list. A forks folder that could not
+follow ends the run the same way: "Moved api to E:\work. The forks folder of
+api stayed at D:\code\api-fork: something is at E:\work\api-fork already."
 
 ### Pushing a repository to another service
 
