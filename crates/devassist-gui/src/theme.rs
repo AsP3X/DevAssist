@@ -603,7 +603,8 @@ pub struct Palette {
     /// track lies on a selected row's fill (the user's choice of 2026-11-26).
     pub progress: Color32,
     /// The ring around the control with the keyboard's focus: the accent in the light mode; in the dark mode a
-    /// lighter blue of the accent's hue, the least step that holds 3.0 against a dialog's glass on every backdrop.
+    /// lighter blue of the accent's hue, the least step that holds 3.10 against a dialog's glass on every backdrop
+    /// (3.0 with a margin: the fetch dialog with a task list puts Hide's ring lower, over a darker part of a backdrop).
     pub focus: Color32,
     /// The fill of an input field.
     pub field: Color32,
@@ -662,7 +663,7 @@ pub fn palette(mode: Mode) -> Palette {
             progress: rgb(0xc7, 0xd7, 0xf4),
             // The user's decision, 2026-11-27: lightened from #487cdc so the ring holds 3.0 on the fetch dialog over the
             // lake backdrop (was 2.92). The accent #2a66d6 mixed with white, in steps of 0.01: 0.16.
-            focus: rgb(0x4c, 0x7e, 0xdd),
+            focus: rgb(0x52, 0x81, 0xde),
             field: rgba(255, 255, 255, 0x1a),
             scrim: rgba(0, 0, 0, 0x73),
             warning: rgb(0xfa, 0xe1, 0xb0),
@@ -799,7 +800,7 @@ mod tests {
         assert_eq!(light.danger, Color32::from_rgb(0x83, 0x1c, 0x16));
         assert_eq!((light.progress, light.focus), (light.accent, light.accent));
         assert_eq!(dark.progress, Color32::from_rgb(0xc7, 0xd7, 0xf4));
-        assert_eq!(dark.focus, Color32::from_rgb(0x4c, 0x7e, 0xdd));
+        assert_eq!(dark.focus, Color32::from_rgb(0x52, 0x81, 0xde));
         assert_eq!(dark.danger, Color32::from_rgb(0xff, 0xc8, 0xc1));
         assert_eq!(light.ok, Color32::from_rgb(0x1c, 0x6b, 0x3a));
         assert_eq!(dark.ok, Color32::from_rgb(0x77, 0xdb, 0xa0));
