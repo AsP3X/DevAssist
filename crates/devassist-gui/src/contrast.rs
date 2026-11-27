@@ -516,28 +516,83 @@ fn measure_all(rendering: Rendering) -> Vec<Row> {
     on_workers(&BACKDROPS, |backdrop| measure(backdrop, rendering)).into_iter().flatten().collect()
 }
 
-/// How many threads the contrast tests draw and measure on: `DEVASSIST_TEST_WORKERS` as given when it is set to a
-/// positive number (no more than the machine can run at once); else half of what the machine can run at once, at
-/// least one and at most eight. [`on_workers`] starts no more than it has items. Each take renders and measures whole
-/// windows: one thread a take, all at once, took every core of the machine (the user's request, 2026-11-27).
+/// How many takes the contrast tests draw and measure at once, in the whole process (both tests together):
+/// `DEVASSIST_TEST_WORKERS` as given when it is set to a positive number (no more than the machine can run at once);
+/// else half of what the machine can run at once, at least one and at most eight. A value that is no positive number
+/// is said once on the test's output, and the default is taken. Each take renders and measures whole windows: one
+/// thread a take, all at once, took every core of the machine (the user's request, 2026-11-27).
 fn workers() -> usize {
+    static UNREAD: std::sync::Once = std::sync::Once::new();
     let parallel = thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    std::env::var("DEVASSIST_TEST_WORKERS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|count| *count > 0)
-        .map_or_else(|| (parallel / 2).clamp(1, 8), |count| count.min(parallel))
+    let fallback = (parallel / 2).clamp(1, 8);
+    match std::env::var("DEVASSIST_TEST_WORKERS") {
+        Err(_) => fallback,
+        Ok(value) => match value.trim().parse::<usize>() {
+            Ok(count) if count > 0 => count.min(parallel),
+            _ => {
+                UNREAD.call_once(|| eprintln!("DEVASSIST_TEST_WORKERS={value:?} is no positive number: {fallback} workers"));
+                fallback
+            }
+        },
+    }
 }
 
-/// `job` done to each of `items` on a few threads ([`workers`]), each taking the next item not yet taken; the results
-/// in the items' order, as one thread an item gave them.
+/// The takes being drawn now, in the whole process, and the signal that one ended ([`workers`] at most).
+static DRAWING: (std::sync::Mutex<usize>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+/// A place among the [`workers`] taken while one item is drawn, given back when it is dropped: also when the item's
+/// job panics.
+struct Slot;
+
+impl Slot {
+    /// Waits for a place among the [`workers`], and takes it.
+    fn take() -> Slot {
+        let (drawing, ended) = &DRAWING;
+        let most = workers();
+        let mut now = ended
+            .wait_while(drawing.lock().unwrap_or_else(std::sync::PoisonError::into_inner), |now| *now >= most)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *now += 1;
+        Slot
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let (drawing, ended) = &DRAWING;
+        *drawing.lock().unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+        ended.notify_one();
+    }
+}
+
+/// Stops the other workers of [`on_workers`] when it is dropped while its worker panics: they take no further item,
+/// so the test fails soon.
+struct StopOnPanic<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for StopOnPanic<'_> {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// `job` done to each of `items` on a few threads, each taking the next item not yet taken while it holds a place
+/// among the process's [`workers`] ([`Slot`]); the results in the items' order, as one thread an item gave them. A
+/// panic in one stops the others taking items, and fails the caller once they are done.
 fn on_workers<T: Copy + Sync, R: Send>(items: &[T], job: impl Fn(T) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let stop = std::sync::atomic::AtomicBool::new(false);
     let results: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
     thread::scope(|scope| {
         for _ in 0..workers().min(items.len()) {
             scope.spawn(|| {
+                let _stop = StopOnPanic(&stop);
                 loop {
+                    let _slot = Slot::take();
+                    if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
                     let at = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Some(&item) = items.get(at) else { break };
                     let done = job(item);
@@ -547,6 +602,23 @@ fn on_workers<T: Copy + Sync, R: Send>(items: &[T], job: impl Fn(T) -> R + Sync)
         }
     });
     results.into_iter().map(|result| result.into_inner().unwrap().expect("an item no worker took")).collect()
+}
+
+#[test]
+fn the_workers_keep_the_items_order_and_stop_after_a_panic() {
+    let squares = on_workers(&(0..40).collect::<Vec<u32>>(), |n| n * n);
+    assert_eq!(squares, (0..40).map(|n| n * n).collect::<Vec<u32>>());
+    // A panic on the first item: the others take no item after it, and the caller fails.
+    let taken = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        on_workers(&(0..10_000).collect::<Vec<u32>>(), |n| {
+            taken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(n != 0, "the first item fails");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        })
+    }));
+    assert!(failed.is_err(), "the panic did not fail the caller");
+    assert!(taken.load(std::sync::atomic::Ordering::SeqCst) < 1000, "the workers went on after the panic");
 }
 
 /// Whether the glass rendering is measured here. A machine without a GPU adapter skips it, and so does one whose
