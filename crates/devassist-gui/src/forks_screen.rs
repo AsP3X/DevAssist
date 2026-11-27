@@ -2445,6 +2445,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_quick_click_elsewhere_does_not_swallow_back_or_the_sidebars_button() {
+        // egui counts a click as the second of a double click when it comes soon after another within a few points
+        // of it. A click just beside the round button (on the top row), then quickly one on the button's edge: that is
+        // no second press of the button, which acts.
+        let mut win = Win::demo();
+        win.step = 0.02;
+        let toggle = win.pages_layout().toggle;
+        let beside = pos2(toggle.right() + 2.0, toggle.center().y);
+        let edge = pos2(toggle.right() - 2.0, toggle.center().y);
+        win.click(beside);
+        win.click(edge);
+        win.frame(Vec::new());
+        assert!(win.repos().forks.is_none(), "a click on back after a quick click beside it was swallowed");
+        assert!(win.pages.sidebar_shown);
+        // On the table: a click on a row, then quickly one on the sidebar's button: it hides the sidebar.
+        win.step = 1.0;
+        win.frame(Vec::new());
+        win.step = 0.02;
+        let dots = win.dots("homelab");
+        win.click(pos2(dots.left() - 300.0, dots.center().y));
+        win.click(toggle.center());
+        win.frame(Vec::new());
+        assert!(!win.pages.sidebar_shown, "a click on the sidebar's button after a quick click on a row was swallowed");
+        // Then a click just beside the button (where it now stands) and quickly one on its edge: it shows the sidebar.
+        win.step = 1.0;
+        win.frame(Vec::new());
+        win.step = 0.02;
+        let toggle = shell::layout(vec2(win.size[0], win.size[1]), false, true).toggle;
+        win.click(pos2(toggle.right() + 2.0, toggle.center().y));
+        win.click(pos2(toggle.right() - 2.0, toggle.center().y));
+        win.frame(Vec::new());
+        assert!(win.pages.sidebar_shown, "a click on the sidebar's button after a quick click beside it was swallowed");
+    }
+
+    #[test]
     fn the_filter_does_not_take_the_tables_filter_or_stay_behind() {
         let mut win = Win::demo();
         win.letter('/');
