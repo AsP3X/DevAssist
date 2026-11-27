@@ -1301,11 +1301,11 @@ pub(crate) fn cannot_read(why: &str) -> String {
 
 /// The value of `key` in the section `section` (without a subsection) of
 /// a Git configuration file's `text`, as Git reads it for a simple value:
-/// names compared without regard to case, `=` with any spaces or tabs, the
-/// value trimmed, its quotes taken off when it is quoted whole, and a
-/// comment after it (`#` or `;`) left out. The last one counts. Lines that
-/// start with `#` or `;` are comments.
+/// a byte order mark at the start left out, names compared without regard
+/// to case, `=` with any spaces or tabs, the value as `simple_value` reads
+/// it. The last one counts. Lines that start with `#` or `;` are comments.
 fn config_value(text: &str, section: &str, key: &str) -> Option<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut inside = false;
     let mut found = None;
     for line in text.lines() {
@@ -1331,22 +1331,37 @@ fn config_value(text: &str, section: &str, key: &str) -> Option<String> {
         if !name.trim().eq_ignore_ascii_case(key) {
             continue;
         }
-        let value = value.trim();
-        let value = match value
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-        {
-            Some(quoted) => quoted,
-            None => value
-                .split(['#', ';'])
-                .next()
-                .unwrap_or_default()
-                .trim_end(),
-        };
-        found = Some(value.to_string());
+        found = Some(simple_value(value));
     }
     found
 }
+
+/// A value as Git reads it after the `=`: quotes taken off and what is
+/// between them kept as it is, comment signs too; a `#` or `;` outside
+/// quotes starts a comment; the spaces at either end outside quotes left
+/// out.
+fn simple_value(raw: &str) -> String {
+    let mut value = String::new();
+    // How long `value` is up to its last character that counts at its end:
+    // a quoted one, or one that is not a space.
+    let mut kept = 0;
+    let mut quoted = false;
+    for character in raw.trim().chars() {
+        match character {
+            '"' => quoted = !quoted,
+            '#' | ';' if !quoted => break,
+            _ => {
+                value.push(character);
+                if quoted || !character.is_whitespace() {
+                    kept = value.len();
+                }
+            }
+        }
+    }
+    value.truncate(kept);
+    value
+}
+
 /// Why `git worktree repair` failed, from what it wrote to its error
 /// output: the first line that is an error, else the last line (it also
 /// writes lines of what it repaired), without a closing full stop.
@@ -5512,6 +5527,25 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(read("[devassist \"sub\"]\n\tforksof = x\n"), None);
         assert_eq!(read("[devassist]\n\tforksof =\n").as_deref(), Some(""));
         assert_eq!(read(""), None);
+        // A byte order mark at the start of the file is no part of the first line.
+        assert_eq!(
+            read("\u{feff}[devassist]\n\tforksof = ada/api\n").as_deref(),
+            Some("ada/api")
+        );
+        // An empty quoted value with a comment after it is empty; a quoted
+        // value keeps what is quoted, comment signs too.
+        assert_eq!(
+            read("[devassist]\n\tforksof = \"\" ; c\n").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            read("[devassist]\n\tforksof = \"ada/api\" # c\n").as_deref(),
+            Some("ada/api")
+        );
+        assert_eq!(
+            read("[devassist]\n\tforksof = \"a;b#c\"\n").as_deref(),
+            Some("a;b#c")
+        );
 
         // What Git itself writes is read back, with either line end.
         let root = std::env::temp_dir().join(format!("devassist-marker-{}", std::process::id()));
