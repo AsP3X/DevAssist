@@ -1163,6 +1163,40 @@ pub(crate) mod tests {
             Win::new(Session::demo(forks_open()))
         }
 
+        /// The window on `session` from now on, as a fresh one starts, on the same faces (cheaper than a new one): no
+        /// key down, the pages and the dialogs as a new window has them, no focus, nothing kept in egui; a second
+        /// later on egui's clock, so no click before is part of a double click with the next; a first frame drawn.
+        pub(crate) fn restart(&mut self, session: Session) {
+            self.session = session;
+            self.pages = Pages::default();
+            self.dialogs = Dialogs::default();
+            self.ctx.memory_mut(|memory| {
+                if let Some(focused) = memory.focused() {
+                    memory.surrender_focus(focused);
+                }
+            });
+            self.ctx.data_mut(egui::util::IdTypeMap::clear);
+            let down: Vec<Key> = self.ctx.input(|input| input.keys_down.iter().copied().collect());
+            self.time += 1.0;
+            self.frame(down.into_iter().map(|key| key_event(key, false, false, Modifiers::NONE)).collect());
+            self.frame(Vec::new());
+        }
+
+        /// The texts the last frame painted whose middle lies in `room`, with where each lies.
+        pub(crate) fn texts_in(&self, room: Rect) -> Vec<(String, Rect)> {
+            self.texts.iter().filter(|(_, rect, _)| room.contains(rect.center())).map(|(words, rect, _)| (words.clone(), *rect)).collect()
+        }
+
+        /// The row buttons of the fork of `owner` in the last frame: open the folder and open on GitHub.
+        pub(crate) fn row_buttons_of(&self, owner: &str) -> [Option<Rect>; 2] {
+            self.buttons(owner)
+        }
+
+        /// Every control of the forks' top row and toolbar in the last frame, with its words.
+        pub(crate) fn controls(&self) -> &[(String, Rect)] {
+            &self.controls
+        }
+
         pub(crate) fn frame(&mut self, events: Vec<Event>) {
             self.time += self.step;
             let window = Rect::from_min_size(Pos2::ZERO, vec2(self.size[0], self.size[1]));
@@ -2345,6 +2379,26 @@ pub(crate) mod tests {
         after.sort();
         assert_eq!(after, ["bob", "eve"], "the rows did not change after the fetch");
         win.session.close();
+    }
+
+    #[test]
+    fn a_double_click_on_back_goes_back_and_leaves_the_sidebar_alone() {
+        // The second click lands where back was: on the sidebar's button, once the table is back. It is the rest of
+        // one press, which acts once.
+        let mut win = Win::demo();
+        win.step = 0.02;
+        let at = win.pages_layout().toggle.center();
+        win.click(at);
+        win.click(at);
+        win.frame(Vec::new());
+        assert!(win.repos().forks.is_none(), "back did nothing");
+        assert!(win.pages.sidebar_shown, "the second click of the double click hid the sidebar");
+        // A click of its own, later, is one.
+        win.step = 1.0;
+        win.frame(Vec::new());
+        win.step = 0.02;
+        win.click(at);
+        assert!(!win.pages.sidebar_shown, "a click of its own on the sidebar's button did nothing");
     }
 
     #[test]

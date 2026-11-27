@@ -2115,15 +2115,8 @@ mod tests {
 
     #[test]
     fn a_double_click_on_a_button_acts_once() {
-        // While a fetch runs, "Update all" and the bar's Update queue their run: a double click queues one.
-        let mut busy = devassist_core::repos::state::testing::grouped_app();
-        busy.busy = true;
-        busy.marked = vec!["api".to_owned()];
-        let ctx = context();
-        let mut session = Session::Live(Box::new(busy));
-        let mut screen = Screen::default();
-        frame(&ctx, &mut session, &mut screen, Vec::new());
-        for (at, time) in [(top_item(&session, TOP_UPDATE_ALL).center(), 1.0), (bar_item(&session, BAR_UPDATE).center(), 5.0)] {
+        // A quick double click at `at`, its clicks from egui's clock `time`, on the screen of `session`.
+        let double_click = |ctx: &Context, session: &mut Session, screen: &mut Screen, at: Pos2, time: f64| {
             let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
             let frames = [
                 (time, vec![Event::PointerMoved(at)]),
@@ -2141,14 +2134,35 @@ mod tests {
                     ..Default::default()
                 };
                 ctx.run_ui(input, |ui| {
-                    let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, has_toolbar(&session));
-                    let plan = plan(ui.painter(), &layout, &session);
-                    show(ui, &layout, plan.as_ref(), &mut session, Some(&sheet()), Mode::Light, &mut screen, true);
+                    let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, has_toolbar(session));
+                    let plan = plan(ui.painter(), &layout, session);
+                    show(ui, &layout, plan.as_ref(), session, Some(&sheet()), Mode::Light, screen, true);
                 })
                 .drop_without_applying_deltas();
             }
+        };
+        // While a fetch runs, "Update all" and the bar's Update queue their run: a double click queues one.
+        let mut busy = devassist_core::repos::state::testing::grouped_app();
+        busy.busy = true;
+        busy.marked = vec!["api".to_owned()];
+        let ctx = context();
+        let mut session = Session::Live(Box::new(busy));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        for (at, time) in [(top_item(&session, TOP_UPDATE_ALL).center(), 1.0), (bar_item(&session, BAR_UPDATE).center(), 5.0)] {
+            double_click(&ctx, &mut session, &mut screen, at, time);
         }
         assert_eq!(repos(&session).queue.len(), 2, "each button queued one run, not one a click");
+        // "Update all forks" asks the core once: the held demo, whose api has forks, refuses the run once.
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        let stamp = repos(&session).status_stamp();
+        let at = top_item(&session, TOP_UPDATE_ALL_FORKS).center();
+        double_click(&ctx, &mut session, &mut screen, at, 1.0);
+        assert_eq!(repos(&session).status, devassist_core::repos::state::HELD, "Update all forks was not pressed");
+        assert_eq!(repos(&session).status_stamp(), stamp + 1, "a double click on Update all forks asked twice");
     }
 
     #[test]

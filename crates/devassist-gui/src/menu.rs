@@ -1481,14 +1481,12 @@ mod tests {
         // the fetch in the progress dialog, which counts the forks; the forks folder is there after it, and the menu
         // then offers to update them.
         let _live = crate::session::tests::live_git();
+        // Should the rewrite of GitHub's address to the folder be wrong, git reaches no network: it may use no
+        // transport but the local one.
+        let _local = devassist_core::repos::gitops::local_git_only();
         let forks = LocalForks::new("menu-clone");
-        let mut repos = Repos::new(forks.settings());
-        devassist_core::repos::state::testing::hold_github(&mut repos);
-        let remotes = forks.remotes();
-        let remotes: Vec<(&str, &std::path::Path)> = remotes.iter().map(|(owner, folder)| (*owner, folder.as_path())).collect();
-        devassist_core::repos::state::testing::local_forks(&mut repos, &remotes);
-        let mut window = Window::new(Session::Live(Box::new(repos)));
-        until(&mut window, "read", |window| !window.repos().waiting() && window.repos().installed.len() == 1);
+        let asks = TOKEN_ASKS.load(std::sync::atomic::Ordering::SeqCst);
+        let mut window = forks.window();
         window.frame(Vec::new());
         assert!(!devassist_core::repos::gitops::forks_cloned(&forks.api()), "the forks are cloned already");
         open_on(&mut window, "api");
@@ -1514,6 +1512,156 @@ mod tests {
         assert_eq!(window.repos().menu.as_ref().unwrap().label(MenuItem::Forks), "Update the forks");
         assert!(painted(&window, "Update the forks"));
         window.session.close();
+        assert_eq!(TOKEN_ASKS.load(std::sync::atomic::Ordering::SeqCst), asks, "a token for GitHub was asked for");
+    }
+
+    /// How often a test's core asked for a token for GitHub ([`no_token`]).
+    static TOKEN_ASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// The token source of the tests that fetch forks from this disk: it counts the asks and gives none.
+    fn no_token() -> Option<String> {
+        TOKEN_ASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        None
+    }
+
+    /// `key` (typing `text`) pressed in the menu at egui's clock `time` and held while the run its line starts opens
+    /// its progress dialog, and on: the held key closes, hides and cancels nothing there.
+    fn held_into_the_dialog(window: &mut Window, key: Key, text: Option<&str>, time: f64, what: &str) {
+        let down = |repeat| {
+            let mut events = vec![Event::Key { key, physical_key: None, pressed: true, repeat, modifiers: Modifiers::NONE }];
+            events.extend(text.map(|text| Event::Text(text.to_owned())));
+            events
+        };
+        let mut time = time;
+        window.frame_at(down(false), Some(time));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while !window.shows(Which::Progress) || !window.painted {
+            assert!(std::time::Instant::now() < deadline, "{what}: the dialog did not open");
+            window.session.tick();
+            time += 0.03;
+            window.frame_at(down(true), Some(time));
+        }
+        for _ in 0..6 {
+            time += 0.03;
+            window.frame_at(down(true), Some(time));
+            assert!(window.shows(Which::Progress), "{what}: the held key closed or hid the dialog");
+            assert!(!window.job().cancelling, "{what}: the held key cancelled the run");
+        }
+        window.frame_at(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }], Some(time + 0.03));
+    }
+
+    /// Where the pointer and the keys go in [`a_press_that_starts_a_forks_run_presses_nothing_in_its_dialog`].
+    #[derive(Clone, Copy, Debug)]
+    enum Starts {
+        /// The line's letter, held.
+        HeldLetter,
+        /// Enter on the highlighted line, held.
+        HeldEnter,
+        /// A double click on the line.
+        DoubleClick,
+    }
+
+    #[test]
+    fn a_press_that_starts_a_forks_run_presses_nothing_in_its_dialog() {
+        // Live, the forks from this disk, GitHub held, git held to local folders: "Clone the forks" (then "Update the
+        // forks") and the all-forks line, each by a held letter, a held Enter and a double click whose second click
+        // lands on a button of the progress dialog that opens. The run goes on to its end: the press neither cancels
+        // it nor hides or closes its dialog.
+        use crate::dialogs::testing::{fetch_session, run, session_with};
+        let _live = crate::session::tests::live_git();
+        let _local = devassist_core::repos::gitops::local_git_only();
+        let forks = LocalForks::new("menu-forks-press");
+        let asks = TOKEN_ASKS.load(std::sync::atomic::Ordering::SeqCst);
+        // The dialog's buttons as it opens (no count yet) and once it counts: the double click's second click is on a
+        // button that stands there in both.
+        let offsets = |session: Session| {
+            let mut probe = Window::new(session);
+            probe.frame(Vec::new());
+            probe.frame(Vec::new());
+            button_offsets(&probe)
+        };
+        let plain = offsets(session_with(run(&["api"], 1)));
+        let into = forks.api().with_file_name("api-fork");
+        let counted = offsets(fetch_session(&[
+            (devassist_core::repos::forklines::total(2, &into), false),
+            (devassist_core::repos::forklines::fetching(0, 2), true),
+        ]));
+        let both: Vec<(Rect, String)> = plain
+            .iter()
+            .filter_map(|(rect, words)| counted.iter().find(|(_, other)| other == words).map(|(other, _)| (rect.intersect(*other), words.clone())))
+            .filter(|(rect, _)| rect.width() > 8.0 && rect.height() > 8.0)
+            .collect();
+        assert!(!both.is_empty(), "no button stands in the same place before and after the count: {plain:?} {counted:?}");
+        let mut window = forks.window();
+        let mut clock = 10.0;
+        for item in [MenuItem::Forks, MenuItem::AllForks] {
+            for by in [Starts::HeldLetter, Starts::HeldEnter, Starts::DoubleClick] {
+                let what = format!("{item:?} by {by:?}");
+                let (size, _, at, words) = overlap(
+                    window.repos(),
+                    &["api"],
+                    line_of(item),
+                    &both,
+                    &(960..=1400).step_by(20).collect::<Vec<_>>(),
+                    &(600..=1400).step_by(10).collect::<Vec<_>>(),
+                );
+                window.size = size;
+                window.frame_at(Vec::new(), Some(clock));
+                let dots = dots(&window, "api").center();
+                click_at_time(&mut window, dots, clock + 0.5);
+                window.frame_at(Vec::new(), Some(clock + 0.6));
+                window.frame_at(Vec::new(), Some(clock + 0.7));
+                assert!(window.shows(Which::Menu), "{what}: no menu");
+                match by {
+                    Starts::HeldLetter | Starts::HeldEnter => {
+                        let (key, text) = if let Starts::HeldLetter = by {
+                            let letter = item.key().to_string();
+                            (Key::from_name(&letter.to_uppercase()).unwrap(), Some(letter))
+                        } else {
+                            window.session.repos_mut().unwrap().highlight_menu(item);
+                            window.frame_at(Vec::new(), Some(clock + 0.8));
+                            (Key::Enter, None)
+                        };
+                        held_into_the_dialog(&mut window, key, text.as_deref(), clock + 1.0, &what);
+                    }
+                    Starts::DoubleClick => {
+                        assert!(rows(&window)[line_of(item)].contains(at), "{what}: the point is not on the line");
+                        click_at_time(&mut window, at, clock + 5.0);
+                        // egui's clock stands still while the run starts and its dialog opens.
+                        let mut time = clock + 5.06;
+                        while !window.shows(Which::Progress) || !window.painted {
+                            window.session.tick();
+                            window.frame_at(Vec::new(), Some(time));
+                            time += 0.0001;
+                            assert!(window.repos().status != HELD, "{what}: the run was refused");
+                        }
+                        assert!(
+                            window.buttons().iter().any(|(place, said)| *said == words && place.contains(at)),
+                            "{what}: the point is not on {words}"
+                        );
+                        click_at_time(&mut window, at, clock + 5.2);
+                        window.frame_at(Vec::new(), Some(clock + 5.3));
+                    }
+                }
+                assert!(window.shows(Which::Progress), "{what}: the press closed or hid the dialog");
+                assert!(!window.job().cancelling, "{what}: the press cancelled the run");
+                until(&mut window, "ended", |window| window.repos().job.as_ref().is_some_and(|job| !job.running()) && !window.repos().busy);
+                let job = window.job();
+                assert!(matches!(job.result, Some(Ok(_))), "{what}: {:?} {:?}", job.result, job.items[0].output);
+                assert!(window.shows(Which::Progress), "{what}: the dialog went before its run ended");
+                clock += 20.0;
+                let close = window.buttons().into_iter().find(|(_, said)| said == "Close").map(|(place, _)| place.center());
+                click_at_time(&mut window, close.unwrap_or_else(|| panic!("{what}: no Close")), clock);
+                for step in 1..=10 {
+                    window.frame_at(Vec::new(), Some(clock + 0.05 * f64::from(step)));
+                }
+                assert!(!window.open(), "{what}: Close left the dialog open");
+                clock += 20.0;
+            }
+        }
+        assert!(devassist_core::repos::gitops::forks_cloned(&forks.api()));
+        window.session.close();
+        assert_eq!(TOKEN_ASKS.load(std::sync::atomic::Ordering::SeqCst), asks, "a token for GitHub was asked for");
     }
 
     /// An original "on GitHub" with two forks that have commits of their own, all on this disk, and a checkout of the
@@ -1567,6 +1715,20 @@ mod tests {
         /// The accounts and their repositories on this disk, the original's among them.
         fn remotes(&self) -> Vec<(&'static str, std::path::PathBuf)> {
             ["ada", "bob", "eve"].map(|owner| (owner, self.0.0.join(owner))).into()
+        }
+
+        /// A live window on api, read: GitHub held, the forks' list from [`LocalForks::remotes`], and a token
+        /// source that counts its asks and gives none ([`no_token`]).
+        fn window(&self) -> Window {
+            let mut repos = Repos::new(self.settings());
+            devassist_core::repos::state::testing::hold_github(&mut repos);
+            devassist_core::repos::state::testing::token_source(&mut repos, no_token);
+            let remotes = self.remotes();
+            let remotes: Vec<(&str, &std::path::Path)> = remotes.iter().map(|(owner, folder)| (*owner, folder.as_path())).collect();
+            devassist_core::repos::state::testing::local_forks(&mut repos, &remotes);
+            let mut window = Window::new(Session::Live(Box::new(repos)));
+            until(&mut window, "read", |window| !window.repos().waiting() && window.repos().installed.len() == 1);
+            window
         }
     }
 

@@ -661,6 +661,10 @@ enum Pointing {
     Control(&'static str),
     /// On a row's button: of the fork of this owner, the folder's (0) or GitHub's (1), on the hover's fill.
     RowButton(&'static str, usize),
+    /// Nowhere, the keyboard in the filter (`/` typed): the field with its focus ring.
+    Typing,
+    /// Nowhere, in windows where the status bar's notes (the folder, the day of the fetch) give way to its sentence.
+    Narrow,
 }
 
 /// What the rows of a dialog's folder field show in a shot over [`Over::Rows`].
@@ -737,7 +741,7 @@ struct Shot {
 /// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was); the
 /// Add and the Import dialog with their folder field's rows shown on their own glass, the first row lit and under
 /// the pointer; the progress dialog of a fetch of forks paused, counting, ended, and into a folder it cuts.
-const SHOTS: [Shot; 65] = [
+const SHOTS: [Shot; 72] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -918,6 +922,9 @@ const SHOTS: [Shot; 65] = [
     },
     Shot { name: "add repository hovered", over: Over::MainHovered, set_up: |_| {} },
     Shot { name: "update all forks hovered", over: Over::TopHovered(UPDATE_ALL_FORKS), set_up: |_| {} },
+    // The capsule's two others under the pointer, now that it has three items.
+    Shot { name: "import hovered", over: Over::TopHovered("Import"), set_up: |_| {} },
+    Shot { name: "update all hovered", over: Over::TopHovered("Update all"), set_up: |_| {} },
     Shot { name: "move", over: Over::Dialog, set_up: |repos| demo::show(repos, "move").unwrap() },
     // The same, with api's forks folder unable to follow (its note under the rows: see `MOVE_FORKS_STAY`).
     Shot { name: MOVE_FORKS_STAY, over: Over::Dialog, set_up: |repos| demo::show(repos, "move").unwrap() },
@@ -1055,6 +1062,36 @@ const SHOTS: [Shot; 65] = [
             repos.forks.as_mut().unwrap().error = Some("the folder could not be read".to_owned());
         },
     },
+    // The sort capsule in its other two words, the arrow on the head of the column sorted by.
+    Shot {
+        name: "forks sort newest",
+        over: Over::Forks(Pointing::Nowhere),
+        set_up: |repos| {
+            set_up_forks_counted(repos);
+            repos.set_fork_sort(devassist_core::repos::state::ForkSort::Newest);
+        },
+    },
+    Shot {
+        name: "forks sort by name",
+        over: Over::Forks(Pointing::Nowhere),
+        set_up: |repos| {
+            set_up_forks_counted(repos);
+            repos.set_fork_sort(devassist_core::repos::state::ForkSort::Name);
+        },
+    },
+    // The filter with the keyboard: its focus ring, and its hint while it is empty.
+    Shot { name: "forks filter focused", over: Over::Forks(Pointing::Typing), set_up: set_up_forks_counted },
+    // The status bar's sentence alone, its notes given way.
+    Shot { name: "forks status narrow", over: Over::Forks(Pointing::Narrow), set_up: set_up_forks },
+    // The panel's sentence for a filter nothing matches.
+    Shot {
+        name: "forks no match",
+        over: Over::Forks(Pointing::Nowhere),
+        set_up: |repos| {
+            set_up_forks(repos);
+            repos.set_fork_filter("zzzz");
+        },
+    },
     // The panel's sentence instead of the rows: nothing in the folder, the folder being read, and an error.
     Shot {
         name: "forks empty",
@@ -1131,8 +1168,11 @@ fn set_up_forks_counted(repos: &mut Repos) {
 
 /// The shots of the forks screen that measure its top row and its toolbar, besides its panel and status bar; the
 /// others measure the panel, the status bar, the button back and the title.
-const FORKS_CONTROL_SHOTS: [&str; 8] = [
+const FORKS_CONTROL_SHOTS: [&str; 11] = [
     "forks controls",
+    "forks sort newest",
+    "forks sort by name",
+    "forks filter focused",
     "forks read again hovered",
     "forks open hovered",
     "forks fetch hovered",
@@ -1184,6 +1224,9 @@ fn sizes(over: Over) -> &'static [[f32; 2]] {
         // The forks' top row has all its words in the design's window, its icons alone in the smallest the app
         // allows, and the main button's icon too where the top row gives way further.
         Over::Forks(Pointing::Control(words)) if FORKS_TOP.contains(&words) => &[WINDOW, MIN_WINDOW, TOP_BARE],
+        // The status bar's notes give way to its sentence in the smallest window the app allows (narrower still, the
+        // sentence is cut too).
+        Over::Forks(Pointing::Narrow) => &[MIN_WINDOW],
         _ => &[WINDOW, MIN_WINDOW],
     }
 }
@@ -1653,7 +1696,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             menu,
             menu_lit: menu_lit(&session),
             add_lit: add_lit(&session, &rows),
-            forks: (forks.rows.clone(), forks.pointer.map(|(_, rect)| rect)),
+            forks: (forks.rows.clone(), forks.pointer.map(|(_, rect)| rect).or(forks.typing)),
             forks_chosen: forks.chosen,
         });
     }
@@ -1695,7 +1738,7 @@ fn screen_plans(
 /// status bar and title the forks' while they show (`forks`, the title as their plan shows it), else the Repositories
 /// screen's.
 fn draw_shell(ui: &mut egui::Ui, shot: &Shot, layout: &shell::Layout, session: &Session, forks: Option<&forks_screen::Plan>, mode: Mode) {
-    if !shot.over.is_screen() {
+    if !shot.over.is_screen() && shot.name != WHOLE_MENU {
         return;
     }
     let status = session.repos().and_then(forks_screen::status).or_else(|| repos_screen::status(session));
@@ -1712,12 +1755,18 @@ struct ForksShot {
     pointer: Option<(Pos2, Rect)>,
     /// The chosen segment, where it was drawn.
     chosen: Option<Rect>,
+    /// The filter field, where it was drawn, in a shot that types `/` to give it the keyboard.
+    typing: Option<Rect>,
 }
 
 impl ForksShot {
     /// The pointer's move onto what the shot rests it on, from the frame after the first.
     fn events(&self, frame: usize) -> Vec<egui::Event> {
-        self.pointer.filter(|_| frame >= 1).map(|(at, _)| egui::Event::PointerMoved(at)).into_iter().collect()
+        let mut events: Vec<egui::Event> = self.pointer.filter(|_| frame >= 1).map(|(at, _)| egui::Event::PointerMoved(at)).into_iter().collect();
+        if self.typing.is_some() && frame == 1 {
+            events.push(egui::Event::Text("/".to_owned()));
+        }
+        events
     }
 
     /// Draws the forks screen of `session` in `layout` when it shows, taking no press, and notes its rows and where
@@ -1757,6 +1806,7 @@ impl ForksShot {
             Over::Forks(Pointing::Back) => Some((layout.toggle.center(), layout.toggle)),
             _ => None,
         };
+        self.typing = (shot.over == Over::Forks(Pointing::Typing)).then(|| control("Filter by owner or name")).flatten();
         true
     }
 }
@@ -1920,6 +1970,72 @@ fn state_lands(shot: &Shot, last: &Frame, size: egui::Vec2, mode: Mode) {
         Over::Forks(pointing) => forks_state_lands(last, pointing, &format!("{name} at {size:?} in {mode:?}"), mode),
         _ => {}
     }
+    claims_land(shot, last, &format!("{name} at {size:?} in {mode:?}"));
+}
+
+/// The words of the texts `last` drew whose middle lies in `room`.
+fn texts_in(last: &Frame, room: Rect) -> Vec<String> {
+    last.shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            Shape::Text(text) if room.contains(text.galley.rect.translate(text.pos.to_vec2()).center()) => Some(text.galley.text().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Checks that the frame `last` of `shot` draws what the shot's set-up makes the core say, so that the state the shot
+/// names is what was measured: a fetch's pause while the core reports one (and none once it goes on or the run ended),
+/// Close once it ended, the task list of a fetch of several; the forks' sentence for an empty panel, the sort's words
+/// and one arrow in the head row; with the keyboard in the filter, the focus there; in a narrow window, the status
+/// bar's sentence without its notes.
+fn claims_land(shot: &Shot, last: &Frame, what: &str) {
+    let mut probe = demo::repos();
+    (shot.set_up)(&mut probe);
+    let window = Rect::from_min_size(Pos2::ZERO, vec2(f32::INFINITY, f32::INFINITY));
+    let all = texts_in(last, window);
+    if let Some(progress) = probe.fork_progress().filter(|_| shot.over == Over::Dialog) {
+        let finished = shot.name == FETCH_FINISHED;
+        // The pause's sentence under the count, not the output's line that said the pause began.
+        let paused = all.iter().any(|words| words.contains("going on in"));
+        match progress.pause.filter(|_| !finished) {
+            Some(pause) => assert!(all.contains(&pause), "{what}: the pause {pause:?} is not drawn"),
+            None => assert!(!paused, "{what}: a pause is drawn"),
+        }
+        let count = format!("{} of {} forks, {} at a time", progress.done, progress.total, progress.at_a_time);
+        assert!(all.contains(&count), "{what}: the count {count:?} is not drawn");
+        if finished {
+            assert!(all.iter().any(|words| words == "Close") && !all.iter().any(|words| words == "Cancel"), "{what}: the run is not drawn ended");
+        }
+    }
+    let Over::Forks(pointing) = shot.over else { return };
+    let view = probe.forks.as_ref().unwrap_or_else(|| panic!("{what}: the forks are not open"));
+    let panel = texts_in(last, last.layout.panel);
+    if let Some(empty) = view.empty_message() {
+        assert!(panel.iter().any(|words| words == empty.trim()), "{what}: the panel does not say {empty:?}");
+    } else {
+        let arrow = assets::icon(Icon::ArrowDown).to_string();
+        let arrows = texts_in(last, table::head_rect(last.layout.panel)).into_iter().filter(|words| *words == arrow).count();
+        // Sorted by the newest commit in a panel too narrow for that column, the arrow has no head to stand after
+        // (the column gives way first): none is drawn.
+        let gone =
+            view.sort == devassist_core::repos::state::ForkSort::Newest && crate::columns::fork_columns(last.layout.panel.width()).newest.is_none();
+        assert_eq!(arrows, usize::from(!gone), "{what}: not the sort's arrow in the head row");
+    }
+    if FORKS_CONTROL_SHOTS.contains(&shot.name) {
+        let sort = widgets::capitalised(view.sort.label());
+        let compact = last.layout.toolbar.width() < 700.0;
+        assert!(compact || texts_in(last, last.layout.toolbar).contains(&sort), "{what}: the sort does not say {sort:?}");
+    }
+    match pointing {
+        Pointing::Typing => assert!(last.ctx.memory(|memory| memory.focused().is_some()), "{what}: the filter has no keyboard"),
+        Pointing::Narrow => {
+            let bar = texts_in(last, last.layout.status);
+            assert!(bar.contains(&view.summary()), "{what}: the status bar does not say the forks' sentence: {bar:?}");
+            assert!(!bar.iter().any(|words| words.contains("api-fork") || words.starts_with("Fetched")), "{what}: the notes stayed: {bar:?}");
+        }
+        _ => {}
+    }
 }
 
 /// Checks that a shot of the forks screen draws what it claims: with rows, one highlighted row whole on the
@@ -1970,7 +2086,8 @@ fn forks_state_lands(last: &Frame, pointing: Pointing, what: &str, mode: Mode) {
             let button = last.forks.1.unwrap_or_else(|| panic!("{what}: no button of {owner}"));
             assert!(filled_rect(hover, button), "{what}: the button of {owner} is not on the hover's fill");
         }
-        Pointing::Nowhere => {}
+        // Checked by what the set-up makes the core say (`claims_land`).
+        Pointing::Nowhere | Pointing::Typing | Pointing::Narrow => {}
     }
     if let Some(chosen) = last.forks_chosen {
         assert!(filled_rect(palette.selection, chosen), "{what}: the chosen segment is not on the selection's fill");
@@ -2258,6 +2375,35 @@ fn every_text_of_the_dialogs_the_menu_and_the_selection_bar_holds_its_contrast_o
 /// and where the top row gives way, in windows narrower than that ([`TOP_ROW_SIZES`]), light and dark, drawn as the shots are (the glass frosted on the CPU, on the first backdrop),
 /// into the folder the environment variable `DEVASSIST_PICTURES` names. Run by hand with `--ignored`; without the
 /// variable it draws nothing.
+/// The picture of the demo's menu (`--show menu`) with the window around it, its top row and status bar: no shot,
+/// as the shots of the menu draw no shell under it.
+const WHOLE_MENU: &str = "menu in the whole window";
+
+/// Not a check: pictures of `--demo --show menu` in the smallest window the app allows, light and dark, the shell
+/// drawn under the menu as the window draws it, drawn as the shots are (the glass frosted on the CPU, on the first
+/// backdrop), into the folder the environment variable `DEVASSIST_PICTURES` names as `f8-menu-960-light.png` and
+/// `f8-menu-960-dark.png`. Run by hand with `--ignored`; without the variable it draws nothing.
+#[test]
+#[ignore = "draws pictures for a person to look at"]
+fn pictures_of_the_menu_in_the_smallest_window() {
+    let Ok(folder) = std::env::var("DEVASSIST_PICTURES") else { return };
+    let shot = Shot { name: WHOLE_MENU, over: Over::Menu, set_up: |repos| demo::show(repos, "menu").unwrap() };
+    for mode in [Mode::Light, Mode::Dark] {
+        let scene = Scene { size: MIN_WINDOW, pixels_per_point: 1.0, mode, backdrop: BACKDROPS[0].to_owned(), blur: true };
+        let stage = Stage::new(scene, Rendering::Frosted);
+        let mut textures = HashMap::new();
+        let frame = draw_shot(&shot, &stage, &mut textures);
+        let mut bitmap = stage.window.clone();
+        lay_panes(&mut bitmap, &stage, &frame.wants);
+        picture::paint(&mut bitmap, &frame.ctx.tessellate(frame.shapes, 1.0), &textures);
+        let name = format!("f8-menu-960-{}.png", if mode == Mode::Dark { "dark" } else { "light" });
+        crate::screenshot::write_png(&std::path::Path::new(&folder).join(name), &bitmap.image()).unwrap();
+        if let Some((pane, _)) = frame.menu {
+            eprintln!("{mode:?}: the menu's pane {pane:?}, the top row {:?}, the window's buttons {:?}", frame.layout.actions, frame.layout.captions);
+        }
+    }
+}
+
 #[test]
 #[ignore = "draws pictures for a person to look at"]
 fn pictures_of_the_top_row_where_it_gives_way() {

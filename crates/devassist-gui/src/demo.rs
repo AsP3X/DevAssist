@@ -489,8 +489,11 @@ mod tests {
     use devassist_core::task::job::ItemState;
     use egui::{Event, Key, Modifiers};
 
+    use devassist_core::repos::state::ForksView;
+
     use crate::dialogs::Which;
     use crate::dialogs::testing::Window;
+    use crate::forks_screen::tests::Win;
     use crate::repos_screen::{self, Command};
     use crate::{menu, table};
 
@@ -735,7 +738,11 @@ mod tests {
 
     /// Checks, after the press `what`, that the demo ran and wrote nothing and reached nothing since `before`.
     fn still_held(window: &Window, what: &str, expect: Expect, before: [usize; 5]) {
-        let repos = window.repos();
+        held_in(window.repos(), what, expect, before);
+    }
+
+    /// [`still_held`] for the demo's `repos`, whichever window shows them.
+    fn held_in(repos: &Repos, what: &str, expect: Expect, before: [usize; 5]) {
         assert!(repos.work_held(), "{what}: the demo's work is no longer held");
         assert!(!repos.busy && !repos.fetching && !repos.waiting(), "{what}: the core is busy");
         assert!(repos.queue.is_empty(), "{what}: work was queued: {}", repos.queue.len());
@@ -788,7 +795,11 @@ mod tests {
     /// Checks, after the press `what`, that the status line says what `says` allows, and no other words: a refusal
     /// only where the press is meant to be refused, and then in the core's exact words, and never an error otherwise.
     fn check_said(window: &Window, what: &str, says: Says<'_>) {
-        let repos = window.repos();
+        said_in(window.repos(), what, says);
+    }
+
+    /// [`check_said`] for the demo's `repos`, whichever window shows them.
+    fn said_in(repos: &Repos, what: &str, says: Says<'_>) {
         let running =
             matches!(says, Says::HeldOrFetching) && repos.job.as_ref().is_some_and(|job| job.running() && repos.status == format!("{}…", job.title));
         let quiet = (repos.status == STATUS || repos.status == devassist_core::repos::state::HELD || running) && !repos.status_error;
@@ -847,6 +858,15 @@ mod tests {
         type_into_every_field(&mut window, before);
         press_retry_in_add(&mut window, before);
         open_each_overlay_in_turn_on_one_window(before);
+        // The forks screen, as the window's pages draw it (the shell, the forks or the table, the dialogs over them).
+        let mut win = Win::new(crate::session::Session::demo(repos()));
+        win.step = 0.02;
+        press_every_key_on_the_forks(&mut win, before);
+        click_everything_on_the_forks(&mut win, before);
+        type_into_the_forks_filter(&mut win, before);
+        walk_the_fetch_dialog_over_the_forks(&mut win, before);
+        walk_the_ways_into_the_forks(&mut win, before);
+        through_the_forks_and_back_on_one_window(&mut win, before);
     }
 
     /// Windows narrower than the app allows, where the top row gives way: its capsule's icons only, then the main
@@ -1425,19 +1445,7 @@ mod tests {
     /// Push's fields. Folders under the demo's made-up one are suggested from the demo's own list; nothing runs, is
     /// written or reaches out.
     fn type_into_every_field(window: &mut Window, before: [usize; 5]) {
-        let sep = std::path::MAIN_SEPARATOR;
-        let typed = [
-            "work".to_owned(),
-            format!("{sep}"),
-            format!("{CODE_DIR}{sep}"),
-            format!("{CODE_DIR}{sep}w"),
-            "acme/".to_owned(),
-            "zzzz".to_owned(),
-            "~/code".to_owned(),
-            "\"quoted folder\"".to_owned(),
-            "git@codeberg.org:acme/web.git".to_owned(),
-            "https://gitlab.com/acme/web.git".to_owned(),
-        ];
+        let typed = walked_words();
         let fields: [(&str, Opener, Prepare); 5] = [
             ("add", show_add, as_opened),
             (ADD_FOLDER, show_add, into_the_folder_field),
@@ -1469,6 +1477,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The words the walk types into every field: a folder's name, separators, the demo's made-up folders, an
+    /// account, a word nothing matches, a home folder, quotes, and two addresses.
+    fn walked_words() -> [String; 10] {
+        let sep = std::path::MAIN_SEPARATOR;
+        [
+            "work".to_owned(),
+            format!("{sep}"),
+            format!("{CODE_DIR}{sep}"),
+            format!("{CODE_DIR}{sep}w"),
+            "acme/".to_owned(),
+            "zzzz".to_owned(),
+            "~/code".to_owned(),
+            "\"quoted folder\"".to_owned(),
+            "git@codeberg.org:acme/web.git".to_owned(),
+            "https://gitlab.com/acme/web.git".to_owned(),
+        ]
     }
 
     /// The text of the field the dialog `name` of [`type_into_every_field`] has the keyboard in, where its owner keeps
@@ -1641,6 +1667,775 @@ mod tests {
 
     fn pos(x: f32, y: f32) -> egui::Pos2 {
         egui::pos2(x, y)
+    }
+
+    /// The head of the forks' table: drawn while the forks screen shows.
+    const FORKS_HEAD: &str = "Fork";
+    /// The head of the Repositories table: drawn while the table shows.
+    const TABLE_HEAD: &str = "Repository";
+
+    /// What the forks screen shows before a press, to tell what the press changed: the highlighted fork, the sort, the
+    /// segment, the filter, and how often the core has spoken.
+    #[derive(Clone, Debug, PartialEq)]
+    struct ForksNow {
+        chosen: Option<String>,
+        sort: devassist_core::repos::state::ForkSort,
+        changed_only: bool,
+        filter: String,
+        stamp: u64,
+    }
+
+    /// What `win`'s forks screen shows now; `None` while the forks are closed.
+    fn forks_now(win: &Win) -> Option<ForksNow> {
+        let repos = win.repos();
+        let view = repos.forks.as_ref()?;
+        Some(ForksNow {
+            chosen: view.chosen().map(|fork| fork.owner.clone()),
+            sort: view.sort,
+            changed_only: view.changed_only,
+            filter: view.filter.clone(),
+            stamp: repos.status_stamp(),
+        })
+    }
+
+    /// What one press on the forks screen must leave.
+    #[derive(Clone, Debug, PartialEq)]
+    enum OnForks {
+        /// Nothing changes at all: the forks open, the same highlight, sort, segment and filter, nothing said.
+        Nothing,
+        /// The highlight moves; nothing said.
+        Moved,
+        /// The highlight on this fork (a click on its row); nothing said.
+        Picked(String),
+        /// The held core refuses what was asked, once, saying so; all else as it was.
+        Held,
+        /// The held core refuses it once, saying so, this fork highlighted (its row's button, a double click on its
+        /// row).
+        HeldOn(String),
+        /// The core's notice that there is no run to show, once (`l` with no run).
+        NoRun,
+        /// Read again: the forks still shown, the same highlight, nothing said.
+        Read,
+        /// The core's next sort; nothing said.
+        Sorted,
+        /// The segment "With changes" (`true`) or "All" chosen; nothing said.
+        Segment(bool),
+        /// The other segment; nothing said.
+        Switched,
+        /// The keyboard in the filter, with this text; nothing said.
+        Typing(String),
+        /// The filter's text this, the keyboard out of it; nothing said.
+        Filtered(String),
+        /// Back to the Repositories table: the forks closed, the sidebar as it was.
+        Back,
+    }
+
+    /// The sort the core takes after `sort` (`Repos::cycle_fork_sort`), asked of a demo of its own.
+    fn next_sort(sort: devassist_core::repos::state::ForkSort) -> devassist_core::repos::state::ForkSort {
+        let mut probe = repos();
+        show_forks(&mut probe);
+        probe.set_fork_sort(sort);
+        probe.cycle_fork_sort();
+        probe.forks.as_ref().map_or(sort, |view| view.sort)
+    }
+
+    /// The core's notice for `l` with no run, asked of a demo of its own: its words, and that it is no error.
+    fn no_run() -> String {
+        let mut probe = repos();
+        probe.show_job();
+        assert!(!probe.status_error && probe.job.is_none(), "the core showed a run");
+        probe.status
+    }
+
+    /// The core's notice of "Show the forks" for `row` alone, whose forks are not cloned, in a window's words, asked
+    /// of a demo of its own.
+    fn not_cloned(row: &str) -> String {
+        let mut probe = repos();
+        probe.clear_marks();
+        probe.pick(row);
+        probe.open_forks_plain();
+        assert!(probe.status_error && probe.forks.is_none(), "the core opened the forks of {row}");
+        probe.status
+    }
+
+    /// Checks, after the press `what` on the forks screen of `win` (it showed `was` before), that nothing ran, was
+    /// written or reached out since `before`, that exactly one screen is drawn, and that the press left what `expect`
+    /// says: the forks' state, the core's notice in the status bar, and nothing else.
+    fn forks_left(win: &Win, what: &str, expect: &OnForks, was: &ForksNow, before: [usize; 5]) {
+        let repos = win.repos();
+        let held = matches!(expect, OnForks::Held | OnForks::HeldOn(_));
+        held_in(repos, what, if held { Expect::Held } else { Expect::Free }, before);
+        assert!(!crate::overlay::is_open(&win.ctx), "{what}: an overlay opened");
+        assert!(repos.job.is_none(), "{what}: a run was made");
+        if *expect == OnForks::Back {
+            assert!(repos.forks.is_none() && win.plan.is_none(), "{what}: the forks are still open");
+            assert!(win.drew(TABLE_HEAD) && !win.drew(FORKS_HEAD), "{what}: not the Repositories table alone");
+            assert!(win.pages.sidebar_shown, "{what}: the sidebar went");
+            said_in(repos, what, Says::HeldOrNothing);
+            return;
+        }
+        let now = forks_now(win).unwrap_or_else(|| panic!("{what}: the forks closed"));
+        assert!(win.plan.is_some() && !win.drew(TABLE_HEAD), "{what}: the forks screen is not drawn alone");
+        let mut wanted = ForksNow { stamp: was.stamp, ..was.clone() };
+        let mut notice = None;
+        match expect {
+            OnForks::Nothing | OnForks::Read | OnForks::Back => {}
+            OnForks::Moved => {
+                assert_ne!(now.chosen, was.chosen, "{what}: the highlight did not move");
+                wanted.chosen.clone_from(&now.chosen);
+            }
+            OnForks::Picked(owner) => wanted.chosen = Some(owner.clone()),
+            OnForks::Held | OnForks::HeldOn(_) => {
+                if let OnForks::HeldOn(owner) = expect {
+                    wanted.chosen = Some(owner.clone());
+                }
+                wanted.stamp += 1;
+                notice = Some((devassist_core::repos::state::HELD.to_owned(), false));
+            }
+            OnForks::NoRun => {
+                wanted.stamp += 1;
+                notice = Some((no_run(), false));
+            }
+            OnForks::Sorted => wanted.sort = next_sort(was.sort),
+            OnForks::Segment(on) => wanted.changed_only = *on,
+            OnForks::Switched => wanted.changed_only = !was.changed_only,
+            OnForks::Typing(text) | OnForks::Filtered(text) => {
+                assert_eq!(win.typing(), matches!(expect, OnForks::Typing(_)), "{what}: the filter's keyboard");
+                // What the filter shows decides what is highlighted.
+                wanted.filter.clone_from(text);
+                wanted.chosen.clone_from(&now.chosen);
+            }
+        }
+        assert_eq!(now, wanted, "{what}: the forks changed otherwise");
+        let said = repos.fork_notice().map(|(said, error)| (said.to_owned(), error));
+        assert_eq!(said, notice, "{what}: the core said otherwise");
+        // The status bar says it: the core's notice, else the forks' own sentence.
+        let bar = notice.map_or_else(|| repos.forks.as_ref().map_or_else(String::new, ForksView::summary), |(said, _)| said);
+        assert_eq!(win.status().0, bar, "{what}: the status bar says otherwise");
+        if *expect != OnForks::NoRun {
+            said_in(repos, what, Says::HeldOrNothing);
+        }
+    }
+
+    /// The walk's window on a fresh demo with `start` done to it.
+    fn fresh_win(win: &mut Win, start: impl FnOnce(&mut Repos)) {
+        let mut repos = repos();
+        start(&mut repos);
+        win.restart(crate::session::Session::demo(repos));
+    }
+
+    /// The walk's window on a fresh demo with the forks of api open, as `--show forks` opens them, showing the forks
+    /// screen alone with bob highlighted.
+    fn fresh_forks(win: &mut Win) {
+        fresh_win(win, show_forks);
+        assert!(win.plan.is_some() && win.drew(FORKS_HEAD) && !win.drew(TABLE_HEAD), "the forks screen is not shown alone");
+        assert_eq!(win.chosen().as_deref(), Some(FORK_HIGHLIGHTED));
+    }
+
+    /// What one input of [`every_input`] does on the forks screen with bob highlighted and no filter, as the
+    /// terminal's keys there are read: the window's own reading is not asked.
+    fn on_forks(press: &[Event]) -> OnForks {
+        match press {
+            [Event::Key { key, modifiers, .. }] if !(modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd) => match key {
+                Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End => OnForks::Moved,
+                // bob has a folder.
+                Key::Enter => OnForks::Held,
+                Key::Escape | Key::Backspace => OnForks::Back,
+                Key::F5 => OnForks::Read,
+                _ => OnForks::Nothing,
+            },
+            [Event::Text(typed)] => match typed.as_str() {
+                "j" | "k" => OnForks::Moved,
+                // Open bob's folder, his page on GitHub (he is there), fetch the forks.
+                "o" | "O" | "g" | "G" | "u" | "U" => OnForks::Held,
+                "r" => OnForks::Read,
+                "l" | "L" => OnForks::NoRun,
+                "s" | "S" => OnForks::Sorted,
+                "c" | "C" => OnForks::Switched,
+                "/" => OnForks::Typing(String::new()),
+                _ => OnForks::Nothing,
+            },
+            [Event::Text(slash), Event::Text(typed)] if slash == "/" => OnForks::Typing(typed.clone()),
+            _ => OnForks::Nothing,
+        }
+    }
+
+    /// Every input of [`every_input`] on the forks screen, each on a fresh one: whatever it is, nothing runs, is
+    /// written or reaches out, and it does what the terminal's key does there, or nothing; `q`, Left and the
+    /// Repositories screen's own keys do nothing at all.
+    fn press_every_key_on_the_forks(win: &mut Win, before: [usize; 5]) {
+        let mut seen: Vec<std::mem::Discriminant<OnForks>> = Vec::new();
+        for (press, release) in every_input() {
+            fresh_forks(win);
+            let was = forks_now(win).unwrap();
+            win.frame(press.clone());
+            win.frame(release);
+            win.frame(Vec::new());
+            let expect = on_forks(&press);
+            forks_left(win, &format!("{press:?} on the forks"), &expect, &was, before);
+            if !seen.contains(&std::mem::discriminant(&expect)) {
+                seen.push(std::mem::discriminant(&expect));
+            }
+        }
+        // Every key of the screen was among them: to move, open, read, show a run, sort, switch, filter, go back.
+        let keys = [
+            OnForks::Nothing,
+            OnForks::Moved,
+            OnForks::Held,
+            OnForks::NoRun,
+            OnForks::Read,
+            OnForks::Sorted,
+            OnForks::Switched,
+            OnForks::Typing(String::new()),
+            OnForks::Back,
+        ];
+        for kind in keys {
+            assert!(seen.contains(&std::mem::discriminant(&kind)), "no key of the forks did {kind:?}");
+        }
+        // The keys that open a fork, with a fork highlighted that has no folder (a-petrov) and the one gone from
+        // GitHub (old-contrib), and the top row's "Open the folder": the held core refuses before it looks at the fork,
+        // so the demo says its held notice, not why that fork cannot be opened (a live core's words, tested on the
+        // forks screen with a core that is not held).
+        for owner in ["a-petrov", FETCH_GONE] {
+            for (key, text) in [(Key::Enter, None), (Key::O, Some("o")), (Key::G, Some("g"))] {
+                fresh_forks(win);
+                win.repos_mut().pick_fork(owner);
+                win.frame(Vec::new());
+                let was = forks_now(win).unwrap();
+                assert_eq!(was.chosen.as_deref(), Some(owner));
+                win.key(key, text);
+                win.frame(Vec::new());
+                forks_left(win, &format!("{key:?} on {owner}"), &OnForks::Held, &was, before);
+            }
+            fresh_forks(win);
+            win.repos_mut().pick_fork(owner);
+            win.frame(Vec::new());
+            let was = forks_now(win).unwrap();
+            let open = win.control("Open the folder").center();
+            win.click(open);
+            win.frame(Vec::new());
+            forks_left(win, &format!("Open the folder on {owner}"), &OnForks::Held, &was, before);
+        }
+    }
+
+    /// Everything on the forks screen a person can point at, from the last frame of `win`, each with what a click and
+    /// a double click on it must leave: the button back, the top row's and the toolbar's controls; and in the
+    /// design's window (`rows`) every row (its name cell and each other cell's middle), both buttons of each row that
+    /// has them, the head row's cells, the status bar's items and the panel's room under the rows.
+    fn forks_presses(win: &Win, rows: bool) -> Vec<(String, egui::Pos2, OnForks, OnForks)> {
+        let layout = win.pages_layout();
+        let plan = win.plan.as_ref().expect("the forks are not shown");
+        let back = crate::assets::icon(crate::assets::Icon::ArrowLeft).to_string();
+        assert!(win.texts_in(layout.toggle).iter().any(|(words, _)| *words == back), "no button back");
+        let mut presses = vec![("the button back".to_owned(), layout.toggle.center(), OnForks::Back, OnForks::Back)];
+        let sort = widgets_capitalised(win);
+        for (words, rect) in win.controls() {
+            let (once, twice) = match words.as_str() {
+                "Filter by owner or name" => (OnForks::Typing(String::new()), OnForks::Typing(String::new())),
+                "All" => (OnForks::Segment(false), OnForks::Segment(false)),
+                "With changes" => (OnForks::Segment(true), OnForks::Segment(true)),
+                "Read again" => (OnForks::Read, OnForks::Read),
+                // bob, highlighted, has a folder; and the forks are fetched: refused, once.
+                "Open the folder" | "Fetch the forks" => (OnForks::Held, OnForks::Held),
+                // A double click sorts once.
+                said if said == sort => (OnForks::Sorted, OnForks::Sorted),
+                other => panic!("a control the walk does not know: {other}"),
+            };
+            // Drawn: its words where it has room for them, else its place in the plan, inside the window.
+            let room = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(win.size[0], win.size[1]));
+            assert!(rect.is_positive() && room.contains_rect(*rect), "{words}: not placed in the window");
+            if win.size == crate::theme::WINDOW && words != "Filter by owner or name" {
+                assert!(win.drew(words), "{words} is not drawn");
+            }
+            presses.push((words.clone(), rect.center(), once, twice));
+        }
+        if !rows {
+            return presses;
+        }
+        let body = table::body_rect(layout.panel);
+        let columns = plan.columns;
+        let mut last = body.top();
+        for row in &plan.rows {
+            let place = win.row(&row.owner);
+            assert!(body.contains_rect(place), "{}: not in view", row.owner);
+            assert!(win.drew(&row.fork.text), "{}: its row is not drawn", row.owner);
+            last = last.max(place.bottom());
+            let spans = [Some(columns.fork), columns.branches, columns.pulls, Some(columns.ahead), columns.newest, Some(columns.state)];
+            for span in spans.into_iter().flatten() {
+                let at = pos(place.left() + span.left + span.width / 2.0, place.center().y);
+                presses.push((
+                    format!("the row of {} at {at:?}", row.owner),
+                    at,
+                    OnForks::Picked(row.owner.clone()),
+                    OnForks::HeldOn(row.owner.clone()),
+                ));
+            }
+            let [folder, github] = win.row_buttons_of(&row.owner);
+            assert_eq!((folder.is_some(), github.is_some()), (row.folder, row.github), "{}: its buttons", row.owner);
+            for (button, name) in [(folder, "folder"), (github, "GitHub")] {
+                if let Some(button) = button {
+                    let once = OnForks::HeldOn(row.owner.clone());
+                    presses.push((format!("the {name} button of {}", row.owner), button.center(), once.clone(), once));
+                }
+            }
+        }
+        let head = table::head_rect(layout.panel);
+        let heads = win.texts_in(head);
+        assert!(heads.iter().any(|(words, _)| words == FORKS_HEAD), "the head row is not drawn: {heads:?}");
+        for (words, rect) in heads {
+            presses.push((format!("the head {words}"), rect.center(), OnForks::Nothing, OnForks::Nothing));
+        }
+        let items = win.texts_in(layout.status);
+        assert!(items.len() >= 2, "the status bar's items are not drawn: {items:?}");
+        for (words, rect) in items {
+            presses.push((format!("the status bar's {words}"), rect.center(), OnForks::Nothing, OnForks::Nothing));
+        }
+        let under = pos(body.center().x, f32::midpoint(last, body.bottom()));
+        assert!(under.y > last + 4.0 && body.contains(under), "no room under the rows");
+        presses.push(("the panel under the rows".to_owned(), under, OnForks::Nothing, OnForks::Nothing));
+        presses
+    }
+
+    /// The sort's words as the forks' toolbar shows them in `win`'s last frame.
+    fn widgets_capitalised(win: &Win) -> String {
+        crate::widgets::capitalised(win.view().sort.label())
+    }
+
+    /// Every place of [`forks_presses`] clicked and double-clicked, each on a fresh forks screen, in the design's window
+    /// and the smallest the app allows (where the top row shows its icons alone): each press lands, does what it is
+    /// for once, and nothing runs, is written or reaches out.
+    fn click_everything_on_the_forks(win: &mut Win, before: [usize; 5]) {
+        for size in [crate::theme::WINDOW, crate::theme::MIN_WINDOW] {
+            win.size = size;
+            fresh_forks(win);
+            let presses = forks_presses(win, size == crate::theme::WINDOW);
+            for (name, at, once, twice) in presses {
+                for double in [false, true] {
+                    fresh_forks(win);
+                    let was = forks_now(win).unwrap();
+                    win.click(at);
+                    if double {
+                        win.click(at);
+                    }
+                    win.frame(Vec::new());
+                    let what = format!("a {}click on {name} of the forks at {size:?}", if double { "double " } else { "" });
+                    forks_left(win, &what, if double { &twice } else { &once }, &was, before);
+                }
+            }
+        }
+        win.size = crate::theme::WINDOW;
+    }
+
+    /// The walk's words typed into the forks' filter, each on a fresh forks screen with the keyboard put there by `/`:
+    /// the text reaches the core's filter (`ForksView::filter`); then Esc clears it and keeps the keyboard there, Enter
+    /// leaves the field and keeps it, Down leaves it with the highlight where it was.
+    fn type_into_the_forks_filter(win: &mut Win, before: [usize; 5]) {
+        for words in walked_words() {
+            for then in [Key::Escape, Key::Enter, Key::ArrowDown] {
+                fresh_forks(win);
+                let was = forks_now(win).unwrap();
+                win.letter('/');
+                assert!(win.typing(), "/ did not put the keyboard in the filter");
+                win.frame(vec![Event::Text(words.clone())]);
+                win.frame(Vec::new());
+                let what = format!("{words:?} typed into the forks' filter");
+                assert_eq!(win.view().filter, words, "{what}: the text did not reach the core");
+                forks_left(win, &what, &OnForks::Typing(words.clone()), &was, before);
+                let typed = forks_now(win).unwrap();
+                win.key(then, None);
+                win.frame(Vec::new());
+                let what = format!("{what}, then {then:?}");
+                let expect = match then {
+                    Key::Escape => OnForks::Typing(String::new()),
+                    _ => OnForks::Filtered(words.clone()),
+                };
+                forks_left(win, &what, &expect, &was, before);
+                if then == Key::ArrowDown {
+                    assert_eq!(win.chosen(), typed.chosen, "{what}: the Down that left the field moved the highlight");
+                }
+            }
+        }
+    }
+
+    /// How the held fetch of `repos` stands: its title, whether it runs and is being cancelled, what each task said,
+    /// its count and pause, where it fetches into, and its stamp.
+    fn held_job(repos: &Repos) -> String {
+        let job = repos.job.as_ref().expect("no run");
+        let said: Vec<Vec<&String>> = job.items.iter().map(|item| item.output.iter().collect()).collect();
+        format!(
+            "{} {} {} {said:?} {:?} {:?} {}",
+            job.title,
+            job.running(),
+            job.cancelling,
+            repos.fork_progress(),
+            repos.fork_job_into(),
+            repos.job_stamp()
+        )
+    }
+
+    /// Whether the progress dialog is open over the forks screen of `win`.
+    fn fetch_open(win: &Win) -> bool {
+        crate::dialogs::which(win.repos()) == Some(Which::Progress) && crate::overlay::is_open(&win.ctx)
+    }
+
+    /// The walk's window on a fresh demo as `--show forks-fetching` opens it: the forks screen under the held fetch's
+    /// dialog, its count drawn.
+    fn fresh_fetch(win: &mut Win) {
+        fresh_win(win, show_forks_fetching);
+        win.frame(Vec::new());
+        assert!(fetch_open(win) && win.drew(&format!("{FETCH_DONE} of {FETCH_TOTAL} forks, 8 at a time")), "the fetch's dialog is not open");
+        assert!(win.plan.is_some(), "the forks are not under the dialog");
+    }
+
+    /// Checks, after the press `what` in or over the fetch's dialog on the forks screen, that nothing ran, was written
+    /// or reached out, that the held fetch is as `job` was, and that the forks are under it; with the dialog hidden,
+    /// the forks screen alone.
+    fn fetch_left(win: &Win, what: &str, job: &str, before: [usize; 5]) {
+        let repos = win.repos();
+        held_in(repos, what, Expect::Free, before);
+        assert_eq!(held_job(repos), job, "{what}: the held fetch changed");
+        assert!(repos.forks.is_some() && win.plan.is_some() && !win.drew(TABLE_HEAD), "{what}: the forks are not under the dialog");
+        said_in(repos, what, Says::HeldOrFetching);
+    }
+
+    /// The fetch's dialog over the forks screen (`--show forks-fetching`), each press on a fresh one: every input of
+    /// [`every_input`]; Cancel and Hide clicked and double-clicked; a click and a double click on every text it draws
+    /// (its title, the line under it, the count's inset, the pause, the output) and on its scrim; Tab, the arrows, Enter
+    /// and Esc; and Hide, then `l` on the forks, which shows it again. Nothing ends or changes the held fetch; Cancel
+    /// says the held notice.
+    fn walk_the_fetch_dialog_over_the_forks(win: &mut Win, before: [usize; 5]) {
+        for (press, release) in every_input() {
+            fresh_fetch(win);
+            let job = held_job(win.repos());
+            win.frame(press.clone());
+            win.frame(release);
+            win.frame(Vec::new());
+            fetch_left(win, &format!("{press:?} in the fetch's dialog"), &job, before);
+        }
+        // Where its buttons and texts are: the dialog stands where the window's bridge places it, whatever screen is
+        // under it; a probe on the same demo gives the places, and each is checked drawn on the forks screen.
+        let mut probe = Window::new(crate::session::Session::demo({
+            let mut repos = repos();
+            show_forks_fetching(&mut repos);
+            repos
+        }));
+        probe.frame(Vec::new());
+        probe.frame(Vec::new());
+        let room = probe.overlay_rect().expect("the probe's dialog has no place");
+        let buttons = probe.buttons();
+        assert_eq!(buttons.iter().map(|(_, words)| words.as_str()).collect::<Vec<_>>(), ["Cancel", "Hide"]);
+        fresh_fetch(win);
+        let drawn = win.texts_in(room);
+        let mut points: Vec<(String, egui::Pos2)> = drawn.iter().map(|(words, rect)| (format!("its text {words:?}"), rect.center())).collect();
+        assert!(points.len() >= 6, "the fetch's dialog drew almost nothing: {drawn:?}");
+        for (place, words) in &buttons {
+            assert!(win.drew(words), "the fetch's dialog has no {words}");
+            points.push((format!("its {words}"), place.center()));
+        }
+        points.push(("its scrim".to_owned(), pos(room.left() / 2.0, room.center().y)));
+        for (name, at) in points {
+            for double in [false, true] {
+                fresh_fetch(win);
+                let (job, stamp) = (held_job(win.repos()), win.repos().status_stamp());
+                win.click(at);
+                if double {
+                    win.click(at);
+                }
+                win.frame(Vec::new());
+                let what = format!("a {}click on {name} in the fetch's dialog", if double { "double " } else { "" });
+                fetch_left(win, &what, &job, before);
+                // A text on a button (its words) presses it.
+                let on = buttons.iter().find(|(place, _)| place.contains(at)).map(|(_, words)| words.as_str());
+                match on {
+                    Some("Cancel") => {
+                        assert_eq!(win.repos().status, devassist_core::repos::state::HELD, "{what}: not refused");
+                        // Each click is a press of its own: the held core keeps no cancelling, so Cancel stays (a live
+                        // run's first click makes it "Cancelling…", which cannot be pressed).
+                        assert_eq!(win.repos().status_stamp(), stamp + if double { 2 } else { 1 }, "{what}: refused otherwise");
+                        assert!(fetch_open(win), "{what}: the dialog closed");
+                    }
+                    Some(_) => assert!(!fetch_open(win) && win.drew(FORKS_HEAD), "{what}: the dialog is not hidden"),
+                    None if name == "its scrim" => assert!(fetch_open(win), "{what}: the dialog closed"),
+                    _ => assert_eq!(win.repos().status_stamp(), stamp, "{what}: the core was asked something"),
+                }
+            }
+        }
+        for key in [Key::Tab, Key::ArrowDown, Key::ArrowUp, Key::Enter, Key::Escape] {
+            fresh_fetch(win);
+            let job = held_job(win.repos());
+            win.key(key, None);
+            win.frame(Vec::new());
+            fetch_left(win, &format!("{key:?} in the fetch's dialog"), &job, before);
+        }
+        // Hidden, then shown again by `l` on the forks, as it was.
+        fresh_fetch(win);
+        let job = held_job(win.repos());
+        let hide = buttons.iter().find(|(_, words)| words == "Hide").map(|(place, _)| place.center()).unwrap();
+        win.click(hide);
+        win.frame(Vec::new());
+        assert!(!fetch_open(win) && win.plan.is_some(), "Hide did not hide the fetch's dialog");
+        fetch_left(win, "Hide in the fetch's dialog", &job, before);
+        win.letter('l');
+        win.frame(Vec::new());
+        assert!(fetch_open(win) && win.drew(&format!("{FETCH_DONE} of {FETCH_TOTAL} forks, 8 at a time")), "l did not show the fetch again");
+        fetch_left(win, "l on the forks, after Hide", &job, before);
+    }
+
+    /// The demo with exactly one repository chosen: no ticks, `row` highlighted.
+    fn one_chosen(repos: &mut Repos, row: &str) {
+        repos.clear_marks();
+        repos.pick(row);
+    }
+
+    /// How "Show the forks" is chosen in the walk's ways in.
+    #[derive(Clone, Copy, Debug)]
+    enum Chosen {
+        /// `f` on the list.
+        ListKey,
+        /// Enter on the menu's line, highlighted by Down.
+        Enter,
+        /// The menu's letter.
+        Letter,
+        /// A click on the menu's line.
+        Click,
+        /// A double click on it.
+        DoubleClick,
+    }
+
+    /// Opens the menu by the "…" of `row` on `win` as it is.
+    fn open_menu_on(win: &mut Win, row: &str) {
+        let at = win.dots(row).center();
+        win.click(at);
+        win.frame(Vec::new());
+        assert!(win.repos().mode == Mode::Menu && win.menu.is_some(), "no menu on {row}");
+        assert_eq!(win.repos().chosen(), [row]);
+    }
+
+    /// The place of `item`'s line in the menu `win` drew last.
+    fn menu_line(win: &Win, item: MenuItem) -> egui::Rect {
+        menu::line_rects(win.menu.expect("no menu"))[menu::shown().iter().position(|shown| *shown == item).unwrap()]
+    }
+
+    /// The ways into the forks on a demo where exactly one repository is chosen, each on a fresh one: `f` on the list
+    /// and the menu's "Show the forks" by Enter, by its letter, by a click and by a double click open the held forks of
+    /// api (and read no disk), and say the core's notice for homelab, whose forks are not cloned; the menu's other two
+    /// forks' lines, by letter and by click, and the top row's "Update all forks", by a click and a double click, are
+    /// refused by the held core, once.
+    fn walk_the_ways_into_the_forks(win: &mut Win, before: [usize; 5]) {
+        for row in [FORKS_OF, "homelab"] {
+            for by in [Chosen::ListKey, Chosen::Enter, Chosen::Letter, Chosen::Click, Chosen::DoubleClick] {
+                fresh_win(win, |repos| one_chosen(repos, row));
+                assert!(win.drew(TABLE_HEAD) && win.plan.is_none(), "the list is not shown");
+                let stamp = win.repos().status_stamp();
+                if !matches!(by, Chosen::ListKey) {
+                    open_menu_on(win, row);
+                }
+                let line = win.menu.map(|_| menu_line(win, MenuItem::ShowForks));
+                match by {
+                    Chosen::ListKey => win.letter('f'),
+                    Chosen::Enter => {
+                        for _ in 0..menu::shown().iter().position(|item| *item == MenuItem::ShowForks).unwrap() {
+                            win.key(Key::ArrowDown, None);
+                        }
+                        assert_eq!(win.repos().menu_highlight(), Some(MenuItem::ShowForks));
+                        win.key(Key::Enter, None);
+                    }
+                    Chosen::Letter => win.letter(MenuItem::ShowForks.key()),
+                    Chosen::Click => win.click(line.unwrap().center()),
+                    Chosen::DoubleClick => {
+                        win.click(line.unwrap().center());
+                        win.click(line.unwrap().center());
+                    }
+                }
+                for _ in 0..3 {
+                    win.frame(Vec::new());
+                }
+                let what = format!("Show the forks of {row} by {by:?}");
+                held_in(win.repos(), &what, Expect::Free, before);
+                assert!(!crate::overlay::is_open(&win.ctx), "{what}: an overlay is open");
+                if row == FORKS_OF {
+                    assert!(win.plan.is_some() && win.drew(FORKS_HEAD) && !win.drew(TABLE_HEAD), "{what}: the forks are not shown alone");
+                    assert_eq!(win.view().repo, FORKS_OF, "{what}");
+                    assert_eq!(win.repos().fork_notice(), None, "{what}: the forks say something");
+                    assert_eq!(win.repos().status_stamp(), stamp, "{what}: the press said or ran something");
+                    said_in(win.repos(), &what, Says::HeldOrNothing);
+                } else {
+                    let words = not_cloned(row);
+                    assert!(win.repos().forks.is_none() && win.drew(TABLE_HEAD), "{what}: the forks opened");
+                    assert_eq!(win.repos().status, words, "{what}: not the core's notice");
+                    said_in(win.repos(), &what, Says::OrRefused(&words));
+                }
+            }
+            // The menu's other forks' lines: refused, once.
+            for item in [MenuItem::Forks, MenuItem::AllForks] {
+                for by_click in [false, true] {
+                    fresh_win(win, |repos| one_chosen(repos, row));
+                    open_menu_on(win, row);
+                    let stamp = win.repos().status_stamp();
+                    if by_click {
+                        let at = menu_line(win, item).center();
+                        win.click(at);
+                    } else {
+                        win.letter(item.key());
+                    }
+                    win.frame(Vec::new());
+                    let what = format!("the menu's {item:?} on {row} by {}", if by_click { "a click" } else { "its letter" });
+                    held_in(win.repos(), &what, Expect::Held, before);
+                    assert_eq!(win.repos().status_stamp(), stamp + 1, "{what}: refused more than once");
+                    assert!(win.repos().mode == Mode::List && !crate::overlay::is_open(&win.ctx), "{what}: the menu stayed");
+                }
+            }
+        }
+        // The top row's "Update all forks", the capsule's third: refused, once, by a click and a double click.
+        fresh_win(win, |repos| one_chosen(repos, FORKS_OF));
+        let at = update_all_forks_place(win);
+        for double in [false, true] {
+            fresh_win(win, |repos| one_chosen(repos, FORKS_OF));
+            let stamp = win.repos().status_stamp();
+            win.click(at);
+            if double {
+                win.click(at);
+            }
+            win.frame(Vec::new());
+            let what = format!("a {}click on Update all forks with one repository chosen", if double { "double " } else { "" });
+            held_in(win.repos(), &what, Expect::Held, before);
+            assert_eq!(win.repos().status_stamp(), stamp + 1, "{what}: refused more than once");
+            assert!(win.repos().forks.is_none() && win.repos().job.is_none(), "{what}");
+        }
+    }
+
+    /// The middle of the top row's "Update all forks" (the capsule's third) on the Repositories screen of `win`.
+    fn update_all_forks_place(win: &Win) -> egui::Pos2 {
+        let layout = win.pages_layout();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(win.size[0], win.size[1]));
+        let (mut controls, mut top) = (Vec::new(), None);
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        win.ctx
+            .clone()
+            .run_ui(input, |ui| {
+                let plan = repos_screen::plan(ui.painter(), &layout, &win.session).unwrap();
+                controls = repos_screen::control_places(ui.painter(), &plan);
+                top = repos_screen::top_row(&plan);
+            })
+            .drop_without_applying_deltas();
+        let (capsule, _) = top.expect("no top row");
+        let in_capsule: Vec<egui::Rect> = controls.iter().map(|(_, place)| *place).filter(|place| capsule.contains_rect(*place)).collect();
+        assert_eq!(in_capsule.len(), 3, "the capsule holds {} actions", in_capsule.len());
+        assert!(win.drew("Update all forks"), "Update all forks is not drawn");
+        in_capsule[2].center()
+    }
+
+    /// A press of `key` (typing `text`) held over several frames, its first frame and its repeats, then let go.
+    fn hold(win: &mut Win, key: Key, text: Option<&str>) {
+        let down = |repeat| {
+            let mut events = vec![Event::Key { key, physical_key: None, pressed: true, repeat, modifiers: Modifiers::NONE }];
+            events.extend(text.map(|text| Event::Text(text.to_owned())));
+            events
+        };
+        win.frame(down(false));
+        for _ in 0..5 {
+            win.frame(down(true));
+        }
+        win.frame(vec![key_event(key, Modifiers::NONE, false)]);
+        win.frame(Vec::new());
+    }
+
+    /// Checks that `win` draws exactly one screen: the forks (`forks`) or the Repositories table.
+    fn one_screen(win: &Win, forks: bool, what: &str) {
+        let shows = (win.plan.is_some() && win.drew(FORKS_HEAD), win.drew(TABLE_HEAD));
+        assert_eq!(shows, (forks, !forks), "{what}: the screens drawn (forks, table)");
+    }
+
+    /// One window, never restarted, from the list through the forks and back, a key held across each hand-over: Enter
+    /// held opens the menu on the ticked api alone (and runs none of its lines), `f` held its "Show the forks" (the
+    /// forks screen gets none of it), `u` held asks for the fetch once (refused), the demo's fetch given to the held
+    /// core as `--show forks-fetching` gives it (a held session starts none: pressed, its fetch is refused), Esc held
+    /// hides its dialog (the forks stay), `l` held shows it again, Hide hides it, and the button back goes back. Each
+    /// step draws one screen and runs nothing; the list's ticks, filter, scroll and highlight are as they were.
+    fn through_the_forks_and_back_on_one_window(win: &mut Win, before: [usize; 5]) {
+        win.size = crate::theme::MIN_WINDOW;
+        fresh_win(win, |repos| {
+            one_chosen(repos, FORKS_OF);
+            repos.toggle_mark_of(FORKS_OF);
+            repos.set_list_filter("a");
+        });
+        // The table scrolled a little, api still in view.
+        let panel = win.pages_layout().panel;
+        win.frame(vec![Event::PointerMoved(panel.center()), crate::dialogs::testing::wheel(-30.0)]);
+        // egui smooths a turn of the wheel over frames: until it stands.
+        let mut scroll = f32::NAN;
+        while win.pages.repos_screen().scroll().to_bits() != scroll.to_bits() {
+            scroll = win.pages.repos_screen().scroll();
+            for _ in 0..10 {
+                win.frame(Vec::new());
+            }
+        }
+        assert!(scroll > 0.0, "the table did not scroll");
+        let list = |win: &Win| {
+            let repos = win.repos();
+            (repos.marked.clone(), repos.list_filter.clone(), repos.selected.clone(), win.pages.repos_screen().scroll())
+        };
+        let was = list(win);
+        assert_eq!(win.repos().chosen(), [FORKS_OF]);
+        one_screen(win, false, "the list");
+        // Enter held: the menu, and none of its lines.
+        let stamp = win.repos().status_stamp();
+        hold(win, Key::Enter, None);
+        assert!(win.repos().mode == Mode::Menu && win.menu.is_some(), "a held Enter opened no menu");
+        assert_eq!(win.repos().menu_highlight(), Some(MenuItem::Update), "the held Enter moved in the menu");
+        assert_eq!(win.repos().status_stamp(), stamp, "the held Enter ran a line of the menu");
+        held_in(win.repos(), "a held Enter on the list", Expect::Free, before);
+        // f held: the forks of api, and nothing on them.
+        hold(win, Key::F, Some("f"));
+        one_screen(win, true, "a held f in the menu");
+        let forks = forks_now(win).unwrap();
+        assert_eq!((forks.filter.as_str(), forks.stamp, win.typing()), ("", stamp, false), "the held f acted on the forks");
+        held_in(win.repos(), "a held f in the menu", Expect::Free, before);
+        // u held: the fetch asked for once, refused.
+        hold(win, Key::U, Some("u"));
+        one_screen(win, true, "a held u on the forks");
+        assert_eq!(win.repos().status_stamp(), stamp + 1, "the held u asked more than once");
+        held_in(win.repos(), "a held u on the forks", Expect::Held, before);
+        // The demo's fetch, given to the held core: its dialog over the forks.
+        let into = win.view().dest.clone();
+        let lines = fetch_lines(&into);
+        let said: Vec<(&str, bool)> = lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect();
+        win.repos_mut().hold_fork_job(FORKS_OF, &said);
+        win.frame(Vec::new());
+        win.frame(Vec::new());
+        assert!(fetch_open(win), "the fetch's dialog did not open");
+        let job = held_job(win.repos());
+        one_screen(win, true, "the fetch's dialog");
+        // Esc held: the dialog hidden, the forks stay.
+        hold(win, Key::Escape, None);
+        assert!(!fetch_open(win), "a held Esc did not hide the fetch's dialog");
+        one_screen(win, true, "a held Esc in the fetch's dialog");
+        fetch_left(win, "a held Esc in the fetch's dialog", &job, before);
+        // l held: shown again, and nothing in it.
+        hold(win, Key::L, Some("l"));
+        assert!(fetch_open(win), "a held l did not show the fetch again");
+        fetch_left(win, "a held l on the forks", &job, before);
+        // Hide, then back.
+        let mut probe = Window::new(crate::session::Session::demo({
+            let mut repos = repos();
+            show_forks_fetching(&mut repos);
+            repos
+        }));
+        probe.size = win.size;
+        probe.frame(Vec::new());
+        probe.frame(Vec::new());
+        let hide = probe.buttons().into_iter().find(|(_, words)| words == "Hide").map(|(place, _)| place.center()).unwrap();
+        win.click(hide);
+        win.frame(Vec::new());
+        assert!(!fetch_open(win), "Hide did not hide the fetch's dialog");
+        fetch_left(win, "Hide in the fetch's dialog", &job, before);
+        one_screen(win, true, "Hide");
+        win.click(win.pages_layout().toggle.center());
+        win.frame(Vec::new());
+        one_screen(win, false, "back from the forks");
+        assert_eq!(list(win), was, "the list is not as it was");
+        held_in(win.repos(), "back from the forks", Expect::Free, before);
+        win.size = crate::theme::WINDOW;
     }
 
     #[test]

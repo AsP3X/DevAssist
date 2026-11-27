@@ -3468,8 +3468,41 @@ fn git_command() -> Command {
         .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "Never");
+    #[cfg(feature = "testing")]
+    if LOCAL_GIT_ONLY.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        cmd.env("GIT_ALLOW_PROTOCOL", "file");
+    }
     process::quiet(&mut cmd);
     cmd
+}
+
+/// How many [`LocalGitOnly`] guards are alive: while any is, the git the core
+/// starts may use no transport but the local one.
+#[cfg(feature = "testing")]
+static LOCAL_GIT_ONLY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// While it lives, every git the core starts is given
+/// `GIT_ALLOW_PROTOCOL=file`: it can reach folders on this disk and no
+/// network, even should a test's rewrite of a GitHub address to a folder be
+/// wrong. For the tests that run git on local repositories standing in for
+/// GitHub's. Made by [`local_git_only`].
+#[cfg(feature = "testing")]
+#[must_use = "git is held to local folders only while the guard lives"]
+pub struct LocalGitOnly(());
+
+/// Holds every git the core starts to local folders until the guard it gives
+/// is dropped ([`LocalGitOnly`]).
+#[cfg(feature = "testing")]
+pub fn local_git_only() -> LocalGitOnly {
+    LOCAL_GIT_ONLY.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    LocalGitOnly(())
+}
+
+#[cfg(feature = "testing")]
+impl Drop for LocalGitOnly {
+    fn drop(&mut self) {
+        LOCAL_GIT_ONLY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn run_git(
@@ -3637,6 +3670,29 @@ fn first_line(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn git_held_to_local_folders_is_allowed_the_local_transport_alone() {
+        let allowed = || {
+            git_command()
+                .get_envs()
+                .find(|(key, _)| *key == "GIT_ALLOW_PROTOCOL")
+                .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+        };
+        assert_eq!(allowed(), None, "git is held without a guard");
+        let held = local_git_only();
+        let again = local_git_only();
+        assert_eq!(allowed().as_deref(), Some("file"));
+        drop(held);
+        assert_eq!(allowed().as_deref(), Some("file"), "one guard still lives");
+        drop(again);
+        assert_eq!(
+            allowed(),
+            None,
+            "git is still held once the guards are gone"
+        );
+    }
 
     #[test]
     fn git_https_sends_the_token_as_basic_auth() {
