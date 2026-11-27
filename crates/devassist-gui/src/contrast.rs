@@ -510,12 +510,42 @@ fn measure(backdrop: &'static str, rendering: Rendering) -> Vec<Row> {
     rows
 }
 
-/// The rows of every backdrop in both modes, drawn as `rendering` draws them.
+/// The rows of every backdrop in both modes, drawn as `rendering` draws them, the backdrops on a few threads
+/// ([`on_workers`]).
 fn measure_all(rendering: Rendering) -> Vec<Row> {
+    on_workers(&BACKDROPS, |backdrop| measure(backdrop, rendering)).into_iter().flatten().collect()
+}
+
+/// How many threads the contrast tests draw and measure on: `DEVASSIST_TEST_WORKERS` when it is set to a positive
+/// number, else half of what the machine can run at once, at least one and at most eight. Each take renders and
+/// measures whole windows: one thread a take, all at once, took every core of the machine (the user's request,
+/// 2026-11-27).
+fn workers() -> usize {
+    std::env::var("DEVASSIST_TEST_WORKERS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| (thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get) / 2).clamp(1, 8))
+}
+
+/// `job` done to each of `items` on a few threads ([`workers`]), each taking the next item not yet taken; the results
+/// in the items' order, as one thread an item gave them.
+fn on_workers<T: Copy + Sync, R: Send>(items: &[T], job: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<std::sync::Mutex<Option<R>>> = items.iter().map(|_| std::sync::Mutex::new(None)).collect();
     thread::scope(|scope| {
-        let jobs: Vec<_> = BACKDROPS.into_iter().map(|backdrop| scope.spawn(move || measure(backdrop, rendering))).collect();
-        jobs.into_iter().flat_map(|job| job.join().unwrap()).collect()
-    })
+        for _ in 0..workers().min(items.len()) {
+            scope.spawn(|| {
+                loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(&item) = items.get(at) else { break };
+                    let done = job(item);
+                    *results[at].lock().unwrap() = Some(done);
+                }
+            });
+        }
+    });
+    results.into_iter().map(|result| result.into_inner().unwrap().expect("an item no worker took")).collect()
 }
 
 /// Whether the glass rendering is measured here. A machine without a GPU adapter skips it, and so does one whose
@@ -2165,8 +2195,8 @@ fn rows_of(light: Vec<Taken>, dark: Vec<Taken>) -> Vec<ShotRow> {
     rows
 }
 
-/// The rows of every shot on every backdrop in both modes, drawn as each of `renderings` draws them: every take
-/// drawn at once, each on a thread of its own.
+/// The rows of every shot on every backdrop in both modes, drawn as each of `renderings` draws them: the takes drawn
+/// on a few threads ([`on_workers`]).
 fn measure_all_shots(renderings: &[Rendering]) -> Vec<ShotRow> {
     let takes: Vec<Take> = renderings
         .iter()
@@ -2178,10 +2208,7 @@ fn measure_all_shots(renderings: &[Rendering]) -> Vec<ShotRow> {
             })
         })
         .collect();
-    let mut measured_takes: Vec<Taken> = thread::scope(|scope| {
-        let jobs: Vec<_> = takes.iter().map(|&take| (take, scope.spawn(move || measure_take(take)))).collect();
-        jobs.into_iter().map(|(take, job)| (take, job.join().unwrap())).collect()
-    });
+    let mut measured_takes: Vec<Taken> = takes.iter().copied().zip(on_workers(&takes, measure_take)).collect();
     let mut rows = Vec::new();
     for &rendering in renderings {
         for backdrop in BACKDROPS {
