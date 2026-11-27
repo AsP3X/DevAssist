@@ -299,6 +299,12 @@ impl Pages {
         &self.forks
     }
 
+    /// What the Repositories screen keeps, for the tests.
+    #[cfg(test)]
+    pub(crate) fn repos_screen(&self) -> &Screen {
+        &self.screen
+    }
+
     /// Draws the shell and the screen `planned` (this frame's [`Pages::plan`]) on `ui` and does what their presses
     /// ask of `session`; `notice` stands in the status bar over the screen's words while it is given.
     pub(crate) fn draw(

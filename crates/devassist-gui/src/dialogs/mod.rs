@@ -394,7 +394,7 @@ pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Opti
         Which::Add => dialogs.add.as_ref().map(|state| add::plan(painter, window, repos, state)),
         Which::Folder => dialogs.folder.as_ref().and_then(|state| folder::plan(painter, window, repos, state)),
         Which::Push => dialogs.push.as_ref().and_then(|state| push::plan(painter, window, repos, state)),
-        Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(window, anchor, repos.migrate_highlight().is_some())))),
+        Which::Menu => anchor.map(|anchor| Plan(Planned::Menu(menu::plan(painter, window, anchor, repos)))),
     }
 }
 

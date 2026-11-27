@@ -112,6 +112,12 @@ The fetch dialog's icon, `pause` (`e12e`, before the sentence that says the fetc
 script of the standard library; nothing was downloaded. The same reading gives `folder` as `e0d7`, `arrow-left` as
 `e048` and `cloud-off` as `e08d`, as `src/assets.rs` has them.
 
+The row menu's three fork lines' icons, `git-fork` (`e28d`, "Show the forks", also the top row's "Update all forks"),
+`copy-plus` (`e3fd`, "Clone the forks") and `refresh-cw` (`e145`, "Update the forks of all repositories"), were read on
+2026-11-27 the same way from the bundled `lucide.ttf` (its `post` glyph names and its format 4 `cmap`), with a short
+script of the standard library; nothing was downloaded. The same reading gives `folder` as `e0d7` and `arrow-left` as
+`e048`, as `src/assets.rs` has them.
+
 ## Backdrops (`backdrops/`)
 
 JPEG, quality 88, 1440 by 900, converted from the PNGs in `docs/design/glass/backdrops/` (the conversion script is not kept):

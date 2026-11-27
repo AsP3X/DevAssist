@@ -762,6 +762,12 @@ mod tests {
     /// The core's words when Update all is asked for with no repositories on the list.
     const NOTHING_TO_UPDATE: &str = "There are no repositories to update.";
 
+    /// The core's refusal of "Show the forks" for more than one repository.
+    const ONE_REPOSITORY: &str = "Highlight one repository to see its forks.";
+
+    /// The core's words when the forks of every repository are asked for and none has them cloned.
+    const NO_FORKS: &str = "No forks are cloned yet. Clone the forks of a repository first.";
+
     /// What the status line may say after a press.
     #[derive(Clone, Copy, Debug)]
     enum Says<'a> {
@@ -1054,8 +1060,11 @@ mod tests {
         for asked in asked {
             assert!(words.contains(asked), "{size:?}: no control {asked} among {words:?}");
         }
-        // The top row's capsule (Import and Update all, by their words or their icons) and its main button.
-        assert!(controls.len() >= asked.len() + 2, "{size:?}: the top row's capsule is missing among {words:?}");
+        // The top row's capsule (Import, Update all and Update all forks, by their words or their icons) and its main
+        // button.
+        assert!(controls.len() >= asked.len() + 3, "{size:?}: the top row's capsule is missing among {words:?}");
+        let in_capsule: Vec<egui::Rect> = controls.iter().map(|(_, place)| *place).filter(|place| capsule.contains_rect(*place)).collect();
+        assert_eq!(in_capsule.len(), 3, "{size:?}: the top row's capsule holds {} actions", in_capsule.len());
         for (words, rect) in &controls {
             for double in [false, true] {
                 fresh(window, start);
@@ -1064,7 +1073,9 @@ mod tests {
                     window.click(rect.center());
                 }
                 let what = format!("the control {words} at {size:?}{}", if double { ", double-clicked" } else { "" });
-                let expect = match (["Update", "Open folder", "Update all"].contains(&words.as_str()), empty) {
+                // The capsule's third, Update all forks, asks for the forks' runs, which the held core refuses.
+                let third = in_capsule.get(2) == Some(rect);
+                let expect = match (["Update", "Open folder", "Update all"].contains(&words.as_str()) || third, empty) {
                     (_, true) => Expect::Empty,
                     (true, false) => Expect::Held,
                     (false, false) => Expect::Free,
@@ -1072,22 +1083,23 @@ mod tests {
                 still_held(window, &what, expect, before);
                 // The top row's controls are this plan's; the others may say what they changed in memory (a sort).
                 // Each landed: "Add repository" opens Add, the capsule's first ("Import", or its icon) Import, its
-                // second ("Update all") is refused by the held core, saying so.
+                // second ("Update all") and third ("Update all forks") are refused by the held core, saying so.
+                let refused = if third { NO_FORKS } else { NOTHING_TO_UPDATE };
                 if *rect == main {
                     assert!(window.shows(Which::Add), "{what}: no Add dialog");
                 } else if capsule.contains_rect(*rect) {
-                    let first = controls.iter().find(|(_, place)| capsule.contains_rect(*place)).is_some_and(|(_, place)| place == rect);
-                    if first {
+                    if in_capsule.first() == Some(rect) {
                         assert!(window.shows(Which::Folder) && window.repos().prompt.is_some(), "{what}: no Import dialog");
                     } else {
-                        // With repositories the held core refuses the update; with none the core refuses it for that.
+                        // With repositories the held core refuses the run; with none the core refuses it for that
+                        // (with no forks cloned, for the forks).
                         assert!(!window.open(), "{what}: a dialog opened");
-                        let words = if empty { NOTHING_TO_UPDATE } else { devassist_core::repos::state::HELD };
-                        assert_eq!(window.repos().status, words, "{what}: Update all was not refused");
+                        let words = if empty { refused } else { devassist_core::repos::state::HELD };
+                        assert_eq!(window.repos().status, words, "{what}: it was not refused");
                     }
                 }
                 if capsule.contains_rect(*rect) || *rect == main {
-                    check_said(window, &what, if empty { Says::OrRefused(NOTHING_TO_UPDATE) } else { Says::HeldOrNothing });
+                    check_said(window, &what, if empty { Says::OrRefused(refused) } else { Says::HeldOrNothing });
                 }
             }
         }
@@ -1169,6 +1181,14 @@ mod tests {
                 }
                 if item == devassist_core::repos::state::MenuItem::Migrate {
                     assert_eq!(window.repos().migrate_highlight(), Some(MigrateItem::Folder), "{what}: no side menu");
+                }
+                // Show the forks is for one repository: for api and web the core refuses it, saying so, and nothing opens.
+                if item == devassist_core::repos::state::MenuItem::ShowForks {
+                    assert!(window.repos().forks.is_none(), "{what}: the forks opened");
+                    check_said(window, &what, Says::OrRefused(ONE_REPOSITORY));
+                    assert_eq!(window.repos().status, ONE_REPOSITORY, "{what}: not refused");
+                    still_held(window, &what, Expect::Free, before);
+                    continue;
                 }
                 still_held(window, &what, if opens.is_some() { Expect::Free } else { Expect::Held }, before);
             }
@@ -1374,6 +1394,10 @@ mod tests {
             let push_line = window
                 .submenu_pane()
                 .map(|side| menu::side_line_rects(side)[MigrateItem::ALL.iter().position(|item| *item == MigrateItem::Service).unwrap()]);
+            // The menu's Show the forks line, on api and web: refused, the forks of one repository are shown at a time.
+            let show_forks = devassist_core::repos::state::MenuItem::ShowForks;
+            let forks_line =
+                window.menu_pane().map(|pane| menu::line_rects(pane)[menu::shown().iter().position(|item| *item == show_forks).unwrap()]);
             for at in points {
                 for double in [false, true] {
                     fresh_overlay(window, name, open, prepare);
@@ -1386,6 +1410,8 @@ mod tests {
                     still_held(window, &what, Expect::Free, before);
                     if push_line.is_some_and(|line| line.contains(at)) {
                         check_said(window, &what, Says::OrRefused(&push_refused));
+                    } else if forks_line.is_some_and(|line| line.contains(at)) {
+                        check_said(window, &what, Says::OrRefused(ONE_REPOSITORY));
                     } else {
                         check_said(window, &what, quiet_in(name));
                     }

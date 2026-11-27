@@ -1,8 +1,9 @@
-//! The Repositories screen in the shell: "Import", "Update all" and the main button "Add repository" in the top row
-//! (also with no repositories), the toolbar above the panel (the filter, the sort, and the selection bar with what
-//! can be done to the ticked rows), the table on the panel or the sentence that says why there is none, the status
-//! bar's words, and the keys of the terminal app (`a` opens Add, `i` Import). Every change goes
-//! through a method of the core's `Repos`; what it says comes back through the status bar.
+//! The Repositories screen in the shell: "Import", "Update all", "Update all forks" and the main button "Add
+//! repository" in the top row (also with no repositories), the toolbar above the panel (the filter, the sort, and the
+//! selection bar with what can be done to the ticked rows), the table on the panel or the sentence that says why there
+//! is none, the status bar's words, and the keys of the terminal app (`a` opens Add, `i` Import, `f` the forks of the
+//! highlighted repository, which then take the table's place: `crate::forks_screen`). Every change goes through a
+//! method of the core's `Repos`; what it says comes back through the status bar.
 //!
 //! Where the terminal app and the window differ: a double click on a row does not update it, Esc does not cancel a
 //! run that has a progress dialog, shown or hidden (its button does; Esc cancels only work without one, such as a
@@ -36,12 +37,16 @@ const ACTIONS: &str = "actions";
 const IMPORT: &str = "Import";
 /// The top row's action: update every repository.
 const UPDATE_ALL: &str = "Update all";
+/// The top row's action: bring the forks of every repository that has them cloned up to date.
+const UPDATE_ALL_FORKS: &str = "Update all forks";
 /// The top row's main button: find repositories on GitHub and clone them.
 const ADD_REPOSITORY: &str = "Add repository";
 /// The places of the top row's actions among its capsule's items ([`top_items`]): Import.
 const TOP_IMPORT: usize = 0;
 /// Update all.
 const TOP_UPDATE_ALL: usize = 1;
+/// Update all forks.
+const TOP_UPDATE_ALL_FORKS: usize = 2;
 /// The selection bar's actions on what is ticked, as the drawing words them.
 const UPDATE: &str = "Update";
 /// Move what is ticked into a group.
@@ -106,6 +111,11 @@ impl Screen {
     pub(crate) fn menu_row(&self) -> Option<&str> {
         self.menu.as_ref().map(|(key, _)| key.as_str())
     }
+
+    /// How far the table's lines are moved up.
+    pub(crate) fn scroll(&self) -> f32 {
+        self.scroll
+    }
 }
 
 /// Where the button is that the open menu stands under, as the screen placed it in the last frame: the "…" of the
@@ -163,8 +173,8 @@ struct Toolbar {
     selection: Option<(Rect, usize, Fit)>,
 }
 
-/// The top row's controls: the capsule with "Import" and "Update all", the main button "Add repository" at its right,
-/// and how they fit. The forks screen places its own the same way.
+/// The top row's controls: the capsule with "Import", "Update all" and "Update all forks", the main button "Add
+/// repository" at its right, and how they fit. The forks screen places its own the same way.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Top {
     /// The capsule.
@@ -226,13 +236,14 @@ fn view_items(sort: &str) -> [Item<'_>; 1] {
     [Item::action(Icon::ArrowUpDown, sort)]
 }
 
-/// The top row's capsule: "Import" and "Update all", with their icons only unless it is [`Fit::Full`]. Their places
-/// are `TOP_IMPORT` and `TOP_UPDATE_ALL`.
-fn top_items(fit: Fit) -> [Item<'static>; 2] {
+/// The top row's capsule: "Import", "Update all" and "Update all forks", as the drawing has them, with their icons
+/// only unless it is [`Fit::Full`]. Their places are `TOP_IMPORT`, `TOP_UPDATE_ALL` and `TOP_UPDATE_ALL_FORKS`.
+fn top_items(fit: Fit) -> [Item<'static>; 3] {
     let compact = fit != Fit::Full;
     [
         Item::Action { icon: Icon::FolderInput, words: IMPORT, on: false, danger: false, compact },
         Item::Action { icon: Icon::ArrowDownToLine, words: UPDATE_ALL, on: false, danger: false, compact },
+        Item::Action { icon: Icon::GitFork, words: UPDATE_ALL_FORKS, on: false, danger: false, compact },
     ]
 }
 
@@ -371,6 +382,8 @@ pub(crate) enum Command {
     Add,
     /// Open Import, to add the clones in a folder (`i`).
     Import,
+    /// Show the forks of the highlighted repository, or of the one ticked (`f`).
+    ShowForks,
 }
 
 impl Command {
@@ -385,7 +398,8 @@ impl Command {
             | Command::Group
             | Command::Remove
             | Command::Add
-            | Command::Import => true,
+            | Command::Import
+            | Command::ShowForks => true,
             Command::Move(_)
             | Command::End(_)
             | Command::Tick
@@ -405,7 +419,7 @@ impl Command {
 #[cfg(test)]
 impl Command {
     /// How many kinds of command there are: [`Command::kind`] gives each one its number below this.
-    pub(crate) const KINDS: usize = 20;
+    pub(crate) const KINDS: usize = 21;
 
     /// The number of this command's kind, whatever it carries, for the tests that press every key the screen knows
     /// and must reach every kind. No wildcard: a new command must be numbered here, and [`Command::KINDS`] grown.
@@ -431,6 +445,7 @@ impl Command {
             Command::Remove => 17,
             Command::Add => 18,
             Command::Import => 19,
+            Command::ShowForks => 20,
         }
     }
 }
@@ -498,6 +513,7 @@ pub(crate) fn commands(events: &[Event]) -> Vec<Command> {
                         'd' => Command::Remove,
                         'a' => Command::Add,
                         'i' | 'I' => Command::Import,
+                        'f' | 'F' => Command::ShowForks,
                         _ => continue,
                     };
                     // A held key moves the highlight again and again, but acts once.
@@ -632,9 +648,9 @@ pub fn show(
     } else {
         for command in commands(&events) {
             moved |= apply(command, session, ui);
-            // A key that opened a dialog or the menu is the last the screen hears in this frame: what comes after it
-            // is the overlay's, from the next frame on.
-            if session.repos().is_some_and(|repos| repos.mode != CoreMode::List) {
+            // A key that opened a dialog, the menu or the forks is the last the screen hears in this frame: what comes
+            // after it is theirs, from the next frame on.
+            if session.repos().is_some_and(|repos| repos.mode != CoreMode::List || repos.forks.is_some()) {
                 break;
             }
         }
@@ -706,10 +722,10 @@ pub fn show(
     keep_menu(repos, layout.panel, screen);
 }
 
-/// Draws the controls of `plan` (the top row's "Import", "Update all" and "Add repository", and, with repositories,
-/// the filter, the sort and the selection bar) and, with `keys`, does what a press on them asks of `repos`. A double
-/// click is one press: its second click does nothing (as a held key acts once), so "Open folder" opens each folder
-/// once and "Update all" queues one run.
+/// Draws the controls of `plan` (the top row's "Import", "Update all", "Update all forks" and "Add repository", and,
+/// with repositories, the filter, the sort and the selection bar) and, with `keys`, does what a press on them asks of
+/// `repos`. A double click is one press: its second click does nothing (as a held key acts once), so "Open folder"
+/// opens each folder once and "Update all" queues one run.
 fn controls(ui: &mut Ui, plan: &Plan, repos: &mut Repos, palette: theme::Palette, keys: bool) {
     let second =
         ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary) || input.pointer.button_triple_clicked(PointerButton::Primary));
@@ -718,6 +734,7 @@ fn controls(ui: &mut Ui, plan: &Plan, repos: &mut Repos, palette: theme::Palette
         match widgets::capsule(ui, top.actions, &top_items(top.fit), palette) {
             Some(TOP_IMPORT) if keys => repos.run(Action::Import),
             Some(TOP_UPDATE_ALL) if keys => repos.update_all(),
+            Some(TOP_UPDATE_ALL_FORKS) if keys => repos.update_all_forks(),
             _ => {}
         }
         if widgets::main_action(ui, top.main, Icon::Plus, ADD_REPOSITORY, top.fit == Fit::Bare, palette, main_id()) && keys {
@@ -810,6 +827,11 @@ fn apply(command: Command, session: &mut Session, ui: &Ui) -> bool {
         Command::Remove => remove(repos),
         Command::Add => repos.run(Action::Add),
         Command::Import => repos.run(Action::Import),
+        // The forks take the table's place: the table stays as it is, scrolled where it was, for coming back.
+        Command::ShowForks => {
+            repos.open_forks_plain();
+            return false;
+        }
         Command::Refresh => {}
     }
     true
@@ -1093,6 +1115,9 @@ mod tests {
         assert_eq!(read(typed(Key::A, "A")), []);
         assert_eq!(read(typed(Key::I, "i")), [Command::Import]);
         assert_eq!(read(typed(Key::I, "I")), [Command::Import]);
+        // f and F show the forks of the highlighted repository, as in the terminal app.
+        assert_eq!(read(typed(Key::F, "f")), [Command::ShowForks]);
+        assert_eq!(read(typed(Key::F, "F")), [Command::ShowForks]);
         // The actions, with the terminal app's letters: u and U are two commands, d and Delete one.
         assert_eq!(read(typed(Key::U, "u")), [Command::UpdateChosen]);
         assert_eq!(read(typed(Key::U, "U")), [Command::UpdateAll]);
@@ -1112,7 +1137,9 @@ mod tests {
         assert_eq!(read(typed(Key::D, "D")), []);
         // With Ctrl, Alt or Cmd held, a letter is no key here, even where the system sends its text.
         for held in [Modifiers::CTRL, Modifiers::ALT, Modifiers::COMMAND, Modifiers::MAC_CMD] {
-            for (code, letter) in [(Key::U, "u"), (Key::D, "d"), (Key::W, "w"), (Key::O, "o"), (Key::M, "m"), (Key::U, "U"), (Key::I, "i")] {
+            for (code, letter) in
+                [(Key::U, "u"), (Key::D, "d"), (Key::W, "w"), (Key::O, "o"), (Key::M, "m"), (Key::U, "U"), (Key::I, "i"), (Key::F, "f")]
+            {
                 assert_eq!(read(vec![key(code, held), Event::Text(letter.to_owned())]), [], "{held:?} {letter}");
             }
             // With A, Ctrl (Cmd) ticks all; the text it may send opens nothing.
@@ -1280,6 +1307,7 @@ mod tests {
             (Key::D, "d", Command::Remove),
             (Key::A, "a", Command::Add),
             (Key::I, "i", Command::Import),
+            (Key::F, "f", Command::ShowForks),
         ];
         for (code, letter, command) in actions {
             assert_eq!(read(held(code, Some(letter), 3)), [command], "{letter}");
@@ -1634,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn the_top_row_gives_way_before_it_meets_the_title() {
+    fn the_top_row_still_gives_way_before_it_meets_the_title() {
         let ctx = context();
         let title = title_width(&ctx);
         let demo = Session::demo(crate::demo::repos());
@@ -1662,10 +1690,22 @@ mod tests {
                     // Never cut: each holds what it draws.
                     let [actions, main] = top_widths(&ctx, top.fit);
                     assert!((top.actions.width() - actions).abs() < 1e-3 && (top.main.width() - main).abs() < 1e-3, "{at}: {top:?}");
-                    // In every window the app allows, all the words.
-                    if width >= 960 {
-                        assert_eq!(top.fit, Fit::Full, "{at}");
-                    }
+                    // All the words from the width where the whole row first fits beside the title (recomputed with the
+                    // capsule's third action: 1056 with the sidebar, so the smallest window the app allows, 960, shows
+                    // the capsule's icons alone; 788 without it), the capsule's icons only below that, and the main
+                    // button's icon too below 824 with the sidebar and 556 without.
+                    let (full_from, compact_from) = if sidebar { (1056, 824) } else { (788, 556) };
+                    let fit = if width >= full_from {
+                        Fit::Full
+                    } else if width >= compact_from {
+                        Fit::Compact
+                    } else {
+                        Fit::Bare
+                    };
+                    assert_eq!(top.fit, fit, "{at}");
+                    // The capsule's three actions and the main button, in the drawing's order, with or without words.
+                    let controls = top_controls(&ctx, &planned);
+                    assert_eq!(controls, ["Import", "Update all", "Update all forks", "Add repository"], "{at}");
                     if !seen.contains(&top.fit) {
                         seen.push(top.fit);
                     }
@@ -1687,6 +1727,22 @@ mod tests {
             (Rect::from_min_size(pos2(400.0, 12.0), vec2(66.0, 36.0)), Rect::from_min_size(pos2(478.0, 12.0), vec2(36.0, 36.0)))
         );
         assert_eq!(fit(113.0), None, "not even the icons fit: nothing");
+    }
+
+    /// The top row's controls `planned` places, by their words (an icon alone by its name), from the left.
+    fn top_controls(ctx: &Context, planned: &Plan) -> Vec<String> {
+        let mut out = Vec::new();
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
+        ctx.run_ui(input, |ui| {
+            let top = planned.top.unwrap();
+            out = control_places(ui.painter(), planned)
+                .into_iter()
+                .filter(|(_, rect)| top.actions.contains_rect(*rect) || *rect == top.main)
+                .map(|(words, _)| words)
+                .collect();
+        })
+        .drop_without_applying_deltas();
+        out
     }
 
     /// The widths of the top row's capsule and main button in `fit`, on `ctx`.
@@ -1724,7 +1780,7 @@ mod tests {
                 .drop_without_applying_deltas();
             out
         };
-        assert_eq!(controls, ["Import", "Update all", "Add repository"]);
+        assert_eq!(controls, ["Import", "Update all", "Update all forks", "Add repository"]);
         // Update all with nothing to update does what the core says, and nothing else.
         let at = planned.top.unwrap();
         let place = {
@@ -1838,6 +1894,225 @@ mod tests {
         place
     }
 
+    /// What the core says when the forks of every repository are asked for and none has them cloned.
+    const NO_FORKS: &str = "No forks are cloned yet. Clone the forks of a repository first.";
+
+    #[test]
+    fn update_all_forks_in_the_top_row_does_what_the_menus_line_does() {
+        use devassist_core::repos::state::{HELD, MenuItem};
+        // The demo (api's forks held), with its ticks, with none, and with another row highlighted: the top row's
+        // "Update all forks" does what the menu's "Update the forks of all repositories" does, whatever is chosen.
+        let starts: [fn(&mut Repos); 3] = [|_| {}, Repos::clear_marks, |repos| repos.pick("homelab")];
+        for start in starts {
+            let ctx = context();
+            let mut session = Session::demo(crate::demo::repos());
+            start(session.repos_mut().unwrap());
+            let mut screen = Screen::default();
+            frame(&ctx, &mut session, &mut screen, Vec::new());
+            let (ticks, selected) = (ticked(&session), repos(&session).selected.clone());
+            let at = top_item(&session, TOP_UPDATE_ALL_FORKS).center();
+            click(&ctx, &mut session, &mut screen, at);
+            let mut probe = crate::demo::repos();
+            start(&mut probe);
+            crate::repos_screen::open_menu(&mut probe, "api");
+            probe.run_menu(MenuItem::AllForks);
+            assert_eq!((repos(&session).status.as_str(), repos(&session).status_error), (probe.status.as_str(), probe.status_error));
+            assert_eq!(repos(&session).status, HELD, "the held core refuses the run");
+            assert!(repos(&session).mode == CoreMode::List && repos(&session).queue.is_empty() && repos(&session).job.is_none());
+            assert_eq!((ticked(&session), repos(&session).selected.clone()), (ticks, selected), "the button changed what is chosen");
+        }
+        // Without repositories it is there, and the core says that no forks are cloned, as for its line.
+        let ctx = context();
+        let mut session = Session::Live(Box::new(Repos::offline(test_settings())));
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        let at = top_item(&session, TOP_UPDATE_ALL_FORKS).center();
+        click(&ctx, &mut session, &mut screen, at);
+        let mut probe = Repos::offline(test_settings());
+        probe.update_all_forks();
+        assert_eq!(probe.status, NO_FORKS);
+        assert_eq!((repos(&session).status.as_str(), repos(&session).status_error), (NO_FORKS, true));
+        assert!(repos(&session).mode == CoreMode::List && repos(&session).queue.is_empty() && !repos(&session).busy);
+    }
+
+    #[test]
+    fn f_opens_the_forks_once() {
+        use crate::forks_screen::tests::Win;
+        use devassist_core::repos::state::ForkSort;
+        // f held on api (its forks held by the demo, nothing ticked): the forks open, and its repeats, then f pressed
+        // again on the forks screen, change nothing there.
+        let mut win = Win::new(Session::demo(crate::demo::repos()));
+        win.repos_mut().clear_marks();
+        win.repos_mut().pick("api");
+        win.frame(Vec::new());
+        let down = |repeat| {
+            vec![Event::Key { key: Key::F, physical_key: None, pressed: true, repeat, modifiers: Modifiers::NONE }, Event::Text("f".to_owned())]
+        };
+        win.frame(down(false));
+        assert_eq!(win.repos().forks.as_ref().map(|view| view.repo.as_str()), Some("api"), "f did not open the forks: {}", win.repos().status);
+        let stamp = win.repos().status_stamp();
+        for _ in 0..5 {
+            win.frame(down(true));
+        }
+        win.frame(vec![Event::Key { key: Key::F, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+        win.letter('f');
+        win.frame(Vec::new());
+        assert!(win.plan.is_some(), "the forks are not shown");
+        let view = win.view();
+        assert_eq!((view.selected.clone(), view.filter.as_str(), view.sort, view.changed_only), (None, "", ForkSort::Changed, false));
+        assert!(!win.typing());
+        assert_eq!(win.repos().status_stamp(), stamp, "the held f said or ran something on the forks: {}", win.repos().status);
+        // On homelab, whose forks are not cloned: the core's notice in a window's words, and no forks.
+        let session = demo_after_start(
+            |repos| {
+                repos.clear_marks();
+                repos.pick("homelab");
+            },
+            typed(Key::F, "f"),
+        );
+        assert_eq!(
+            (repos(&session).status.as_str(), repos(&session).status_error),
+            ("The forks of homelab are not cloned yet. Clone the forks does it.", true)
+        );
+        assert!(repos(&session).forks.is_none());
+        // With two ticked (the demo as it starts): one repository is asked for.
+        let session = demo_after_start(|repos| repos.pick("api"), typed(Key::F, "f"));
+        assert_eq!((repos(&session).status.as_str(), repos(&session).forks.is_none()), ("Highlight one repository to see its forks.", true));
+        // The one ticked row, whatever is highlighted: as the core chooses.
+        let session = demo_after_start(
+            |repos| {
+                repos.clear_marks();
+                repos.toggle_mark_of("api");
+                repos.pick("homelab");
+            },
+            typed(Key::F, "f"),
+        );
+        assert_eq!(repos(&session).forks.as_ref().map(|view| view.repo.as_str()), Some("api"));
+        // Not with a modifier, not while the filter has the keys, not under an overlay.
+        let api_alone = |repos: &mut Repos| {
+            repos.clear_marks();
+            repos.pick("api");
+        };
+        for held in [Modifiers::CTRL, Modifiers::ALT, Modifiers::COMMAND] {
+            let session = demo_after_start(api_alone, vec![key(Key::F, held), Event::Text("f".to_owned())]);
+            assert!(repos(&session).forks.is_none(), "{held:?} f");
+        }
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        api_alone(session.repos_mut().unwrap());
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, typed(Key::Slash, "/"));
+        frame(&ctx, &mut session, &mut screen, typed(Key::F, "f"));
+        assert_eq!((repos(&session).list_filter.as_str(), repos(&session).forks.is_none()), ("f", true));
+        let ctx = context();
+        let mut session = Session::demo(crate::demo::repos());
+        api_alone(session.repos_mut().unwrap());
+        let mut screen = Screen::default();
+        frame_with(&ctx, &mut session, &mut screen, typed(Key::F, "f"), false);
+        assert!(repos(&session).forks.is_none(), "f under an overlay");
+        // Nor the f held as an overlay closes: the press that closed it is not the screen's.
+        let mut win = Win::new(Session::demo(crate::demo::repos()));
+        api_alone(win.repos_mut());
+        win.repos_mut().open_group_prompt();
+        win.frame(Vec::new());
+        win.frame(Vec::new());
+        assert!(overlay::is_open(&win.ctx), "the group dialog did not open");
+        win.frame(down(false));
+        win.repos_mut().close_group();
+        for _ in 0..4 {
+            win.frame(down(true));
+        }
+        assert!(win.repos().forks.is_none(), "the f held as the dialog closed opened the forks");
+        win.frame(vec![Event::Key { key: Key::F, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+        win.letter('f');
+        assert!(win.repos().forks.is_some(), "a fresh f did not open them");
+    }
+
+    /// A held demo with `start` done to it, laid out, after `events` in one frame and an empty one.
+    fn demo_after_start(start: fn(&mut Repos), events: Vec<Event>) -> Session {
+        let ctx = context();
+        let mut repos = crate::demo::repos();
+        start(&mut repos);
+        let mut session = Session::demo(repos);
+        let mut screen = Screen::default();
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        frame(&ctx, &mut session, &mut screen, events);
+        frame(&ctx, &mut session, &mut screen, Vec::new());
+        session
+    }
+
+    #[test]
+    fn the_screen_is_as_it_was_after_the_forks() {
+        use crate::forks_screen::tests::Win;
+        use devassist_core::repos::state::MenuItem;
+        // The forks opened by f and by the menu's line, in the smallest window with the table scrolled, a filter
+        // typed, one row ticked and another highlighted; back by the round button. The table is as it was, and its
+        // filter has not kept the keyboard.
+        for (by_menu, filtered) in [(false, false), (true, false), (false, true), (true, true)] {
+            let what = format!("{} {}", if by_menu { "by the menu" } else { "by f" }, if filtered { "filtered" } else { "scrolled" });
+            let mut win = Win::new(Session::demo(crate::demo::repos()));
+            win.size = [960.0, 600.0];
+            win.repos_mut().clear_marks();
+            win.repos_mut().toggle_mark_of("api");
+            win.frame(Vec::new());
+            if filtered {
+                // A filter typed with the keys ("/", then "a"); Enter leaves it.
+                win.letter('/');
+                win.frame(vec![Event::Text("a".to_owned())]);
+                win.key(Key::Enter, None);
+                assert!(!win.typing(), "{what}: Enter did not leave the filter");
+            } else {
+                // Scrolled down by the wheel over the table.
+                let over = win.pages_layout().panel.center();
+                win.frame(vec![Event::PointerMoved(over)]);
+                for _ in 0..3 {
+                    win.frame(vec![crate::dialogs::testing::wheel(-40.0)]);
+                }
+                // Until the wheel's scroll has come to rest.
+                for _ in 0..30 {
+                    win.frame(Vec::new());
+                }
+                assert!(win.pages.repos_screen().scroll() > 0.0, "{what}: the table did not scroll");
+            }
+            let scroll = win.pages.repos_screen().scroll();
+            win.repos_mut().pick("sandbox");
+            let kept = |win: &Win| (win.repos().list_filter.clone(), win.repos().marked.clone(), win.repos().selected.clone());
+            let before = kept(&win);
+            let filter = if filtered { "a" } else { "" };
+            assert_eq!(before, (filter.to_owned(), vec!["api".to_owned()], Some("sandbox".to_owned())), "{what}");
+            if by_menu {
+                // The menu on api, the ticked row: it is for api.
+                let at = win.dots("api").center();
+                win.click(at);
+                win.frame(Vec::new());
+                assert_eq!(win.repos().chosen(), ["api"], "{what}");
+                win.letter(MenuItem::ShowForks.key());
+            } else {
+                win.letter('f');
+            }
+            win.frame(Vec::new());
+            assert_eq!(win.repos().forks.as_ref().map(|view| view.repo.as_str()), Some("api"), "{what}: {}", win.repos().status);
+            assert!(!win.typing() && win.ctx.memory(|memory| memory.focused().is_none()), "{what}: a filter has the keyboard");
+            // Keys on the forks are the forks': the table's filter gets none.
+            win.letter('s');
+            win.frame(vec![Event::Text("zz".to_owned())]);
+            assert_eq!(win.repos().list_filter, filter, "{what}: the table's filter got keys under the forks");
+            win.click(win.pages_layout().toggle.center());
+            win.frame(Vec::new());
+            assert!(win.repos().forks.is_none(), "{what}: back closed nothing");
+            // The highlight as the core leaves it: the menu's "…" highlights its row, f nothing.
+            let after = kept(&win);
+            assert_eq!(after.0, before.0, "{what}: the filter");
+            assert_eq!(after.1, before.1, "{what}: the ticks");
+            let selected = if by_menu { Some("api".to_owned()) } else { before.2.clone() };
+            assert_eq!(after.2, selected, "{what}: the highlight");
+            assert_eq!(win.pages.repos_screen().scroll(), scroll, "{what}: the scroll");
+            assert!(!win.typing() && win.ctx.memory(|memory| memory.focused().is_none()), "{what}: the table's filter took the keyboard back");
+            win.letter('s');
+            assert_eq!(win.repos().list_filter, filter, "{what}: s on the table typed into its filter");
+        }
+    }
+
     #[test]
     fn a_double_click_on_a_button_acts_once() {
         // While a fetch runs, "Update all" and the bar's Update queue their run: a double click queues one.
@@ -1890,6 +2165,7 @@ mod tests {
             bar_item(&session, BAR_CLEAR).center(),
             top_item(&session, TOP_IMPORT).center(),
             top_item(&session, TOP_UPDATE_ALL).center(),
+            top_item(&session, TOP_UPDATE_ALL_FORKS).center(),
             top.main.center(),
         ];
         for at in presses {

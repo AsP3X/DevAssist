@@ -1027,7 +1027,7 @@ impl Screen {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use devassist_core::repos::gitops::ForkList;
     use devassist_core::repos::state::{HELD, Mode as CoreMode, Msg, testing};
     use egui::{Context, Event, Key, Modifiers, PointerButton, RawInput, Shape, Stroke, TextureId, vec2};
@@ -1118,17 +1118,19 @@ mod tests {
     /// The window as the app runs it, on the Repositories page: the dialogs placed before the bake, the pages (the
     /// shell, the forks screen or the table) and the dialogs after them. Each frame is a tenth of a second on egui's
     /// clock unless [`Win::step`] says otherwise: a click's press and release make a click, and no two clicks make a
-    /// double click by chance.
-    struct Win {
-        ctx: Context,
-        session: Session,
-        pages: Pages,
+    /// double click by chance. The other screens' tests that need the forks screen drawn use it too.
+    pub(crate) struct Win {
+        pub(crate) ctx: Context,
+        pub(crate) session: Session,
+        pub(crate) pages: Pages,
         dialogs: Dialogs,
-        size: [f32; 2],
+        pub(crate) size: [f32; 2],
         time: f64,
-        step: f64,
+        pub(crate) step: f64,
         /// The forks' plan in the last frame, when they showed.
-        plan: Option<Plan>,
+        pub(crate) plan: Option<Plan>,
+        /// The row menu's pane as the last frame placed it, when the menu was open.
+        pub(crate) menu: Option<Rect>,
         /// The forks screen's controls in the last frame, with their words.
         controls: Vec<(String, Rect)>,
         /// The texts the last frame painted: their words, where, and their colour.
@@ -1138,7 +1140,7 @@ mod tests {
     }
 
     impl Win {
-        fn new(session: Session) -> Win {
+        pub(crate) fn new(session: Session) -> Win {
             let mut win = Win {
                 ctx: context(),
                 session,
@@ -1148,6 +1150,7 @@ mod tests {
                 time: 0.0,
                 step: 0.1,
                 plan: None,
+                menu: None,
                 controls: Vec::new(),
                 texts: Vec::new(),
                 fills: Vec::new(),
@@ -1156,21 +1159,22 @@ mod tests {
             win
         }
 
-        fn demo() -> Win {
+        pub(crate) fn demo() -> Win {
             Win::new(Session::demo(forks_open()))
         }
 
-        fn frame(&mut self, events: Vec<Event>) {
+        pub(crate) fn frame(&mut self, events: Vec<Event>) {
             self.time += self.step;
             let window = Rect::from_min_size(Pos2::ZERO, vec2(self.size[0], self.size[1]));
             let input = RawInput { screen_rect: Some(window), events, time: Some(self.time), ..Default::default() };
             let (session, pages, dialogs) = (&mut self.session, &mut self.pages, &mut self.dialogs);
-            let (mut plan, mut controls) = (None, Vec::new());
+            let (mut plan, mut controls, mut menu) = (None, Vec::new(), None);
             let output = self.ctx.run_ui(input, |ui| {
                 let ctx = ui.ctx().clone();
                 pages.page = dialogs::page_for(session.repos(), pages.page);
                 let planned = pages.plan(ui.painter(), window.size(), session);
                 let dialog = dialogs::before(&ctx, session.repos(), pages.menu_anchor(), dialogs);
+                menu = dialog.as_ref().and_then(dialogs::menu_panes).map(|(pane, _)| pane);
                 pages.draw(ui, &planned, session, Some(&sheet()), Mode::Light, None);
                 dialogs::after(&ctx, dialog, session.repos_mut(), &[], Mode::Light, dialogs);
                 plan = planned.forks().cloned();
@@ -1193,11 +1197,11 @@ mod tests {
                 })
                 .collect();
             output.drop_without_applying_deltas();
-            (self.plan, self.controls) = (plan, controls);
+            (self.plan, self.controls, self.menu) = (plan, controls, menu);
         }
 
         /// A key pressed in one frame and let go in the next, typing `text` when it is some.
-        fn key(&mut self, key: Key, text: Option<&str>) {
+        pub(crate) fn key(&mut self, key: Key, text: Option<&str>) {
             let mut events = vec![key_event(key, true, false, Modifiers::NONE)];
             events.extend(text.map(|text| Event::Text(text.to_owned())));
             self.frame(events);
@@ -1205,40 +1209,40 @@ mod tests {
         }
 
         /// A letter typed: its key and its text, as the window gets them.
-        fn letter(&mut self, typed: char) {
+        pub(crate) fn letter(&mut self, typed: char) {
             let key = Key::from_name(&typed.to_ascii_uppercase().to_string()).unwrap_or(Key::Slash);
             self.key(key, Some(&typed.to_string()));
         }
 
-        fn click(&mut self, at: Pos2) {
+        pub(crate) fn click(&mut self, at: Pos2) {
             for events in click(at) {
                 self.frame(events);
             }
         }
 
         /// The place of the control with `words` in the last frame.
-        fn control(&self, words: &str) -> Rect {
+        pub(crate) fn control(&self, words: &str) -> Rect {
             self.controls.iter().find(|(said, _)| said == words).map_or_else(|| panic!("no {words}: {:?}", self.controls), |(_, rect)| *rect)
         }
 
-        fn press(&mut self, words: &str) {
+        pub(crate) fn press(&mut self, words: &str) {
             let at = self.control(words).center();
             self.click(at);
         }
 
-        fn repos(&self) -> &Repos {
+        pub(crate) fn repos(&self) -> &Repos {
             self.session.repos().unwrap()
         }
 
-        fn repos_mut(&mut self) -> &mut Repos {
+        pub(crate) fn repos_mut(&mut self) -> &mut Repos {
             self.session.repos_mut().unwrap()
         }
 
-        fn view(&self) -> &ForksView {
+        pub(crate) fn view(&self) -> &ForksView {
             view(self.repos())
         }
 
-        fn chosen(&self) -> Option<String> {
+        pub(crate) fn chosen(&self) -> Option<String> {
             self.view().chosen().map(|fork| fork.owner.clone())
         }
 
@@ -1247,12 +1251,12 @@ mod tests {
         }
 
         /// Whether the filter field has the keyboard.
-        fn typing(&self) -> bool {
+        pub(crate) fn typing(&self) -> bool {
             self.ctx.memory(|memory| memory.has_focus(filter_id()))
         }
 
         /// What the status bar says, and its colour.
-        fn status(&self) -> (String, Color32) {
+        pub(crate) fn status(&self) -> (String, Color32) {
             let bar = shell::layout(vec2(self.size[0], self.size[1]), true, true).status;
             let left = bar.left() + theme::STATUS_PADDING;
             self.texts
@@ -1263,7 +1267,7 @@ mod tests {
         }
 
         /// Whether a text with `words` was drawn.
-        fn drew(&self, words: &str) -> bool {
+        pub(crate) fn drew(&self, words: &str) -> bool {
             self.texts.iter().any(|(said, ..)| said == words)
         }
 
@@ -1272,7 +1276,7 @@ mod tests {
             row_buttons(self.plan(), self.pages.forks_screen().scroll(), owner)
         }
 
-        fn row(&self, owner: &str) -> Rect {
+        pub(crate) fn row(&self, owner: &str) -> Rect {
             row_rect(self.plan(), self.pages.forks_screen().scroll(), owner).unwrap()
         }
 
@@ -1649,8 +1653,15 @@ mod tests {
     }
 
     impl Win {
-        fn pages_layout(&self) -> Layout {
+        pub(crate) fn pages_layout(&self) -> Layout {
             shell::layout(vec2(self.size[0], self.size[1]), true, true)
+        }
+
+        /// The place of the "…" of the Repositories table's row `key` in the last frame, while the table shows.
+        pub(crate) fn dots(&self, key: &str) -> Rect {
+            let lines = crate::repos_view::lines(self.repos());
+            let scroll = self.pages.repos_screen().scroll();
+            crate::table::dots_rect(self.pages_layout().panel, &lines, scroll, key).unwrap_or_else(|| panic!("no row {key} in view"))
         }
     }
 

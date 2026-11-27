@@ -701,11 +701,12 @@ mod tests {
     #[test]
     fn a_menu_opens_under_its_button_and_flips_or_shifts_to_stay_inside() {
         let window = window();
-        let size = vec2(256.0, 340.0);
+        // The row's menu as it is drawn: as wide as its longest line needs.
+        let size = crate::menu::demo_size();
         // The drawing's place: the row's button at the right of the table.
         let anchor = Rect::from_min_max(pos2(1388.0, 242.0), pos2(1420.0, 274.0));
         let menu = menu_rect(anchor, size, window);
-        assert_eq!(menu.min, pos2(1164.0, 278.0));
+        assert_eq!(menu.min, pos2(1420.0 - size.x, 278.0));
         assert_eq!((menu.right(), menu.top() - anchor.bottom()), (anchor.right(), MENU_GAP));
         // Near the bottom: above the button, MENU_GAP over its top.
         let low = anchor.translate(vec2(0.0, 800.0 - 242.0));
@@ -735,9 +736,10 @@ mod tests {
     #[expect(clippy::cast_precision_loss, reason = "window sizes and places of a few thousand points")]
     fn the_side_menu_stays_inside_the_window() {
         use crate::theme::{SUBMENU_GAP, SUBMENU_WIDTH};
-        // The drawing's menu with Migrate open: its line from 616 to 648, the placed menu of two lines at its left.
-        let (menu_size, size) = (vec2(256.0, 314.0), vec2(SUBMENU_WIDTH, 72.0));
-        let line_of = |menu: Rect| Rect::from_min_size(pos2(menu.left() + 4.0, menu.top() + 4.0 + 7.0 * 32.0 + 9.0), vec2(248.0, 32.0));
+        // The drawing's menu with Migrate open: its line from 616 to 648, the placed menu of two lines at its left. The
+        // menu everywhere else as it is drawn: as wide as its longest line needs, Migrate's line where it lays it out.
+        let (menu_size, size) = (crate::menu::demo_size(), vec2(SUBMENU_WIDTH, 72.0));
+        let line_of = crate::menu::migrate_line_rect;
         let menu = Rect::from_min_size(pos2(1164.0, 274.0), vec2(256.0, 415.0));
         let placed = submenu_rect(menu, Rect::from_min_size(pos2(1168.0, 616.0), vec2(248.0, 32.0)), size, window());
         assert_eq!(placed, Rect::from_min_max(pos2(892.0, 648.0 - 72.0), pos2(1156.0, 648.0)));

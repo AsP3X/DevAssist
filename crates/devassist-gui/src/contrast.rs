@@ -595,6 +595,10 @@ enum Over {
     /// Nothing, in windows narrower than the app allows, where the top row gives way ([`TOP_ROW_SIZES`]): only the
     /// top row's controls are measured.
     TopRow,
+    /// Nothing, the pointer resting on the top row's control with these words, on the hover's fill, in every way the
+    /// row fits (all its words, the capsule's icons alone, the main button's icon too): only the top row's controls
+    /// are measured.
+    TopHovered(&'static str),
     /// A dialog, on its scrim.
     Dialog,
     /// A dialog, on its scrim, with Enter pressed once it is open: the Add dialog then says, under its folder field,
@@ -658,13 +662,13 @@ impl Over {
 
     /// Nothing is over the screen.
     fn is_screen(self) -> bool {
-        matches!(self, Over::Nothing | Over::MainHovered | Over::TopRow | Over::Forks(_))
+        matches!(self, Over::Nothing | Over::MainHovered | Over::TopRow | Over::TopHovered(_) | Over::Forks(_))
     }
 }
 
 /// Windows narrower than the app allows (the sidebar shown), where the top row gives way: its capsule shows its icons
-/// only ([`TOP_COMPACT`]), and the main button its icon too ([`TOP_BARE`]). In every window the app allows, the top row
-/// has all its words.
+/// only ([`TOP_COMPACT`]), and the main button its icon too ([`TOP_BARE`]). The top row has all its words from 1056
+/// wide (the sidebar shown); the smallest window the app allows ([`MIN_WINDOW`]) shows the capsule's icons alone too.
 const TOP_COMPACT: [f32; 2] = [900.0, 600.0];
 /// The narrower of the two.
 const TOP_BARE: [f32; 2] = [780.0, 600.0];
@@ -703,7 +707,7 @@ struct Shot {
 /// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was); the
 /// Add and the Import dialog with their folder field's rows shown on their own glass, the first row lit and under
 /// the pointer; the progress dialog of a fetch of forks paused, counting, ended, and into a folder it cuts.
-const SHOTS: [Shot; 61] = [
+const SHOTS: [Shot; 65] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -763,6 +767,36 @@ const SHOTS: [Shot; 61] = [
         },
     },
     Shot { name: "menu", over: Over::Menu, set_up: |repos| demo::show(repos, "menu").unwrap() },
+    // The forks' lines highlighted, with their icons and keys (the menu on api and web: "Clone the forks"). All three
+    // are drawn by the same code with the same inks on the same fill; Show the forks' key alone, F, is 98 pixels, under
+    // the 100 a place must measure, so the highlighted state is measured on Clone the forks (N, 126 pixels) and on the
+    // all-forks line (A, 112 pixels). Resting, the three keys share the menu's place of keys on its glass.
+    Shot {
+        name: "menu on clone forks",
+        over: Over::Menu,
+        set_up: |repos| {
+            demo::show(repos, "menu").unwrap();
+            repos.highlight_menu(MenuItem::Forks);
+        },
+    },
+    Shot {
+        name: "menu on all forks",
+        over: Over::Menu,
+        set_up: |repos| {
+            demo::show(repos, "menu").unwrap();
+            repos.highlight_menu(MenuItem::AllForks);
+        },
+    },
+    // The menu on api alone, whose forks the demo holds: "Update the forks", resting.
+    Shot {
+        name: "menu on api",
+        over: Over::Menu,
+        set_up: |repos| {
+            repos.clear_marks();
+            repos.pick("api");
+            repos.enter_row();
+        },
+    },
     Shot {
         name: "menu on remove",
         over: Over::Menu,
@@ -853,6 +887,7 @@ const SHOTS: [Shot; 61] = [
         },
     },
     Shot { name: "add repository hovered", over: Over::MainHovered, set_up: |_| {} },
+    Shot { name: "update all forks hovered", over: Over::TopHovered(UPDATE_ALL_FORKS), set_up: |_| {} },
     Shot { name: "move", over: Over::Dialog, set_up: |repos| demo::show(repos, "move").unwrap() },
     // The same, with api's forks folder unable to follow (its note under the rows: see `MOVE_FORKS_STAY`).
     Shot { name: MOVE_FORKS_STAY, over: Over::Dialog, set_up: |repos| demo::show(repos, "move").unwrap() },
@@ -1113,6 +1148,9 @@ fn set_up_pointing(repos: &mut Repos) {
 fn sizes(over: Over) -> &'static [[f32; 2]] {
     match over {
         Over::TopRow => &TOP_ROW_SIZES,
+        // All the words in the design's window, the capsule's icons alone in the smallest the app allows and narrower,
+        // the main button's icon too where the row gives way further.
+        Over::TopHovered(_) => &[WINDOW, MIN_WINDOW, TOP_COMPACT, TOP_BARE],
         // The forks' top row has all its words in the design's window, its icons alone in the smallest the app
         // allows, and the main button's icon too where the top row gives way further.
         Over::Forks(Pointing::Control(words)) if FORKS_TOP.contains(&words) => &[WINDOW, MIN_WINDOW, TOP_BARE],
@@ -1131,6 +1169,9 @@ fn forks_measured(shot: &Shot, layout: &shell::Layout, at: Pos2) -> bool {
 
 /// The forks screen's top row, by its words: its capsule's two actions and its main button.
 const FORKS_TOP: [&str; 3] = ["Read again", "Open the folder", "Fetch the forks"];
+
+/// The top row's capsule action whose hover is measured: the one this plan adds.
+const UPDATE_ALL_FORKS: &str = "Update all forks";
 
 /// How many frames a shot is drawn for before the one measured: the overlay opens, its glass is placed and baked,
 /// the menu finds its row's button, the faces are laid out.
@@ -1299,6 +1340,43 @@ fn graphic(shape: &RectShape, palette: Palette) -> Option<(&'static str, f64, Co
     None
 }
 
+/// The rule the row's menu draws between its blocks (the forks' three, Migrate, Remove): a hairline the menu's row
+/// wide in the text's colour at [`theme::MENU_LINE_OPACITY`] on the menu's glass.
+const MENU_RULE_PLACE: &str = "graphic: the menu's rule between its blocks (reported, not held)";
+
+/// The menu's rule between its blocks, when `shape` is one: measured and reported, not held.
+fn menu_rule(shape: &RectShape, palette: Palette) -> Option<(&'static str, f64, Color32, Rect, Inside)> {
+    let rule = shape.fill == palette.on_glass.gamma_multiply(theme::MENU_LINE_OPACITY)
+        && (shape.rect.height() - theme::HAIRLINE).abs() < 1e-3
+        && (shape.rect.width() - (crate::menu::demo_size().x - 2.0 * (theme::MENU_PAD + theme::MENU_ROW_PAD))).abs() < 1e-3;
+    // The controller's ruling of 2026-11-27, pending the user: the rule is a separator, a layout aid as the ahead rule's
+    // small tick is (the blocks are set apart by their spacing too, and the rule before Remove has been there unmeasured
+    // since the menu was built); so it is reported, not held. Measured: 1.30 to 1.31 in the light mode, 1.40 to 1.46 in
+    // the dark, on every backdrop, both sizes, both renderings.
+    rule.then(|| (MENU_RULE_PLACE, 1.0, shape.fill, shape.rect, Box::new(|_| true) as Inside))
+}
+
+/// A graphic measured on the overlay of a shot over `over` (`on_overlay`): the menu's rules in a shot of the menu, and
+/// the overlay's other graphics ([`graphic`]).
+fn overlay_graphic(over: Over, on_overlay: bool, shape: &RectShape, palette: Palette) -> Option<(&'static str, f64, Color32, Rect, Inside)> {
+    if !on_overlay {
+        return None;
+    }
+    if over == Over::Menu { menu_rule(shape, palette) } else { None }.or_else(|| graphic(shape, palette))
+}
+
+/// Where the screen's `plan` places the top row's capsule and main button, and the top row's control a shot over
+/// [`Over::TopHovered`] points at (none in other shots), measured with `painter`'s faces.
+fn top_places(over: Over, painter: &egui::Painter, plan: Option<&repos_screen::Plan>) -> (Option<(Rect, Rect)>, Option<Rect>) {
+    let hovered = match (over, plan) {
+        (Over::TopHovered(words), Some(plan)) => {
+            repos_screen::control_places(painter, plan).into_iter().find(|(said, _)| said == words).map(|(_, place)| place)
+        }
+        _ => None,
+    };
+    (plan.and_then(repos_screen::top_row), hovered)
+}
+
 /// The forks table's ahead rule's small tick, at each commit.
 const RULE_TICK_PLACE: &str = "graphic: ahead rule's tick (reported, not held)";
 /// Its taller tick, at every fifth commit.
@@ -1432,6 +1510,8 @@ struct Frame {
     rows: Vec<(Rect, bool)>,
     /// The top row's capsule and main button, when the screen placed them.
     top: Option<(Rect, Rect)>,
+    /// The top row's control the pointer rests on in a shot over [`Over::TopHovered`], where the screen placed it.
+    top_hovered: Option<Rect>,
     /// The words the panel shows instead of the table, when it shows none.
     state: Vec<String>,
     /// The folder field of the Add or the folder dialog, with the room its rows take; the test dialog's field.
@@ -1518,14 +1598,15 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
                 (Some(found), Some(repos)) => dialogs::add_rows(found, repos, &dialogs),
                 _ => Vec::new(),
             };
-            drew = Some((count, wants.as_slice().to_vec(), layout, plan.as_ref().and_then(repos_screen::top_row)));
+            drew = Some((count, wants.as_slice().to_vec(), layout, top_places(shot.over, ui.painter(), plan.as_ref())));
         });
         picture::take_textures(std::mem::take(&mut output.textures_delta), textures);
         for ((_, picture), texture) in glass.iter().zip(GLASS_TEXTURES) {
             textures.insert(texture, picture.image());
         }
-        let (overlay, wants, layout, top) = drew.unwrap();
-        main = top.map(|(_, main)| main);
+        let (overlay, wants, layout, (top, top_hovered)) = drew.unwrap();
+        // The pointer goes to the control a shot over the top row points at, else to the main button.
+        main = top_hovered.or(top.map(|(_, main)| main));
         last = Some(Frame {
             ctx: ctx.clone(),
             shapes: std::mem::take(&mut output.shapes),
@@ -1536,6 +1617,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             reason_box: reason,
             rows: rows.clone(),
             top,
+            top_hovered,
             state: state_words(&session),
             field,
             menu,
@@ -1712,7 +1794,8 @@ fn state_words(session: &Session) -> Vec<String> {
 }
 
 /// What a person does in the frame `frame` of a shot over `over`: the folder field's keys and pointer at `pointer`,
-/// Enter once the dialog is open, the pointer on a row of the Add list `found`, on the top row's main button `main`,
+/// Enter once the dialog is open, the pointer on a row of the Add list `found`, on the top row's main button `main` (over
+/// [`Over::TopHovered`], the control it names),
 /// or Down or the pointer on the first row of a dialog's folder field `field` (all from the last frame).
 fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Rect>, main: Option<Rect>, field: Option<Rect>) -> Vec<egui::Event> {
     let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
@@ -1721,7 +1804,7 @@ fn shot_events(over: Over, frame: usize, pointer: Option<Pos2>, found: Option<Re
         (Over::Rows(RowsShot::Hovered), _) if frame >= 1 => {
             field.map_or_default(|field| vec![egui::Event::PointerMoved(widgets::tests::folder_row_centre(field, 0))])
         }
-        (Over::MainHovered, _) if frame >= 1 => main.map_or_default(|main| vec![egui::Event::PointerMoved(main.center())]),
+        (Over::MainHovered | Over::TopHovered(_), _) if frame >= 1 => main.map_or_default(|main| vec![egui::Event::PointerMoved(main.center())]),
         (Over::Hovering(index), _) if frame >= 1 => found.map_or_default(|found: Rect| {
             let row = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
             vec![egui::Event::PointerMoved(pos2(found.center().x, found.top() + (row + 0.5) * ADD_ROW))]
@@ -1781,6 +1864,15 @@ fn state_lands(shot: &Shot, last: &Frame, size: egui::Vec2, mode: Mode) {
         Over::MainHovered => {
             let main = last.top.map_or_else(|| panic!("{name}: no top row"), |(_, main)| main);
             assert!(filled(main), "{name} at {size:?} in {mode:?}: no hover fill drawn on \"Add repository\"");
+        }
+        Over::TopHovered(words) => {
+            let control = last.top_hovered.unwrap_or_else(|| panic!("{name}: no {words} in the top row"));
+            assert!(
+                last.shapes
+                    .iter()
+                    .any(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == hover && control.expand(0.5).contains_rect(rect.rect))),
+                "{name} at {size:?} in {mode:?}: no hover fill drawn on {words}"
+            );
         }
         Over::Rows(RowsShot::Lit) | Over::Folder(FolderShot::Lit) => {
             assert!(filled_with(palette.selection, folder_row(0)), "{name} at {size:?} in {mode:?}: the first folder is not lit");
@@ -1868,7 +1960,8 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
     let dots = assets::icon(Icon::Ellipsis).to_string();
     // The screen's controls whose text is measured: the selection bar, the top row's capsule and main button, and the
     // status bar; in the windows where the top row gives way, the top row's alone.
-    let ids: &[&str] = if shot.over == Over::TopRow { &["actions"] } else { &["selection", "actions", "status"] };
+    let top_only = matches!(shot.over, Over::TopRow | Over::TopHovered(_));
+    let ids: &[&str] = if top_only { &["actions"] } else { &["selection", "actions", "status"] };
     let mut controls: Vec<(&str, Rect)> = frame.wants.iter().filter(|want| ids.contains(&want.id)).map(|want| (want.id, want.rect)).collect();
     controls.extend(frame.top.map(|(_, main)| ("main", main)));
     // What part of the screen lies under a place.
@@ -1899,7 +1992,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                         Over::Nothing | Over::MainHovered => {
                             words == dots || frame.state.contains(&words) || controls.iter().any(|(_, control)| control.contains(rect.center()))
                         }
-                        Over::TopRow => controls.iter().any(|(_, control)| control.contains(rect.center())),
+                        Over::TopRow | Over::TopHovered(_) => controls.iter().any(|(_, control)| control.contains(rect.center())),
                         Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_) | Over::Rows(_) => on_overlay,
                         Over::Menu => on_overlay || words == dots,
                         Over::Forks(_) => forks_measured(shot, &frame.layout, rect.center()),
@@ -1945,7 +2038,7 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                 let forks_graphic = if let Over::Forks(_) = shot.over { rule_graphic(rect, palette, frame.layout.panel) } else { None }
                     .map(|(name, least, ink, area, inside)| (name, least, ink, area.intersect(clipped.clip_rect), inside))
                     .filter(|(.., area, _)| area.is_positive());
-                if let Some((name, least, ink, area, inside)) = forks_graphic.or_else(|| if on_overlay { graphic(rect, palette) } else { None }) {
+                if let Some((name, least, ink, area, inside)) = forks_graphic.or_else(|| overlay_graphic(shot.over, on_overlay, rect, palette)) {
                     let (found, all) = measured(&bitmap, area, ink, &inside);
                     probes.push(Probe {
                         // Named by what is under its top edge's middle, where it is drawn (a ring's middle is its button).

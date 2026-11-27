@@ -2,15 +2,18 @@
 //! by a row's "…" or by Enter on a row (`repos_screen`), drawn on the overlay ([`crate::overlay`]) while the core's
 //! mode is `Mode::Menu`, through the same bridge as the dialogs (`dialogs::Which::Menu`).
 //!
-//! It shows the core's lines in the core's words and with the core's keys (`MenuItem::label`, `MenuItem::key`), as
-//! far as the window can do them ([`shown`]): the forks' three lines wait for their screens. A menu has a shield but
-//! no scrim; a click outside it or Esc closes it, and the click goes no further. It is not walked with Tab: as in
-//! the terminal app, Up and Down (and `k` and `j`) move the highlight and stop at the ends, Home and End go to them,
-//! Enter runs the highlighted line, a line's letter runs that line, and `q` closes. A letter of a line the window
-//! does not show does nothing. The pointer, when it moves over a line, highlights it, so the mouse and the keys
-//! never show two highlights; a pointer that only rests where the menu opens chooses nothing. A line that opens a
-//! dialog (Update, Move to a group, Remove) hands the overlay over to it in the next frame, and the key or click
-//! that chose the line does nothing in it (`overlay::open`, `overlay::fresh_click`).
+//! It shows every line of the core's, in the core's words and with the core's keys (`MenuItem::label`,
+//! `MenuItem::key`, and the core's `Menu::label` for the forks' line, "Clone the forks" or "Update the forks"), in the
+//! drawing's blocks set apart by rules: the work on the repositories, the forks' three, Migrate, Remove. It is the
+//! theme's width, or as wide as its longest line needs ([`width`]). A menu has a shield but no scrim; a click outside
+//! it or Esc closes it, and the click goes no further. It is not walked with Tab: as in the terminal app, Up and Down
+//! (and `k` and `j`) move the highlight and stop at the ends, Home and End go to them, Enter runs the highlighted
+//! line, a line's letter runs that line, and `q` closes. The pointer, when it moves over a line, highlights it, so
+//! the mouse and the keys never show two highlights; a pointer that only rests where the menu opens chooses nothing.
+//! A line that opens a dialog (Update, Move to a group, Remove, the forks' runs) hands the overlay over to it in the
+//! next frame, and the key or click that chose the line does nothing in it (`overlay::open`, `overlay::fresh_click`).
+//! "Show the forks" closes the menu and the forks screen takes the table's place in the next frame; the press that
+//! chose it does nothing there (`overlay::settle`, `overlay::stale_click`).
 //!
 //! Migrate, set apart by a rule as Remove is, ends with a chevron: Enter, Right, its letter or a click opens the
 //! core's Migrate menu (`Repos::run_menu`), which the window draws as a side menu, a second glass pane of the same
@@ -24,7 +27,7 @@
 //! and never in a frame that closes it; the key or click that opened it does nothing in it
 //! (`overlay::open_submenu`).
 
-use devassist_core::repos::state::{MenuItem, MigrateItem, Repos};
+use devassist_core::repos::state::{Menu, MenuItem, MigrateItem, Repos};
 use egui::{Align2, Color32, Event, FontFamily, FontId, Id, Key, Painter, Pos2, Rect, Response, Sense, Ui, Vec2, pos2, vec2};
 
 use crate::assets::Icon;
@@ -36,18 +39,8 @@ use crate::theme::{
 };
 use crate::widgets::{self, draw_icon, font};
 
-/// The lines the window shows, in the core's order.
-const SHOWN: [MenuItem; 9] = [
-    MenuItem::Update,
-    MenuItem::Open,
-    MenuItem::Github,
-    MenuItem::Group,
-    MenuItem::CopyPath,
-    MenuItem::Watch,
-    MenuItem::PullRequests,
-    MenuItem::Migrate,
-    MenuItem::Remove,
-];
+/// The lines the window shows: every line of the core's, in its order.
+const SHOWN: [MenuItem; MenuItem::ALL.len()] = MenuItem::ALL;
 
 /// The drawing's icon of each line of [`SHOWN`], in its order.
 const ICONS: [Icon; SHOWN.len()] = [
@@ -58,6 +51,9 @@ const ICONS: [Icon; SHOWN.len()] = [
     Icon::Copy,
     Icon::Eye,
     Icon::GitPullRequest,
+    Icon::GitFork,
+    Icon::CopyPlus,
+    Icon::RefreshCw,
     Icon::Truck,
     Icon::Trash2,
 ];
@@ -69,23 +65,61 @@ const SIDE_ICONS: [Icon; MigrateItem::ALL.len()] = [Icon::FolderOutput, Icon::Cl
 /// instead.
 const OPENS: char = '▸';
 
-/// The lines the window's menu shows, in order: what the window can do so far. The core's other lines (the forks'
-/// three) wait for the screens they open.
+/// The lines the window's menu shows, in order: every line of the core's.
 #[must_use]
 pub fn shown() -> &'static [MenuItem] {
     &SHOWN
 }
 
 /// The words of `item`'s line, for one repository or for several: the core's, without the sign it ends Migrate's
-/// with ([`OPENS`]).
-fn words(item: MenuItem, many: bool) -> &'static str {
-    item.label(many).trim_end_matches(OPENS).trim_end()
+/// with ([`OPENS`]); the forks' line in the words of the core's `menu` while it is open ("Update the forks" once every
+/// chosen repository has them).
+fn words(item: MenuItem, many: bool, menu: Option<&Menu>) -> &'static str {
+    let label = match menu {
+        Some(menu) if item == MenuItem::Forks => menu.label(item),
+        _ => item.label(many),
+    };
+    label.trim_end_matches(OPENS).trim_end()
 }
 
-/// Whether a line stands between `item` and the one before it: Migrate and Remove are set apart, as the drawing
-/// sets them.
+/// The room `item`'s line takes beside its words: the row's padding at both ends, the icon and the gap after it, the
+/// gap before the key and the key, and for a line that opens the side menu its chevron and the gap before it.
+fn beside_words(item: MenuItem) -> f32 {
+    let chevron = if opens_side(item) { MENU_CHEVRON + MENU_ROW_GAP } else { 0.0 };
+    2.0 * MENU_ROW_PAD + ICON + 2.0 * MENU_ROW_GAP + MENU_KEY_WIDTH + chevron
+}
+
+/// How wide the menu is whose lines' words are as wide as `lines` says: the theme's [`MENU_WIDTH`], or, when a line's
+/// words, icon and key need more, as wide as the longest needs (in whole points), its pane's padding included.
+fn width(lines: &[(MenuItem, f32)]) -> f32 {
+    lines.iter().map(|(item, words)| 2.0 * MENU_PAD + beside_words(*item) + words.ceil()).fold(MENU_WIDTH, f32::max)
+}
+
+/// How wide the menu of `repos` is, its lines' words (for its chosen repositories) measured with `painter`'s faces.
+pub(crate) fn pane_width(painter: &Painter, repos: &Repos) -> f32 {
+    let words_font = font(TEXT, FontFamily::Proportional);
+    let many = repos.chosen().len() > 1;
+    let lines: Vec<(MenuItem, f32)> =
+        SHOWN.iter().map(|item| (*item, widgets::width(painter, words(*item, many, repos.menu.as_ref()), &words_font))).collect();
+    width(&lines)
+}
+
+/// Runs `item`, a line that opens no side menu, for `repos`'s chosen repositories, as the core's `Repos::run_menu`
+/// does: the menu closes, the ticks stay, and the line's work is asked for. "Show the forks" opens them with
+/// `Repos::open_forks_plain`, whose notice for forks that are not cloned names no key of the terminal's.
+fn run(repos: &mut Repos, item: MenuItem) {
+    if item == MenuItem::ShowForks {
+        repos.close_menu();
+        repos.open_forks_plain();
+    } else {
+        repos.run_menu(item);
+    }
+}
+
+/// Whether a line stands between `item` and the one before it: the forks' block, Migrate and Remove are set apart,
+/// as the drawing sets them.
 fn rule_before(item: MenuItem) -> bool {
-    matches!(item, MenuItem::Migrate | MenuItem::Remove)
+    matches!(item, MenuItem::ShowForks | MenuItem::Migrate | MenuItem::Remove)
 }
 
 /// Whether `item`'s line opens the side menu, and ends with a chevron.
@@ -98,7 +132,7 @@ fn side_line() -> usize {
     SHOWN.iter().position(|item| opens_side(*item)).unwrap_or(0)
 }
 
-/// How tall the menu is: its lines, the rules before Migrate and Remove, and the room above and below them.
+/// How tall the menu is: its lines, the rules between its blocks, and the room above and below them.
 fn height() -> f32 {
     let (rows, rules) = SHOWN.iter().fold((0.0, 0.0), |(rows, rules), item| (rows + 1.0, rules + if rule_before(*item) { 1.0 } else { 0.0 }));
     2.0 * MENU_PAD + rows * MENU_ROW + rules * MENU_LINE
@@ -142,11 +176,17 @@ impl Places {
     }
 }
 
-/// Where the menu stands in `window` for the button at `anchor`: under it, its right edge on the button's
-/// (`overlay::menu_rect`); with `side`, the side menu beside it, level with Migrate (`overlay::submenu_rect`).
+/// Where the menu of `repos` stands in `window` for the button at `anchor` ([`place`]), as wide as its lines need,
+/// measured with `painter`'s faces ([`pane_width`]), with its side menu while the core's Migrate menu is open.
 #[must_use]
-pub fn plan(window: Rect, anchor: Rect, side: bool) -> Places {
-    let pane = overlay::menu_rect(anchor, vec2(MENU_WIDTH, height()), window);
+pub fn plan(painter: &Painter, window: Rect, anchor: Rect, repos: &Repos) -> Places {
+    place(window, anchor, repos.migrate_highlight().is_some(), pane_width(painter, repos))
+}
+
+/// Where a menu `width` wide stands in `window` for the button at `anchor`: under it, its right edge on the button's
+/// (`overlay::menu_rect`); with `side`, the side menu beside it, level with Migrate (`overlay::submenu_rect`).
+fn place(window: Rect, anchor: Rect, side: bool, width: f32) -> Places {
+    let pane = overlay::menu_rect(anchor, vec2(width, height()), window);
     let side = side.then(|| overlay::submenu_rect(pane, layout(pane).0[side_line()], vec2(SUBMENU_WIDTH, side_height()), window));
     Places { pane, side }
 }
@@ -187,6 +227,26 @@ fn side_layout(pane: Rect) -> Vec<Rect> {
             row
         })
         .collect()
+}
+
+/// The size of the demo's menu (on api and web, as `--show menu` opens it), its words measured with the window's faces:
+/// for the tests that place a menu.
+#[cfg(test)]
+pub(crate) fn demo_size() -> Vec2 {
+    let mut repos = crate::demo::repos();
+    crate::demo::show(&mut repos, "menu").unwrap_or_default();
+    let ctx = crate::widgets::tests::context();
+    let mut width = 0.0;
+    let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), ..Default::default() };
+    ctx.run_ui(input, |ui| width = pane_width(ui.painter(), &repos)).drop_without_applying_deltas();
+    vec2(width, height())
+}
+
+/// The place of Migrate's line, which the side menu stands level with, in the menu's pane at `pane`: for the tests
+/// that place a side menu.
+#[cfg(test)]
+pub(crate) fn migrate_line_rect(pane: Rect) -> Rect {
+    layout(pane).0[side_line()]
 }
 
 /// The places of the menu's lines in its pane at `pane`, in the order of [`shown`]: for the tests that press them.
@@ -278,8 +338,7 @@ fn moved<T>(at: Option<usize>, ask: Ask<T>, lines: usize) -> Option<usize> {
     })
 }
 
-/// The line of [`SHOWN`] the core highlights; none when it highlights one the window does not show, and then
-/// Enter runs nothing.
+/// The line of [`SHOWN`] the core highlights; none while the menu is closed.
 fn highlighted(repos: &Repos) -> Option<usize> {
     repos.menu_highlight().and_then(|item| SHOWN.iter().position(|shown| *shown == item))
 }
@@ -373,7 +432,7 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
         repos.highlight_migrate(MigrateItem::ALL[side_at]);
     }
 
-    draw_menu(ui, places.pane, at, repos.chosen().len() > 1, palette);
+    draw_menu(ui, places.pane, at, repos.chosen().len() > 1, repos.menu.as_ref(), palette);
     // Not in a frame that closes it: no pane stands for a side menu that is gone.
     if let Some(side) = side.filter(|_| on_side && done.is_none()) {
         overlay::submenu_glass(ui, drawn);
@@ -385,7 +444,7 @@ pub fn show(ui: &mut Ui, places: Places, repos: &mut Repos, palette: Palette, ou
             repos.run_menu(item);
             overlay::open_submenu(ui.ctx());
         }
-        Some(Done::Run(item)) => repos.run_menu(item),
+        Some(Done::Run(item)) => run(repos, item),
         Some(Done::Close) => repos.close_menu(),
         Some(Done::Back) => {
             repos.close_migrate();
@@ -441,8 +500,8 @@ fn keyed(events: &[Event], on_side: bool, at: &mut Option<usize>, side_at: &mut 
 }
 
 /// Draws the menu's lines in its pane at `pane` on the overlay in `ui`, the line `at` on the selection's fill, in the
-/// words for several repositories when `many`.
-fn draw_menu(ui: &Ui, pane: Rect, at: Option<usize>, many: bool, palette: Palette) {
+/// words for several repositories when `many`, the forks' line in the words of the core's `menu`.
+fn draw_menu(ui: &Ui, pane: Rect, at: Option<usize>, many: bool, menu: Option<&Menu>, palette: Palette) {
     let (rows, rules) = layout(pane);
     let painter = ui.painter().with_clip_rect(pane.intersect(ui.clip_rect()));
     for rule in rules {
@@ -451,7 +510,8 @@ fn draw_menu(ui: &Ui, pane: Rect, at: Option<usize>, many: bool, palette: Palett
     let words_font = font(TEXT, FontFamily::Proportional);
     for (index, (row, (item, icon))) in rows.iter().zip(SHOWN.into_iter().zip(ICONS)).enumerate() {
         let (ink, icon_ink) = if item == MenuItem::Remove { (palette.danger, palette.danger) } else { (palette.on_glass, palette.quiet) };
-        let line = Line { words: words(item, many), key: item.key(), icon, ink, icon_ink, lit: Some(index) == at, key_right: key_right(*row, item) };
+        let line =
+            Line { words: words(item, many, menu), key: item.key(), icon, ink, icon_ink, lit: Some(index) == at, key_right: key_right(*row, item) };
         line.draw(ui, &painter, *row, palette, &words_font);
         if opens_side(item) {
             draw_icon(&painter, chevron_centre(*row), Icon::ChevronRight, MENU_CHEVRON, palette.quiet);
@@ -541,7 +601,7 @@ mod tests {
     use crate::theme::SUBMENU_GAP;
 
     /// Every line of the core's menu, and whether the window shows it. No wildcard: a new line of the core's must
-    /// be placed here on purpose. The forks' three lines wait for their screens (a later plan).
+    /// be placed here on purpose. Every line is shown.
     fn placed(item: MenuItem) -> bool {
         match item {
             MenuItem::Update
@@ -551,9 +611,11 @@ mod tests {
             | MenuItem::CopyPath
             | MenuItem::Watch
             | MenuItem::PullRequests
+            | MenuItem::ShowForks
+            | MenuItem::Forks
+            | MenuItem::AllForks
             | MenuItem::Migrate
             | MenuItem::Remove => true,
-            MenuItem::ShowForks | MenuItem::Forks | MenuItem::AllForks => false,
         }
     }
 
@@ -565,26 +627,13 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_lists_what_this_plan_can_do() {
+    fn the_menu_lists_every_line_of_the_core() {
         let all: Vec<MenuItem> = MenuItem::ALL.into_iter().filter(|item| placed(*item)).collect();
+        assert_eq!(all, MenuItem::ALL, "no line of the core's is hidden");
         assert_eq!(shown().to_vec(), all, "the shown lines, in the core's order");
-        assert_eq!(
-            shown(),
-            [
-                MenuItem::Update,
-                MenuItem::Open,
-                MenuItem::Github,
-                MenuItem::Group,
-                MenuItem::CopyPath,
-                MenuItem::Watch,
-                MenuItem::PullRequests,
-                MenuItem::Migrate,
-                MenuItem::Remove
-            ]
-        );
         // The core's words and keys, one of them in the plural; Migrate's without the core's own arrow, which the
         // window draws as the drawing's chevron.
-        let said: Vec<(&str, String)> = shown().iter().copied().map(|item| (words(item, false), key_name(item.key()))).collect();
+        let said: Vec<(&str, String)> = shown().iter().copied().map(|item| (words(item, false, None), key_name(item.key()))).collect();
         assert_eq!(
             said,
             [
@@ -595,13 +644,26 @@ mod tests {
                 ("Copy the path", "C"),
                 ("Auto-pull on or off", "W"),
                 ("Fetch the pull requests", "P"),
+                ("Show the forks", "F"),
+                ("Clone the forks", "N"),
+                ("Update the forks of all repositories", "A"),
                 ("Migrate", "T"),
                 ("Remove…", "D"),
             ]
             .map(|(label, key)| (label, key.to_owned()))
         );
         assert_eq!(MenuItem::Migrate.label(false), "Migrate ▸", "the core's words, of which the window draws the arrow as an icon");
-        assert_eq!((words(MenuItem::Open, true), words(MenuItem::CopyPath, true)), ("Open the folders", "Copy the paths"));
+        assert_eq!((words(MenuItem::Open, true, None), words(MenuItem::CopyPath, true, None)), ("Open the folders", "Copy the paths"));
+        // The forks' line in the core's words for the menu it is in: an update once every chosen repository has them.
+        let menu = |forks_cloned| devassist_core::repos::state::Menu { repos: vec!["api".to_owned()], selected: 0, migrate: None, forks_cloned };
+        assert_eq!(words(MenuItem::Forks, false, Some(&menu(true))), "Update the forks");
+        assert_eq!(words(MenuItem::Forks, false, Some(&menu(false))), "Clone the forks");
+        assert_eq!(words(MenuItem::ShowForks, false, Some(&menu(true))), "Show the forks");
+        // The drawing's icons, and its rules: before the forks' block, before Migrate, before Remove.
+        let icon_of = |item: MenuItem| ICONS[line_of(item)];
+        assert_eq!([MenuItem::ShowForks, MenuItem::Forks, MenuItem::AllForks].map(icon_of), [Icon::GitFork, Icon::CopyPlus, Icon::RefreshCw]);
+        let ruled: Vec<MenuItem> = SHOWN.into_iter().filter(|item| rule_before(*item)).collect();
+        assert_eq!(ruled, [MenuItem::ShowForks, MenuItem::Migrate, MenuItem::Remove]);
         // The side menu: every line of the core's, in its order, words and keys.
         let side: Vec<MigrateItem> = MigrateItem::ALL.into_iter().filter(|item| placed_in_side(*item)).collect();
         assert_eq!(side, MigrateItem::ALL);
@@ -629,8 +691,11 @@ mod tests {
         assert_eq!(read(vec![Event::Text("u".to_owned())]), [Ask::Run(MenuItem::Update)]);
         assert_eq!(read(vec![Event::Text("D".to_owned())]), [Ask::Run(MenuItem::Remove)], "as the terminal app, a capital too");
         assert_eq!(read(vec![Event::Text("t".to_owned())]), [Ask::Run(MenuItem::Migrate)]);
-        // The forks' letters do nothing here.
-        assert_eq!(read(vec![Event::Text("fna".to_owned())]), []);
+        // The forks' letters run their lines.
+        assert_eq!(
+            read(vec![Event::Text("fna".to_owned())]),
+            [Ask::Run(MenuItem::ShowForks), Ask::Run(MenuItem::Forks), Ask::Run(MenuItem::AllForks)]
+        );
         // A key with Ctrl is no key of the menu's.
         assert_eq!(read(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::COMMAND }]), []);
         // The side menu's letters are its own; the menu's do nothing there.
@@ -644,13 +709,13 @@ mod tests {
         let lines = SHOWN.len();
         assert_eq!(moved(Some(0), MenuAsk::Step(true), lines), Some(0));
         assert_eq!(moved(Some(0), MenuAsk::Step(false), lines), Some(1));
-        assert_eq!(moved(Some(8), MenuAsk::Step(false), lines), Some(8));
+        assert_eq!(moved(Some(11), MenuAsk::Step(false), lines), Some(11));
         assert_eq!(moved(Some(3), MenuAsk::End(true), lines), Some(0));
-        assert_eq!(moved(Some(3), MenuAsk::End(false), lines), Some(8));
+        assert_eq!(moved(Some(3), MenuAsk::End(false), lines), Some(11));
         // From no line shown, a step goes to the first; Enter and the rest change nothing.
         assert_eq!(moved(None, MenuAsk::Step(true), lines), Some(0));
         assert_eq!(moved(None, MenuAsk::Step(false), lines), Some(0));
-        assert_eq!(moved(None, MenuAsk::End(false), lines), Some(8));
+        assert_eq!(moved(None, MenuAsk::End(false), lines), Some(11));
         assert_eq!(moved(None, MenuAsk::Highlighted, lines), None);
         // The side menu's two, the same way.
         assert_eq!(moved(Some(1), MenuAsk::Step(false), 2), Some(1));
@@ -658,35 +723,139 @@ mod tests {
         assert_eq!(moved(Some(0), MenuAsk::End(false), 2), Some(1));
     }
 
+    /// The place of `item`'s line among the lines shown.
+    fn line_of(item: MenuItem) -> usize {
+        SHOWN.iter().position(|shown| *shown == item).unwrap()
+    }
+
+    /// How wide the demo's menu is (on api and web, as `--show menu` opens it), measured with the window's faces.
+    fn demo_width() -> f32 {
+        demo_size().x
+    }
+
     #[test]
     fn the_menu_is_the_drawings() {
         let window = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
-        // Seven lines, a rule, Migrate, a rule, Remove, and the pane's room: 8 + 7 × 32 + 9 + 32 + 9 + 32.
-        assert!((height() - 314.0).abs() < f32::EPSILON);
+        // Seven lines, a rule, the forks' three, a rule, Migrate, a rule, Remove, and the pane's room:
+        // 8 + 7 × 32 + 9 + 3 × 32 + 9 + 32 + 9 + 32.
+        assert!((height() - 419.0).abs() < f32::EPSILON);
         let anchor = Rect::from_min_max(pos2(1388.0, 228.0), pos2(1420.0, 272.0));
-        let places = plan(window, anchor, false);
-        assert_eq!(places.pane, Rect::from_min_size(pos2(1164.0, 276.0), vec2(256.0, 314.0)));
+        let places = place(window, anchor, false, MENU_WIDTH);
+        assert_eq!(places.pane, Rect::from_min_size(pos2(1164.0, 276.0), vec2(256.0, 419.0)));
         assert_eq!(places.side, None);
         let (rows, rules) = layout(places.pane);
-        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.len(), 12);
         assert_eq!(rows[0], Rect::from_min_size(pos2(1168.0, 280.0), vec2(248.0, 32.0)));
-        for pair in rows[..7].windows(2) {
-            assert_eq!(pair[0].bottom(), pair[1].top());
+        for block in [&rows[..7], &rows[7..10]] {
+            for pair in block.windows(2) {
+                assert_eq!(pair[0].bottom(), pair[1].top());
+            }
         }
-        // The rules in the middle of their nine points: before Migrate, and before Remove.
-        assert_eq!(rules.len(), 2);
-        for (rule, line) in rules.iter().zip([7, 8]) {
+        // The rules in the middle of their nine points: before Show the forks, before Migrate, and before Remove.
+        assert_eq!(rules.len(), 3);
+        for (rule, line) in rules.iter().zip([7, 10, 11]) {
             assert_eq!(rows[line].top() - rows[line - 1].bottom(), MENU_LINE);
             assert!((rule.center().y - (rows[line - 1].bottom() + MENU_LINE / 2.0)).abs() < f32::EPSILON);
             assert_eq!((rule.left(), rule.right(), rule.height()), (1176.0, 1408.0, 1.0));
         }
-        assert_eq!(rows[8].bottom() + MENU_PAD, places.pane.bottom());
+        assert_eq!(rows[11].bottom() + MENU_PAD, places.pane.bottom());
         // With Migrate open: its side menu of two lines, 264 wide, at the menu's left, level with Migrate's bottom.
-        let places = plan(window, anchor, true);
+        let places = place(window, anchor, true, MENU_WIDTH);
         let side = places.side.expect("the side menu is placed");
-        assert_eq!(side, Rect::from_min_max(pos2(1164.0 - SUBMENU_GAP - SUBMENU_WIDTH, rows[7].bottom() - 72.0), pos2(1156.0, rows[7].bottom())));
+        let migrate = rows[line_of(MenuItem::Migrate)];
+        assert_eq!(side, Rect::from_min_max(pos2(1164.0 - SUBMENU_GAP - SUBMENU_WIDTH, migrate.bottom() - 72.0), pos2(1156.0, migrate.bottom())));
         let lines = side_layout(side);
         assert_eq!(lines, [0.0, 32.0].map(|top| Rect::from_min_size(pos2(side.left() + MENU_PAD, side.top() + MENU_PAD + top), vec2(256.0, 32.0))));
+        // A wider menu keeps its right edge on the button's.
+        let places = place(window, anchor, false, 300.0);
+        assert_eq!(places.pane, Rect::from_min_size(pos2(1120.0, 276.0), vec2(300.0, 419.0)));
+    }
+
+    #[test]
+    fn the_menu_is_as_wide_as_its_longest_line_needs() {
+        // What a line takes beside its words: the row's padding at both ends, the icon, a gap after it, a gap before
+        // the key, the key; and the pane's own padding.
+        let beside = 2.0 * MENU_PAD + 2.0 * MENU_ROW_PAD + ICON + 2.0 * MENU_ROW_GAP + MENU_KEY_WIDTH;
+        // Lines that fit the theme's width: the theme's width.
+        assert_eq!(width(&[(MenuItem::Update, 40.0), (MenuItem::Remove, 60.0)]), MENU_WIDTH);
+        assert_eq!(width(&[(MenuItem::Update, MENU_WIDTH - beside)]), MENU_WIDTH);
+        // A line whose words need more: as wide as it needs, in whole points.
+        assert_eq!(width(&[(MenuItem::AllForks, 220.0), (MenuItem::Update, 40.0)]), beside + 220.0);
+        assert_eq!(width(&[(MenuItem::AllForks, 219.4)]), beside + 220.0);
+        // Migrate's chevron takes its room after the key.
+        assert_eq!(width(&[(MenuItem::Migrate, 220.0)]), beside + 220.0 + MENU_CHEVRON + MENU_ROW_GAP);
+        // The demo's menu: the core's longest line needs more than the theme's width, and every line is drawn whole.
+        let measured = demo_width();
+        assert!(measured > MENU_WIDTH, "{measured}");
+        let mut window = demo();
+        open_on(&mut window, "api");
+        assert!((window.menu_pane().unwrap().width() - measured).abs() < f32::EPSILON);
+        for item in SHOWN {
+            let said = words(item, true, window.repos().menu.as_ref());
+            let drawn = window.texts.iter().find(|(words, ..)| words == said);
+            assert!(drawn.is_some_and(|(_, _, cut)| !cut), "{said} is cut or missing");
+        }
+    }
+
+    #[test]
+    #[expect(clippy::cast_precision_loss, reason = "places in a window of a few hundred points")]
+    fn the_wider_menu_never_leaves_the_smallest_window() {
+        let size = vec2(960.0, 600.0);
+        let window = Rect::from_min_size(Pos2::ZERO, size);
+        let room = window.shrink(crate::theme::DIALOG_MARGIN);
+        let width = demo_width();
+        let panel = crate::shell::layout(size, true, true).panel;
+        let lines = crate::repos_view::lines(&crate::demo::repos());
+        // Every row's "…" in the smallest window, and buttons all along its edges and across its middle.
+        let mut anchors: Vec<Rect> = lines
+            .iter()
+            .filter_map(|line| match line {
+                crate::repos_view::Line::Repo(repo) => table::dots_rect(panel, &lines, 0.0, &repo.key),
+                crate::repos_view::Line::Group(_) => None,
+            })
+            .collect();
+        assert!(anchors.len() >= 8, "the rows in view: {}", anchors.len());
+        for x in (0..=960).step_by(16) {
+            for y in [0.0, 300.0, 568.0] {
+                anchors.push(Rect::from_min_size(pos2(x as f32, y), vec2(32.0, 32.0)).intersect(window));
+            }
+        }
+        for y in (0..=600).step_by(16) {
+            for x in [0.0, 480.0, 928.0] {
+                anchors.push(Rect::from_min_size(pos2(x, y as f32), vec2(32.0, 32.0)).intersect(window));
+            }
+        }
+        // As the window opens it, with its side menu, on the first row in view and on the last whole one.
+        let keys: Vec<String> = lines
+            .iter()
+            .filter_map(|line| match line {
+                crate::repos_view::Line::Repo(repo) => Some(repo.key.clone()),
+                crate::repos_view::Line::Group(_) => None,
+            })
+            .filter(|key| table::dots_rect(panel, &lines, 0.0, key).is_some_and(|dots| dots.height() >= 16.0))
+            .collect();
+        for key in [keys.first().unwrap(), keys.last().unwrap()] {
+            let mut drawn = Window::new(Session::demo(crate::demo::repos()));
+            drawn.size = [960.0, 600.0];
+            drawn.frame(Vec::new());
+            open_on(&mut drawn, key);
+            tap(&mut drawn, Key::T, Some("t"));
+            let (menu_pane, side_pane) = (drawn.menu_pane().unwrap(), drawn.submenu_pane().expect("the side menu is drawn"));
+            assert!(window.contains_rect(menu_pane) && room.contains_rect(side_pane), "{key}: {menu_pane:?} {side_pane:?}");
+            assert_eq!((menu_pane.size(), side_pane.size()), (vec2(width, height()), vec2(SUBMENU_WIDTH, side_height())), "{key}: cut");
+        }
+        for anchor in anchors {
+            for side in [false, true] {
+                let places = place(window, anchor, side, width);
+                let what = format!("{places:?} for {anchor:?}");
+                assert!(window.contains_rect(places.pane), "{what}: the menu leaves the window");
+                assert_eq!(places.pane.size(), vec2(width, height()), "{what}: the menu is cut");
+                if let Some(side) = places.side {
+                    assert!(room.contains_rect(side), "{what}: the side menu leaves the window");
+                    assert_eq!(side.size(), vec2(SUBMENU_WIDTH, side_height()), "{what}: the side menu is cut");
+                }
+            }
+        }
     }
 
     #[test]
@@ -763,11 +932,8 @@ mod tests {
         for _ in 0..20 {
             window.frame(Vec::new());
         }
-        // A letter of a line the window does not show does nothing; Esc closes.
+        // Esc closes.
         open_on(&mut window, "homelab");
-        window.typed(Key::F, "f");
-        window.typed(Key::N, "n");
-        assert!(window.shows(Which::Menu));
         window.key(Key::Escape);
         assert!(window.repos().mode == CoreMode::List);
         window.frame(Vec::new());
@@ -867,6 +1033,7 @@ mod tests {
         heights: &[u16],
     ) -> ([f32; 2], String, Pos2, String) {
         let lines = crate::repos_view::lines(repos);
+        let menu_width = demo_width();
         for &width in widths {
             for &height in heights {
                 let size = vec2(f32::from(width), f32::from(height));
@@ -874,7 +1041,7 @@ mod tests {
                 let panel = crate::shell::layout(size, true, true).panel;
                 for key in keys {
                     let Some(anchor) = table::dots_rect(panel, &lines, 0.0, key) else { continue };
-                    let row = layout(plan(screen, anchor, false).pane).0[line];
+                    let row = layout(place(screen, anchor, false, menu_width).pane).0[line];
                     for (button, words) in buttons {
                         let both = row.intersect(button.translate(screen.center().to_vec2()));
                         if both.width() > 4.0 && both.height() > 4.0 {
@@ -905,7 +1072,7 @@ mod tests {
         let (size, key, at, words) = overlap(
             probe.repos(),
             &["api", "web"],
-            8,
+            line_of(MenuItem::Remove),
             &buttons,
             &(520..=760).step_by(20).collect::<Vec<_>>(),
             &(800..=1600).step_by(25).collect::<Vec<_>>(),
@@ -914,7 +1081,7 @@ mod tests {
         window.size = size;
         window.frame(Vec::new());
         open_at_time(&mut window, &key);
-        assert!(rows(&window)[8].contains(at), "the point is on Remove…");
+        assert!(rows(&window)[line_of(MenuItem::Remove)].contains(at), "the point is on Remove…");
         double_click(&mut window, at, |window| {
             window.frame_at(Vec::new(), Some(5.1));
             assert!(window.shows(Which::Remove));
@@ -998,13 +1165,14 @@ mod tests {
         window.session.repos_mut().unwrap().clear_marks();
         window.session.repos_mut().unwrap().pick("recipes");
         // The pointer rests where the menu's Remove line will stand.
-        let remove = layout(plan(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0)), dots(&window, "recipes"), false).pane).0[8].center();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0));
+        let remove = layout(place(screen, dots(&window, "recipes"), false, demo_width()).pane).0[line_of(MenuItem::Remove)].center();
         window.frame(vec![Event::PointerMoved(remove)]);
         window.frame(Vec::new());
         window.key(Key::Enter);
         window.frame(Vec::new());
         assert!(window.shows(Which::Menu));
-        assert_eq!(rows(&window)[8].center(), remove, "the pointer is over Remove");
+        assert_eq!(rows(&window)[line_of(MenuItem::Remove)].center(), remove, "the pointer is over Remove");
         assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Update), "the resting pointer moved the highlight");
         // The Enter that opened it comes up, and a second one runs the highlighted line.
         window.frame(vec![Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
@@ -1014,17 +1182,325 @@ mod tests {
     }
 
     #[test]
-    fn enter_runs_nothing_while_the_core_highlights_a_line_the_window_does_not_show() {
+    fn enter_runs_the_line_the_core_highlights() {
+        // Every line of the core's menu is shown: the core's highlight on Show the forks is drawn there, and Enter
+        // runs it (homelab's forks are not cloned: the core says so, without the terminal's keys).
         let mut window = demo();
         open_on(&mut window, "homelab");
         window.session.repos_mut().unwrap().highlight_menu(MenuItem::ShowForks);
         window.frame(Vec::new());
+        assert_eq!(lit(&window), [rows(&window)[line_of(MenuItem::ShowForks)]]);
         window.key(Key::Enter);
-        assert!(window.shows(Which::Menu), "Enter ran a line nobody highlighted");
-        assert_ne!(window.repos().status, HELD);
-        // The arrows bring the highlight back onto the lines shown.
-        window.key(Key::ArrowDown);
-        assert_eq!(window.repos().menu_highlight(), Some(MenuItem::Update));
+        assert!(window.repos().mode == CoreMode::List && window.repos().forks.is_none());
+        assert_eq!((window.repos().status.as_str(), window.repos().status_error), (NOT_CLONED_HOMELAB, true));
+    }
+
+    /// What the core says, in a window's words, of "Show the forks" on homelab, whose forks are not cloned.
+    const NOT_CLONED_HOMELAB: &str = "The forks of homelab are not cloned yet. Clone the forks does it.";
+
+    /// The core's refusal of "Show the forks" for more than one repository.
+    const ONE_REPOSITORY: &str = "Highlight one repository to see its forks.";
+
+    #[test]
+    fn show_the_forks_leaves_the_core_as_run_menu_does() {
+        // On api alone (its forks held), on homelab alone (not cloned), and on the ticked api and web: the window's
+        // line leaves the core's menu, mode, ticks, highlight and forks as `run_menu` does; only the notice for forks
+        // that are not cloned names no key of the terminal's.
+        for (row, ticked) in [("api", false), ("homelab", false), ("api", true)] {
+            let open = |repos: &mut Repos| {
+                if !ticked {
+                    repos.clear_marks();
+                }
+                crate::repos_screen::open_menu(repos, row);
+                repos.highlight_menu(MenuItem::ShowForks);
+            };
+            let (mut window_way, mut core_way) = (crate::demo::repos(), crate::demo::repos());
+            open(&mut window_way);
+            open(&mut core_way);
+            run(&mut window_way, MenuItem::ShowForks);
+            core_way.run_menu(MenuItem::ShowForks);
+            let what = format!("{row}, ticked {ticked}");
+            let state = |repos: &Repos| {
+                (
+                    repos.mode == CoreMode::List,
+                    repos.menu.is_none(),
+                    repos.marked.clone(),
+                    repos.selected.clone(),
+                    repos.forks.as_ref().map(|view| view.repo.clone()),
+                    repos.status_error,
+                )
+            };
+            assert_eq!(state(&window_way), state(&core_way), "{what}");
+            assert_eq!(window_way.status_stamp(), core_way.status_stamp(), "{what}");
+            match (row, ticked) {
+                ("homelab", _) => {
+                    assert_eq!(window_way.status, NOT_CLONED_HOMELAB, "{what}");
+                    assert_eq!(core_way.status, "The forks of homelab are not cloned yet. Enter, then n clones them.", "{what}");
+                }
+                (_, true) => assert_eq!((window_way.status.as_str(), core_way.status.as_str()), (ONE_REPOSITORY, ONE_REPOSITORY), "{what}"),
+                _ => {
+                    assert_eq!(window_way.forks.as_ref().map(|view| view.repo.as_str()), Some("api"), "{what}");
+                    assert_eq!(window_way.status, core_way.status, "{what}");
+                }
+            }
+        }
+    }
+
+    /// How "Show the forks" is chosen in the hand-over to the forks screen.
+    #[derive(Clone, Copy, Debug)]
+    enum Chose {
+        Enter,
+        Letter,
+        Click,
+        DoubleClick,
+    }
+
+    #[test]
+    fn show_the_forks_opens_them_and_that_press_does_nothing_there() {
+        use crate::forks_screen::tests::Win;
+        for by in [Chose::Enter, Chose::Letter, Chose::Click, Chose::DoubleClick] {
+            let mut win = Win::new(Session::demo(crate::demo::repos()));
+            win.step = 0.02;
+            win.repos_mut().clear_marks();
+            let at = win.dots("api").center();
+            win.click(at);
+            win.frame(Vec::new());
+            assert!(win.repos().mode == CoreMode::Menu, "{by:?}: the menu did not open");
+            assert_eq!(win.repos().chosen(), ["api"]);
+            let line = layout(win.menu.expect("the menu was placed")).0[line_of(MenuItem::ShowForks)];
+            // What opening them alone says, on the same demo.
+            let stamp = win.repos().status_stamp();
+            let mut probe = crate::demo::repos();
+            probe.clear_marks();
+            probe.pick("api");
+            let before = probe.status_stamp();
+            probe.open_forks_plain();
+            let opening = probe.status_stamp() - before;
+            let held = |win: &mut Win, key: Key, text: Option<&str>| {
+                let down = |repeat| {
+                    let mut events = vec![Event::Key { key, physical_key: None, pressed: true, repeat, modifiers: Modifiers::NONE }];
+                    events.extend(text.map(|text| Event::Text(text.to_owned())));
+                    events
+                };
+                win.frame(down(false));
+                for _ in 0..5 {
+                    win.frame(down(true));
+                }
+                win.frame(vec![Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE }]);
+            };
+            match by {
+                Chose::Enter => {
+                    for _ in 0..line_of(MenuItem::ShowForks) {
+                        win.key(Key::ArrowDown, None);
+                    }
+                    assert_eq!(win.repos().menu_highlight(), Some(MenuItem::ShowForks));
+                    held(&mut win, Key::Enter, None);
+                }
+                Chose::Letter => held(&mut win, Key::F, Some("f")),
+                Chose::Click => win.click(line.center()),
+                Chose::DoubleClick => {
+                    win.click(line.center());
+                    win.click(line.center());
+                }
+            }
+            for _ in 0..3 {
+                win.frame(Vec::new());
+            }
+            let what = format!("{by:?}");
+            assert!(win.repos().forks.is_some() && win.plan.is_some(), "{what}: the forks are not shown: {}", win.repos().status);
+            assert!(!overlay::is_open(&win.ctx) && win.menu.is_none(), "{what}: the menu is still there");
+            // The point that chose the line lies on a fork's row: a press reaching the screen would have picked it.
+            let plan = win.plan.clone().unwrap();
+            assert!(plan.rows.iter().any(|row| win.row(&row.owner).contains(line.center())), "{what}: the line lies on no row of the forks");
+            // Nothing was done there: no fork picked or opened, no filter typed into, no way back taken.
+            let view = win.view();
+            assert_eq!((view.selected.clone(), view.filter.as_str(), view.filtering, view.changed_only), (None, "", false, false), "{what}");
+            assert!(!win.typing(), "{what}: the forks' filter has the keyboard");
+            assert_eq!(win.repos().status_stamp(), stamp + opening, "{what}: the press said or ran something on the forks: {}", win.repos().status);
+            assert_ne!(win.repos().status, HELD, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_menu_for_several_says_to_highlight_one_and_opens_nothing() {
+        let mut window = demo();
+        open_on(&mut window, "api");
+        assert_eq!(window.repos().chosen(), ["api", "web"]);
+        window.typed(Key::F, "f");
+        window.frame(Vec::new());
+        assert!(window.repos().mode == CoreMode::List && !window.open() && window.repos().forks.is_none());
+        assert_eq!((window.repos().status.as_str(), window.repos().status_error), (ONE_REPOSITORY, true));
+        let status = crate::repos_screen::status(&window.session).unwrap();
+        assert_eq!((status.text.as_str(), status.error), (ONE_REPOSITORY, true), "the status line shows the core's words");
+        assert_eq!(window.repos().marked, ["api", "web"], "the ticks stay");
+        // Opened on a row that is not ticked, the other ticks go and the menu is for that row alone: the core looks
+        // for its forks.
+        let mut window = demo();
+        window.session.repos_mut().unwrap().toggle_mark_of("web");
+        open_on(&mut window, "homelab");
+        assert_eq!((window.repos().marked.clone(), window.repos().chosen()), (Vec::<String>::new(), vec!["homelab".to_owned()]));
+        window.typed(Key::F, "f");
+        assert_eq!(window.repos().status, NOT_CLONED_HOMELAB);
+    }
+
+    #[test]
+    fn the_menu_says_update_when_the_forks_are_there() {
+        // On api alone, whose forks the demo holds: "Update the forks"; on homelab, which has none, and on api and
+        // web together (web has none): "Clone the forks". Each in the core's words for that menu.
+        for (row, ticked, said) in [("api", false, "Update the forks"), ("homelab", false, "Clone the forks"), ("api", true, "Clone the forks")] {
+            let mut window = demo();
+            if !ticked {
+                window.session.repos_mut().unwrap().clear_marks();
+            }
+            open_on(&mut window, row);
+            let core = window.repos().menu.as_ref().unwrap().label(MenuItem::Forks);
+            assert_eq!(core, said, "{row}");
+            assert!(painted(&window, said), "{row}: {said} is not drawn");
+            let other = if said == "Clone the forks" { "Update the forks" } else { "Clone the forks" };
+            assert!(!painted(&window, other), "{row}: {other} is drawn");
+            // Its line runs what the core runs for it: held, the core says so.
+            window.typed(Key::N, "n");
+            assert_eq!(window.repos().status, HELD, "{row}");
+            assert!(window.repos().mode == CoreMode::List, "{row}");
+        }
+    }
+
+    #[test]
+    fn the_fork_letters_run_their_lines_once() {
+        // n and a, each held: the held core refuses the run once, and the menu closes; held on, they do nothing on the
+        // table under it (a is Add there, which the press that closed the menu must not open).
+        for (key, letter) in [(Key::N, "n"), (Key::A, "a")] {
+            let mut window = demo();
+            window.session.repos_mut().unwrap().clear_marks();
+            open_on(&mut window, "api");
+            let stamp = window.repos().status_stamp();
+            window.frame(vec![key_down(key, false), Event::Text(letter.to_owned())]);
+            for _ in 0..5 {
+                window.frame(vec![key_down(key, true), Event::Text(letter.to_owned())]);
+            }
+            window.frame(vec![key_up(key)]);
+            window.frame(Vec::new());
+            assert_eq!(window.repos().status, HELD, "{letter}");
+            assert_eq!(window.repos().status_stamp(), stamp + 1, "{letter} ran more than once");
+            assert!(window.repos().mode == CoreMode::List && !window.open(), "{letter}: {:?} opened", which_open(&window));
+        }
+        // While the side menu is open, the forks' letters do nothing (f is the side menu's own Move).
+        for (key, letter) in [(Key::N, "n"), (Key::A, "a")] {
+            let mut window = side_open_on_homelab();
+            tap(&mut window, key, Some(letter));
+            assert!(window.shows(Which::Menu) && window.repos().migrate_highlight().is_some(), "{letter} acted in the side menu");
+            assert_ne!(window.repos().status, HELD, "{letter}");
+        }
+    }
+
+    /// Which dialog the core's mode asks for in `window`, for a message.
+    fn which_open(window: &Window) -> Option<Which> {
+        crate::dialogs::which(window.repos())
+    }
+
+    #[test]
+    fn clone_the_forks_starts_the_run_for_the_chosen_rows() {
+        // Held: the core refuses the run of the chosen rows, and of every repository's forks, saying so.
+        for item in [MenuItem::Forks, MenuItem::AllForks] {
+            let mut window = demo();
+            open_on(&mut window, "api");
+            let letter = item.key().to_string();
+            window.typed(Key::from_name(&letter.to_uppercase()).unwrap(), &letter);
+            assert_eq!(window.repos().status, HELD, "{item:?}");
+            assert!(window.repos().queue.is_empty() && window.repos().job.is_none() && !window.repos().busy, "{item:?}");
+            assert_eq!(window.repos().marked, ["api", "web"], "{item:?}: the held core keeps the ticks");
+        }
+        // Live, with GitHub held and the forks from local repositories: N on api, whose forks are not cloned, runs
+        // the fetch in the progress dialog, which counts the forks; the forks folder is there after it, and the menu
+        // then offers to update them.
+        let _live = crate::session::tests::live_git();
+        let forks = LocalForks::new("menu-clone");
+        let mut repos = Repos::new(forks.settings());
+        devassist_core::repos::state::testing::hold_github(&mut repos);
+        let remotes = forks.remotes();
+        let remotes: Vec<(&str, &std::path::Path)> = remotes.iter().map(|(owner, folder)| (*owner, folder.as_path())).collect();
+        devassist_core::repos::state::testing::local_forks(&mut repos, &remotes);
+        let mut window = Window::new(Session::Live(Box::new(repos)));
+        until(&mut window, "read", |window| !window.repos().waiting() && window.repos().installed.len() == 1);
+        window.frame(Vec::new());
+        assert!(!devassist_core::repos::gitops::forks_cloned(&forks.api()), "the forks are cloned already");
+        open_on(&mut window, "api");
+        assert_eq!(window.repos().menu.as_ref().unwrap().label(MenuItem::Forks), "Clone the forks");
+        window.typed(Key::N, "n");
+        until(&mut window, "open", |window| window.shows(Which::Progress) && window.painted);
+        until(&mut window, "ended", |window| window.repos().job.as_ref().is_some_and(|job| !job.running()) && !window.repos().busy);
+        let job = window.job();
+        assert!(matches!(job.result, Some(Ok(_))), "{:?} {:?}", job.result, job.items[0].output);
+        assert_eq!(job.items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["api"]);
+        window.frame(Vec::new());
+        let count = window.texts.iter().find(|(words, ..)| words.ends_with(" at a time")).map(|(words, ..)| words.clone());
+        assert!(count.as_deref().is_some_and(|count| count.starts_with("2 of 2 forks, ")), "the dialog does not count the forks: {count:?}");
+        assert!(devassist_core::repos::gitops::forks_cloned(&forks.api()), "the forks folder is not there");
+        // Closed, the menu on api says the run is now an update.
+        window.press("Close");
+        window.frame(Vec::new());
+        assert!(!window.open());
+        for _ in 0..20 {
+            window.frame(Vec::new());
+        }
+        open_on(&mut window, "api");
+        assert_eq!(window.repos().menu.as_ref().unwrap().label(MenuItem::Forks), "Update the forks");
+        assert!(painted(&window, "Update the forks"));
+        window.session.close();
+    }
+
+    /// An original "on GitHub" with two forks that have commits of their own, all on this disk, and a checkout of the
+    /// original, api, whose origin names GitHub while git is sent to the folder: a fetch of api's forks, given the
+    /// list of them ([`LocalForks::remotes`]), asks GitHub nothing. Removed when dropped.
+    struct LocalForks(crate::dialogs::testing::Temp);
+
+    impl LocalForks {
+        fn new(name: &str) -> LocalForks {
+            use crate::dialogs::testing::{Temp, git};
+            let root = Temp(std::env::temp_dir().join(format!("devassist-gui-{name}-{}", std::process::id())));
+            let _ = std::fs::remove_dir_all(&root.0);
+            std::fs::create_dir_all(&root.0).unwrap();
+            let commit = |dir: &std::path::Path, name: &str| {
+                std::fs::write(dir.join(name), name).unwrap();
+                git(dir, &["add", name]);
+                git(dir, &["commit", "-q", "-m", name]);
+            };
+            let ada = root.0.join("ada");
+            std::fs::create_dir_all(&ada).unwrap();
+            git(&ada, &["init", "-q", "-b", "main"]);
+            commit(&ada, "one");
+            for fork in ["bob", "eve"] {
+                git(&root.0, &["clone", "-q", ada.to_str().unwrap(), fork]);
+                commit(&root.0.join(fork), &format!("{fork}s"));
+            }
+            git(&root.0, &["clone", "-q", ada.to_str().unwrap(), "api"]);
+            let api = root.0.join("api");
+            let github = "https://github.com/ada/api.git";
+            git(&api, &["remote", "set-url", "origin", github]);
+            git(&api, &["config", &format!("url.{}.insteadOf", ada.display().to_string().replace('\\', "/")), github]);
+            // A window another test closed asked its git to stop: that ask is not this test's.
+            devassist_core::sys::process::clear_cancel();
+            LocalForks(root)
+        }
+
+        fn api(&self) -> std::path::PathBuf {
+            self.0.0.join("api")
+        }
+
+        /// The settings that manage api alone, in the temporary folder.
+        fn settings(&self) -> devassist_core::config::Settings {
+            devassist_core::config::Settings {
+                owners_explicit: true,
+                update_check: false,
+                update_check_now: false,
+                ..devassist_core::config::Settings::for_folder(vec![self.api()], self.0.0.join("devassist.toml"))
+            }
+        }
+
+        /// The accounts and their repositories on this disk, the original's among them.
+        fn remotes(&self) -> Vec<(&'static str, std::path::PathBuf)> {
+            ["ada", "bob", "eve"].map(|owner| (owner, self.0.0.join(owner))).into()
+        }
     }
 
     #[test]
@@ -1096,7 +1572,7 @@ mod tests {
     #[test]
     fn a_click_on_remove_opens_the_remove_dialog_and_deletes_nothing() {
         remove_comes_instead(|window| {
-            let at = rows(window)[8].center();
+            let at = rows(window)[line_of(MenuItem::Remove)].center();
             window.click(at);
         });
     }
@@ -1788,15 +2264,22 @@ mod tests {
         let keys =
             ["dotfiles", "homelab", "recipes", "DevAssist", "release-scripts", "customer-portal-i18n", "portal", "notes", "old-blog", "sandbox"];
         let lines = crate::repos_view::lines(&crate::demo::repos());
+        let menu_width = demo_width();
         for width in (960_u16..=1600).step_by(40) {
             for height in (600_u16..=1100).step_by(50) {
                 let size = [f32::from(width), f32::from(height)];
                 let screen = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
                 let panel = crate::shell::layout(screen.size(), true, true).panel;
-                let (button, words) = guarded_button(item, "homelab", size);
+                // A row's button wholly in view (as tall as the first row's): a row cut at the panel's foot is
+                // scrolled into view when it is pressed.
+                let whole = table::dots_rect(panel, &lines, 0.0, keys[0]).map_or(0.0, |dots| dots.height());
                 for key in keys {
-                    let Some(anchor) = table::dots_rect(panel, &lines, 0.0, key) else { continue };
-                    let line = side_layout(plan(screen, anchor, true).side.unwrap())[index];
+                    let Some(anchor) = table::dots_rect(panel, &lines, 0.0, key).filter(|dots| (dots.height() - whole).abs() < 1e-3) else {
+                        continue;
+                    };
+                    let line = side_layout(place(screen, anchor, true, menu_width).side.unwrap())[index];
+                    // The dialog that line opens for that row, as it stands then.
+                    let (button, words) = guarded_button(item, key, size);
                     let both = line.intersect(button);
                     if both.width() > 4.0 && both.height() > 4.0 {
                         return Some((size, key, both.center(), words));
