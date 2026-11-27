@@ -613,6 +613,26 @@ pub fn walk(ui: &mut Ui, ids: &[Id]) {
     });
 }
 
+/// Keeps a screen's text field `field` out of an overlay's way and gives it the keyboard back after it: without `keys`
+/// (an overlay is open over the screen) the field gives up the focus, and egui's own Tab, which would give it to the
+/// field (the one control of a screen that takes it) as the field is drawn in the frame an overlay opens, before its
+/// layer is modal, moves nothing; `refocus` remembers that the field had the focus (`focused`). With `keys` again, the
+/// field gets it back before it is drawn, so what is typed in that frame (the rest of a word) is the field's, not the
+/// screen's keys.
+pub(crate) fn keep_field_focus(ui: &Ui, field: Id, keys: bool, focused: &mut bool, refocus: &mut bool) {
+    if !keys {
+        ui.memory_mut(|memory| {
+            memory.surrender_focus(field);
+            memory.move_focus(FocusDirection::None);
+        });
+        *refocus |= *focused;
+        *focused = false;
+    } else if std::mem::take(refocus) {
+        ui.memory_mut(|memory| memory.request_focus(field));
+        *focused = true;
+    }
+}
+
 /// The control among `ids` that one Tab (Shift-Tab when `back`) moves the focus to from `current`.
 fn step(ids: &[Id], current: Option<Id>, back: bool) -> Option<Id> {
     let last = ids.len().checked_sub(1)?;

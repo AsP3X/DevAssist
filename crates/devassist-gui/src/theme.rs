@@ -289,6 +289,12 @@ pub const STATUS_ICON_GAP: f32 = 6.0;
 pub const STATUS_GAP: f32 = 24.0;
 /// The gap between the title of an empty or broken panel and the lines under it.
 pub const STATE_GAP: f32 = 8.0;
+/// The gap between the two lines the forks screen's panel says instead of its rows: the core's sentence and the
+/// error's own words (the plan's own: the design draws no such panel).
+pub const FORKS_EMPTY_GAP: f32 = 8.0;
+/// The narrowest a screen's title in the top row is cut to (with an ellipsis, whole on hover) before the top row's
+/// controls give way (the plan's own: the design's titles are short).
+pub const TITLE_LEAST: f32 = 120.0;
 /// How long the settings warning is the status bar's text after the window opens.
 pub const NOTICE_TIME: Duration = Duration::from_secs(10);
 /// How many rows Page Up and Page Down move the highlight, as in the terminal app.
@@ -956,6 +962,8 @@ mod tests {
             ("STATUS_ICON", STATUS_ICON, 12.0),
             ("STATUS_ICON_GAP", STATUS_ICON_GAP, 6.0),
             ("STATUS_GAP", STATUS_GAP, 24.0),
+            ("FORKS_EMPTY_GAP", FORKS_EMPTY_GAP, 8.0),
+            ("TITLE_LEAST", TITLE_LEAST, 120.0),
         ] {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
         }

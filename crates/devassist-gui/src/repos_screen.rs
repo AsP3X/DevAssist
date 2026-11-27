@@ -10,7 +10,7 @@
 //! would, without asking): the status line asks for repositories instead.
 
 use devassist_core::repos::state::{Action, GROUP_KEY, Mode as CoreMode, Repos, SortMode};
-use egui::{CursorIcon, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, PointerButton, Pos2, Rect, Sense, Ui, pos2};
+use egui::{CursorIcon, Event, FontFamily, Id, Key, Modifiers, Painter, PointerButton, Pos2, Rect, Sense, Ui, pos2};
 
 use crate::assets::{self, Icon};
 use crate::baker::Sheet;
@@ -286,14 +286,19 @@ fn places(toolbar: Rect, view_width: f32, widths: Option<[f32; 3]>) -> (Rect, Re
     (field, view, selection)
 }
 
+/// The ways the top row's capsule (`full` and `compact` wide) and main button (`main_full` and `main_compact`) fit, in
+/// the order they are tried: each with the capsule's width and the main button's.
+pub(crate) fn top_fits([full, compact]: [f32; 2], [main_full, main_compact]: [f32; 2]) -> [(Fit, f32, f32); 3] {
+    [(Fit::Full, full, main_full), (Fit::Compact, compact, main_full), (Fit::Bare, compact, main_compact)]
+}
+
 /// The places of the top row's capsule, `actions` wide with its words and without them, and of its main button,
 /// `main` wide with its words and without them, at the right end of `room` ([`shell::action_room`]), the main button
 /// rightmost and [`BAR_GAP`] between them. They take the first fit that fits: all words ([`Fit::Full`]), then the
 /// capsule's icons only ([`Fit::Compact`]: the main button keeps its words longest), then the main button's icon
 /// too ([`Fit::Bare`]); `None` when not even that fits, so nothing lies over the title or leaves the row.
-pub(crate) fn top_place(room: Rect, [full, compact]: [f32; 2], [main_full, main_compact]: [f32; 2]) -> Option<Top> {
-    let fits = [(Fit::Full, full, main_full), (Fit::Compact, compact, main_full), (Fit::Bare, compact, main_compact)];
-    let (fit, actions, main) = fits.into_iter().find(|(_, actions, main)| actions + BAR_GAP + main <= room.width())?;
+pub(crate) fn top_place(room: Rect, actions: [f32; 2], main: [f32; 2]) -> Option<Top> {
+    let (fit, actions, main) = top_fits(actions, main).into_iter().find(|(_, actions, main)| actions + BAR_GAP + main <= room.width())?;
     let main = Rect::from_min_max(pos2(room.right() - main, room.top()), room.max);
     let actions = Rect::from_min_max(pos2(main.left() - BAR_GAP - actions, room.top()), pos2(main.left() - BAR_GAP, room.bottom()));
     Some(Top { actions, main, fit })
@@ -594,22 +599,7 @@ pub fn show(
     keys: bool,
 ) {
     let palette = theme::palette(mode);
-    if !keys {
-        // egui's own Tab would give the focus to the filter, the one control here that takes it, as the field is
-        // drawn: in the frame an overlay opens, before its layer is modal, nothing else stops that.
-        ui.memory_mut(|memory| {
-            memory.surrender_focus(filter_id());
-            memory.move_focus(FocusDirection::None);
-        });
-        // The filter had the focus when the overlay came: it gets it back when the overlay goes.
-        screen.refocus |= screen.filter_focused;
-        screen.filter_focused = false;
-    } else if std::mem::take(&mut screen.refocus) {
-        // Back before the field is drawn: what is typed in this frame (the rest of a word) is the filter's, not
-        // the screen's keys.
-        ui.memory_mut(|memory| memory.request_focus(filter_id()));
-        screen.filter_focused = true;
-    }
+    overlay::keep_field_focus(ui, filter_id(), keys, &mut screen.filter_focused, &mut screen.refocus);
     // The frame's keys are the filter's when it held the focus at the end of the last frame; egui takes the focus
     // away on Esc before the frame sees the key, so the focus now would not say it.
     let typing = screen.filter_focused;

@@ -276,10 +276,12 @@ impl Pages {
         let layout = shell::layout(size, self.sidebar_shown, toolbar);
         let plan = if on_repositories { repos_screen::plan(painter, &layout, session) } else { None };
         let repos = view.and(session.repos());
+        let forks = view.map(|view| forks_screen::plan(view, &layout, painter));
         Planned {
             plan,
-            forks: view.map(|view| forks_screen::plan(view, &layout, painter)),
-            title: repos.and_then(forks_screen::title),
+            // As the forks' plan shows it: cut when the top row's controls need the room.
+            title: forks.as_ref().map(|forks| forks.title().to_owned()),
+            forks,
             status: repos.and_then(forks_screen::status),
             layout,
             on_repositories,

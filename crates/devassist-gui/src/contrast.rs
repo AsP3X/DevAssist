@@ -1498,7 +1498,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             };
             let overlay_glass = overlay_drawn(&wanted, &mut glass, stage, shot.name);
             let (layout, plan, forks_plan, wants) = screen_plans(ui.painter(), size, &session);
-            draw_shell(ui, shot, &layout, &session, mode);
+            draw_shell(ui, shot, &layout, &session, forks_plan.as_ref(), mode);
             let keys = !overlay::is_open(&ctx);
             if !forks.show(ui, shot, &layout, forks_plan.as_ref(), &sheet, mode, keys) {
                 repos_screen::show(ui, &layout, plan.as_ref(), &mut session, Some(&sheet), mode, &mut screen, keys);
@@ -1580,14 +1580,14 @@ fn screen_plans(
 }
 
 /// Draws the shell in `layout` under a shot of the screen (`shot`, of `session` in `mode`), as the window does: its
-/// status bar and title the forks' while they show, else the Repositories screen's.
-fn draw_shell(ui: &mut egui::Ui, shot: &Shot, layout: &shell::Layout, session: &Session, mode: Mode) {
+/// status bar and title the forks' while they show (`forks`, the title as their plan shows it), else the Repositories
+/// screen's.
+fn draw_shell(ui: &mut egui::Ui, shot: &Shot, layout: &shell::Layout, session: &Session, forks: Option<&forks_screen::Plan>, mode: Mode) {
     if !shot.over.is_screen() {
         return;
     }
     let status = session.repos().and_then(forks_screen::status).or_else(|| repos_screen::status(session));
-    let title = session.repos().and_then(forks_screen::title);
-    let shown = ShellShown { mode, waiting: 0, status: status.as_ref(), back: title.as_deref() };
+    let shown = ShellShown { mode, waiting: 0, status: status.as_ref(), back: forks.map(forks_screen::Plan::title) };
     shell::draw(ui, layout, &mut true, &mut Page::Repositories, shown);
 }
 

@@ -17,8 +17,8 @@ use devassist_core::repos::forks::{DayForm, ForkState, day, fork_ahead};
 use devassist_core::repos::gitops::ForkInfo;
 use devassist_core::repos::state::{ForkSort, ForksView, Mode as CoreMode, Repos};
 use egui::{
-    Align2, Color32, Context, Event, FocusDirection, FontFamily, Id, Key, Modifiers, Painter, PointerButton, Pos2, Rect, Response, Role, Sense, Ui,
-    Vec2, WidgetInfo, pos2,
+    Align2, Color32, Context, Event, FontFamily, Id, Key, Modifiers, Painter, PointerButton, Pos2, Rect, Response, Role, Sense, Ui, Vec2, WidgetInfo,
+    pos2,
 };
 
 use crate::assets::{self, Icon};
@@ -29,8 +29,8 @@ use crate::repos_view::Status;
 use crate::shell::{self, Layout, Wants};
 use crate::table::{self, Fill};
 use crate::theme::{
-    self, CELL_ICON_GAP, FIELD_MIN_WIDTH, FIELD_WIDTH, HOVER_OPACITY, ICON, ICON_SMALL, Mode, PAGE_ROWS, PANEL_TEXT_INSET, Palette, RADIUS_PANEL,
-    ROW_BUTTON, ROW_BUTTON_RADIUS, ROW_HEIGHT, RULE_LABEL_GAP, STATE_GAP, TEXT, TOOLBAR_GAP,
+    self, BAR_GAP, CELL_ICON_GAP, FIELD_MIN_WIDTH, FIELD_WIDTH, FORKS_EMPTY_GAP, HOVER_OPACITY, ICON, ICON_SMALL, Mode, PAGE_ROWS, PANEL_TEXT_INSET,
+    Palette, RADIUS_PANEL, ROW_BUTTON, ROW_BUTTON_RADIUS, ROW_HEIGHT, RULE_LABEL_GAP, TEXT, TITLE_LEAST, TOOLBAR_GAP,
 };
 use crate::widgets::{self, Item, Segment, draw_icon, font};
 use crate::{frost, overlay};
@@ -249,6 +249,12 @@ pub struct Plan {
     pub(crate) empty: Option<Empty>,
     /// The top row's actions and its main button, when there is room for them.
     pub(crate) top: Option<Top>,
+    /// The screen's title as the top row shows it: whole, or cut with an ellipsis to leave the controls their room.
+    title: String,
+    /// The whole title, shown on hover where it is cut.
+    title_whole: String,
+    /// How wide the title is drawn.
+    title_width: f32,
     /// The toolbar.
     pub(crate) toolbar: Toolbar,
     /// The filter's text, as the core keeps it.
@@ -258,6 +264,12 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The screen's title as the top row shows it: cut with an ellipsis where it would leave the controls no room.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
     /// Adds the glass of the screen's controls to the panes baked this frame. The main button is a fill, not glass.
     pub fn add_wants(&self, wants: &mut Wants) {
         widgets::add_glass(wants, FILTER_PANE, self.toolbar.field);
@@ -349,6 +361,32 @@ pub(crate) fn toolbar_places(toolbar: Rect, segments: f32, [full, compact]: [f32
     (field, segments, sort, is_compact)
 }
 
+/// The title `whole` as the top row of `layout` shows it, how wide it is drawn, and where the top row's controls stand
+/// beside it (the capsule `actions` wide with its words and without, the main button `main` wide), measured with
+/// `painter`'s faces. The title gives way first: for each way the controls fit, in their order
+/// ([`repos_screen::top_fits`]), it is cut with an ellipsis as far as that way needs, but never narrower than
+/// [`TITLE_LEAST`] (a title narrower than that is never cut); the first way that leaves it that much is taken. When
+/// none does, the title stays whole and the controls are not drawn.
+fn title_and_top(painter: &Painter, layout: &Layout, whole: &str, actions: [f32; 2], main: [f32; 2]) -> (String, f32, Option<Top>) {
+    let face = shell::title_font();
+    let full = widgets::width(painter, whole, &face);
+    let least = TITLE_LEAST.min(full);
+    for (_, actions_width, main_width) in repos_screen::top_fits(actions, main) {
+        // The widest the title may be beside the controls fitted this way.
+        // (The shell draws no title past its own room.)
+        let room = (layout.actions.right() - layout.title.left() - BAR_GAP - (actions_width + BAR_GAP + main_width)).min(layout.title.width());
+        if room.min(full) < least {
+            continue;
+        }
+        let title = if full <= room { whole.to_owned() } else { widgets::ellipsis_in(painter, whole, &face, room) };
+        let width = widgets::width(painter, &title, &face);
+        if let Some(top) = repos_screen::top_place(shell::action_room(layout, width), actions, main) {
+            return (title, width, Some(top));
+        }
+    }
+    (whole.to_owned(), full, None)
+}
+
 /// What the screen draws for the overview `view` in `layout`, measured with `painter`'s faces: the top row's
 /// controls (through the Repositories screen's fitting, [`repos_screen::top_place`]), the toolbar's, and the panel's.
 #[must_use]
@@ -378,9 +416,10 @@ pub fn plan(view: &ForksView, layout: &Layout, painter: &Painter) -> Plan {
     let segments_width = widgets::segments_width(painter, &segment_items(&all, &changed, view.changed_only));
     let sort_widths = [false, true].map(|compact| widgets::capsule_width(painter, &sort_items(&sort_words, compact)));
     let (field, segments, sort, sort_compact) = toolbar_places(layout.toolbar, segments_width, sort_widths);
-    let title_width = widgets::width(painter, &forks_of(view), &shell::title_font());
+    let title_whole = forks_of(view);
     let actions = [Fit::Full, Fit::Compact].map(|fit| widgets::capsule_width(painter, &top_items(fit)));
     let main = [false, true].map(|compact| widgets::main_action_width(painter, FETCH_THE_FORKS, compact, layout.actions.height()));
+    let (title, title_width, top) = title_and_top(painter, layout, &title_whole, actions, main);
     Plan {
         repo: view.repo.clone(),
         panel,
@@ -389,7 +428,10 @@ pub fn plan(view: &ForksView, layout: &Layout, painter: &Painter) -> Plan {
         sorted,
         rows,
         empty,
-        top: repos_screen::top_place(shell::action_room(layout, title_width), actions, main),
+        top,
+        title,
+        title_whole,
+        title_width,
         toolbar: Toolbar { field, segments, sort, sort_words, sort_compact, all, changed },
         filter: view.filter.clone(),
         changed_only: view.changed_only,
@@ -683,17 +725,13 @@ pub fn show(ui: &mut Ui, layout: &Layout, plan: &Plan, sheet: Option<&Sheet>, mo
         leave(ui.ctx());
         *screen = Screen { repo: Some(plan.repo.clone()), ..Screen::default() };
     }
-    if !keys {
-        // egui's own Tab would give the focus to the filter, the one control here that takes it.
-        ui.memory_mut(|memory| {
-            memory.surrender_focus(filter_id());
-            memory.move_focus(FocusDirection::None);
-        });
-        screen.refocus |= screen.filter_focused;
-        screen.filter_focused = false;
-    } else if std::mem::take(&mut screen.refocus) {
-        ui.memory_mut(|memory| memory.request_focus(filter_id()));
-        screen.filter_focused = true;
+    overlay::keep_field_focus(ui, filter_id(), keys, &mut screen.filter_focused, &mut screen.refocus);
+    // A title cut to leave the controls their room is whole on hover.
+    if plan.title != plan.title_whole {
+        let title = Rect::from_min_size(layout.title.min, Vec2::new(plan.title_width, layout.title.height())).intersect(layout.title);
+        if title.is_positive() {
+            ui.interact(title, Id::unique("forks-title"), Sense::hover()).on_hover_text(&plan.title_whole);
+        }
     }
     // The frame's keys are the filter's when it held the focus at the end of the last frame.
     let typing = screen.filter_focused;
@@ -880,7 +918,7 @@ fn draw_empty(ui: &Ui, panel: Rect, empty: &Empty, palette: Palette) {
         std::iter::once((empty.text.as_str(), colour)).chain(empty.detail.as_deref().map(|detail| (detail, palette.quiet))).collect();
     let galleys: Vec<_> =
         lines.iter().map(|(words, colour)| painter.layout_no_wrap(widgets::ellipsis(words, &face, room, ui), face.clone(), *colour)).collect();
-    let gaps = STATE_GAP * f32::from(u8::try_from(galleys.len().saturating_sub(1)).unwrap_or(u8::MAX));
+    let gaps = FORKS_EMPTY_GAP * f32::from(u8::try_from(galleys.len().saturating_sub(1)).unwrap_or(u8::MAX));
     let mut top = panel.center().y - f32::midpoint(galleys.iter().map(|galley| galley.size().y).sum::<f32>(), gaps);
     for (index, (galley, (words, colour))) in galleys.into_iter().zip(lines).enumerate() {
         let at = pos2(panel.center().x - galley.size().x / 2.0, top);
@@ -888,7 +926,7 @@ fn draw_empty(ui: &Ui, panel: Rect, empty: &Empty, palette: Palette) {
         if galley.text() != words {
             hover_whole(ui, drawn, panel, ui.scope_id().with(("forks-empty", index)), words);
         }
-        top += galley.size().y + STATE_GAP;
+        top += galley.size().y + FORKS_EMPTY_GAP;
         painter.galley(at, galley, colour);
     }
 }
@@ -2121,6 +2159,77 @@ mod tests {
         assert!(said.ends_with('…'), "{said}");
         win.rest(rect.center());
         assert!(win.drew(&widgets::capitalised(detail.trim())), "no hover text with the whole error");
+    }
+
+    #[test]
+    fn a_long_name_cuts_the_title_before_the_main_button_goes() {
+        let name = "customer-portal-internationalisation-kit";
+        assert_eq!(name.len(), 40);
+        let mut repos = forks_open();
+        repos.forks.as_mut().unwrap().original = format!("acme/{name}");
+        let full = format!("Forks of {name}");
+        let mut win = Win::new(Session::demo(repos));
+        win.size = [960.0, 600.0];
+        win.frame(Vec::new());
+        let layout = win.pages_layout();
+        let top = win.plan().top.expect("the top row vanished");
+        assert!(win.control(FETCH_THE_FORKS).is_positive(), "no main button");
+        let (said, at, _) =
+            win.texts.iter().find(|(words, at, _)| layout.title.contains(at.center()) && words.starts_with("Forks of")).cloned().expect("no title");
+        assert!(said != full && said.ends_with('…'), "the title is not cut: {said}");
+        assert!(at.right() + theme::BAR_GAP <= top.actions.left() + 1e-3, "the title meets the capsule: {at:?} {top:?}");
+        assert!(top.actions.right() + theme::BAR_GAP <= top.main.left() + 1e-3 && top.main.right() <= layout.captions.left(), "{top:?}");
+        // On hover, the whole title.
+        win.rest(at.center());
+        assert!(win.drew(&full), "no hover text with the whole title");
+        // A short name is never cut: the controls give way first, as they did.
+        let mut win = Win::demo();
+        win.size = [780.0, 600.0];
+        win.frame(Vec::new());
+        assert!(win.drew("Forks of api"));
+    }
+
+    #[test]
+    fn backspace_in_the_filter_only_edits_its_text() {
+        let mut win = Win::demo();
+        win.letter('/');
+        win.frame(vec![Event::Text("bob".to_owned())]);
+        win.frame(Vec::new());
+        assert!(win.typing());
+        win.key(Key::Backspace, None);
+        assert_eq!(win.view().filter, "bo");
+        assert!(win.repos().forks.is_some() && win.typing(), "Backspace in the filter went back");
+    }
+
+    #[test]
+    fn the_tables_filter_gives_up_the_keyboard_when_the_core_opens_the_forks() {
+        let mut win = Win::new(Session::demo(crate::demo::repos()));
+        win.letter('/');
+        win.frame(vec![Event::Text("ap".to_owned())]);
+        win.frame(Vec::new());
+        assert_eq!(win.repos().list_filter, "ap", "the table's filter has the keyboard");
+        win.repos_mut().set_list_filter("");
+        win.repos_mut().clear_marks();
+        win.repos_mut().pick("api");
+        win.repos_mut().open_forks_plain();
+        win.frame(Vec::new());
+        win.frame(Vec::new());
+        assert!(win.repos().forks.is_some());
+        assert!(!win.typing() && win.ctx.memory(|memory| memory.focused().is_none()), "a filter kept the keyboard");
+        let sort = win.view().sort;
+        win.letter('s');
+        win.frame(vec![Event::Text("zz".to_owned())]);
+        assert_eq!(win.repos().list_filter, "", "the table's filter got keys while the forks show");
+        assert_ne!(win.view().sort, sort, "the forks did not get s");
+    }
+
+    #[test]
+    fn l_with_no_run_says_the_cores_notice() {
+        let mut win = Win::demo();
+        assert!(win.repos().job.is_none());
+        win.letter('l');
+        assert_eq!(win.status().0, "Nothing has been updated or cloned yet.");
+        assert!(!overlay::is_open(&win.ctx));
     }
 
     /// Whether the progress dialog is open over the screen.
