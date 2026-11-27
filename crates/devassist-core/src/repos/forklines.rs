@@ -161,9 +161,23 @@ pub(crate) struct ForkWatch {
     pauses: Vec<Pause>,
     /// A count of forks came after the newest pause line.
     hidden: bool,
+    /// The fetch is held (a demo's story): no worker counts its pauses
+    /// down or says "Going on.", so its clock stands at its last line.
+    held: bool,
+    /// When the last line was heard.
+    heard: Option<Instant>,
 }
 
 impl ForkWatch {
+    /// A watch of a held fetch (a demo's story): its pauses show the time
+    /// their lines said and never move, so it reads the same every time.
+    pub(crate) fn held() -> Self {
+        Self {
+            held: true,
+            ..Self::default()
+        }
+    }
+
     /// Hears what the job heard: a task that starts starts from nothing,
     /// and one that ends leaves nothing.
     pub(crate) fn on(&mut self, event: &JobEvent) {
@@ -176,13 +190,20 @@ impl ForkWatch {
             JobEvent::Start(index) => {
                 *self = Self {
                     task: Some(*index),
+                    held: self.held,
                     ..Self::default()
                 };
             }
             JobEvent::Done(index, _) | JobEvent::Failed(index, _) if self.task == Some(*index) => {
-                *self = Self::default();
+                *self = Self {
+                    held: self.held,
+                    ..Self::default()
+                };
             }
-            JobEvent::Line(line, _) => self.hear(line, now),
+            JobEvent::Line(line, _) => {
+                self.heard = Some(now);
+                self.hear(line, now);
+            }
             _ => {}
         }
     }
@@ -233,6 +254,11 @@ impl ForkWatch {
     /// `progress`, at `now`.
     fn progress_at(&self, now: Instant) -> Option<ForkProgress> {
         let (_, done, total) = self.said.as_ref()?;
+        // Held, the clock stands where the last line left it.
+        let now = match self.heard {
+            Some(heard) if self.held => heard,
+            _ => now,
+        };
         let pause = self
             .pauses
             .iter()
@@ -474,6 +500,29 @@ mod tests {
             pause_at(&watch, start, 25).as_deref(),
             Some("The fetch timed out. Paused, going on in 0:07.")
         );
+    }
+
+    #[test]
+    fn a_held_watch_shows_its_pause_as_it_was_said() {
+        let start = Instant::now();
+        let mut watch = ForkWatch::held();
+        watch.on_at(&JobEvent::Start(0), start);
+        for (second, line) in [
+            (0, "38 forks, into api-fork"),
+            (2, "The fetch timed out. Paused for 0:30."),
+            (20, "Paused, going on in 0:12"),
+        ] {
+            watch.on_at(&JobEvent::Line(line.to_string(), false), at(start, second));
+        }
+        // No worker says "Going on.": the pause stands as its last line
+        // said it, however late it is asked.
+        for second in [20, 25, 60, 3600] {
+            assert_eq!(
+                pause_at(&watch, start, second).as_deref(),
+                Some("The fetch timed out. Paused, going on in 0:12."),
+                "{second}"
+            );
+        }
     }
 
     #[test]

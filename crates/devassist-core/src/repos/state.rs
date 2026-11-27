@@ -4528,7 +4528,8 @@ impl Repos {
         let title = format!("Updating the forks of {repo}");
         self.notice(format!("{title}…"), false);
         self.job = Some(gitprogress::job(title, vec![repo.to_string()], 0));
-        self.fork_watch = Some(ForkWatch::default());
+        // No worker counts its pauses down: they stand as they were said.
+        self.fork_watch = Some(ForkWatch::held());
         self.job_close_at = None;
         self.dialog_hidden = false;
         if matches!(self.mode, Mode::List | Mode::Filter | Mode::Progress) {
@@ -8330,6 +8331,31 @@ mod tests {
         app.show_job();
         assert!(app.mode == Mode::Progress);
         assert_eq!(app.fork_progress(), fork_fetch(0, 38, None));
+    }
+
+    #[test]
+    fn a_held_fetch_of_forks_shows_its_pause_as_it_was_said() {
+        let mut app = grouped_app();
+        testing::fork_job(
+            &mut app,
+            "api",
+            &[
+                ("38 forks, into api-fork", false),
+                ("Fetching forks:  63% (24/38)", true),
+                ("The fetch timed out. Paused for 0:30.", false),
+                ("Paused, going on in 0:12", true),
+            ],
+        );
+        let paused = fork_fetch(
+            24,
+            38,
+            Some("The fetch timed out. Paused, going on in 0:12."),
+        );
+        assert_eq!(app.fork_progress(), paused);
+        // No worker counts it down: a held story draws the same each time.
+        std::thread::sleep(Duration::from_millis(1100));
+        app.drain();
+        assert_eq!(app.fork_progress(), paused);
     }
 
     #[test]
