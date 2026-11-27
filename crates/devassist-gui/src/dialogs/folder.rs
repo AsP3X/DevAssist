@@ -40,8 +40,9 @@ use super::{
 use crate::assets::{self, Icon};
 use crate::overlay::{self, Kind};
 use crate::theme::{
-    ADD_FOLDER_GAP, BUTTON_HEIGHT, DIALOG_FIELD_HEIGHT, DIALOG_GAP, DIALOG_MARGIN, DIALOG_PAD, FOLDER_DIALOG_WIDTH, HAIRLINE, HEADER_LINE_HEIGHT,
-    ICON, LINE_OPACITY, LIST_GAP, LIST_PAD, LIST_ROW, MOVE_LEAST_ROWS, MOVE_NOTE_LINE_HEIGHT, MOVE_NOTE_WIDTH, MOVE_ROWS, Palette, TEXT, TEXT_SMALL,
+    ADD_FOLDER_GAP, BUTTON_HEIGHT, DIALOG_FIELD_HEIGHT, DIALOG_GAP, DIALOG_MARGIN, DIALOG_PAD, FOLDER_DIALOG_WIDTH, FORKS_NOTE_LINES, HAIRLINE,
+    HEADER_LINE_HEIGHT, ICON, LINE_OPACITY, LIST_GAP, LIST_PAD, LIST_ROW, MOVE_LEAST_ROWS, MOVE_NOTE_LINE_HEIGHT, MOVE_NOTE_WIDTH, MOVE_ROWS,
+    Palette, TEXT, TEXT_SMALL,
 };
 use crate::widgets::{self, font};
 
@@ -155,26 +156,27 @@ fn drive_note(root: Option<&str>) -> String {
     )
 }
 
-/// How many of the forks folders that stay are named one a line, each with its own reason, before the rest is counted.
-const FORKS_NOTE_LINES: usize = 3;
-
 /// The note on the forks folders that stay where they are, for the checkouts `blocked` whose forks folder cannot follow
 /// them, with the core's reason for each (`Repos::move_forks_blocked`); none when every one can. One, or several for the
 /// same reason: one sentence, the names by the title's rule. Several for reasons of their own: a sentence each, one a
-/// line, [`FORKS_NOTE_LINES`] at most, then how many more.
-fn forks_note(blocked: &[ForksBlocked]) -> Option<String> {
+/// line, `most` at most, then how many more; with `most` 0 (a window with no room for a reason), one sentence that
+/// names them by the title's rule and says each has a reason of its own.
+fn forks_note(blocked: &[ForksBlocked], most: usize) -> Option<String> {
     let first = blocked.first()?;
     let one = |blocked: &ForksBlocked| format!("The forks folder of {} stays where it is: {}.", blocked.name, blocked.why);
     if blocked.len() == 1 {
         return Some(one(first));
     }
+    let names: Vec<String> = blocked.iter().map(|blocked| blocked.name.clone()).collect();
     if blocked.iter().all(|other| other.why == first.why) {
-        let names: Vec<String> = blocked.iter().map(|blocked| blocked.name.clone()).collect();
         return Some(format!("The forks folders of {} stay where they are: {}.", remove::named(&names), first.why));
     }
-    let mut lines: Vec<String> = blocked.iter().take(FORKS_NOTE_LINES).map(one).collect();
-    if blocked.len() > FORKS_NOTE_LINES {
-        lines.push(format!("And {} more.", blocked.len() - FORKS_NOTE_LINES));
+    if most == 0 {
+        return Some(format!("The forks folders of {} stay where they are, each for a reason of its own.", remove::named(&names)));
+    }
+    let mut lines: Vec<String> = blocked.iter().take(most).map(one).collect();
+    if blocked.len() > most {
+        lines.push(format!("And {} more.", blocked.len() - most));
     }
     Some(lines.join("\n"))
 }
@@ -248,9 +250,10 @@ impl State {
         self.text = text;
     }
 
-    /// The note on the forks folders that stay where they are, when one cannot follow its checkout.
-    fn forks_stay(&self) -> Option<String> {
-        forks_note(&self.forks)
+    /// The note on the forks folders that stay where they are, when one cannot follow its checkout, naming `most` of
+    /// them one a line at most ([`forks_note`]).
+    fn forks_stay(&self, most: usize) -> Option<String> {
+        forks_note(&self.forks, most)
     }
 
     /// The note on another drive, when the core can tell that the move crosses to one.
@@ -309,6 +312,8 @@ pub(super) struct Places {
     pub(super) drive: Option<Rect>,
     /// The row of the buttons.
     pub(super) buttons: Rect,
+    /// How many of the forks folders that stay the note at `forks` names one a line at most ([`forks_note`]).
+    pub(super) forks_lines: usize,
 }
 
 /// What stands under the folder field besides its rows.
@@ -391,7 +396,7 @@ fn folder_places(window: Rect, header: f32, rows: usize, under: Under) -> Places
         }
     };
     let buttons = Rect::from_min_max(pos2(inside.left(), (inside.bottom() - BUTTON_HEIGHT).max(inside.top())), inside.max);
-    Places { pane, header, label, field, note, hint, list, forks, drive, buttons }
+    Places { pane, header, label, field, note, hint, list, forks, drive, buttons, forks_lines: FORKS_NOTE_LINES }
 }
 
 /// A note under a move's rows (on the forks folders that stay, on another drive), laid out with `painter`'s faces:
@@ -413,16 +418,23 @@ pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, state: &State
     let rows = widgets::folder_field_rows(painter.ctx(), field_id(), state.suggestions.len());
     let width = FOLDER_DIALOG_WIDTH - 2.0 * DIALOG_PAD;
     let below = state.under(repos).map(|(words, _)| under_galley(painter, &words, width).size().y);
-    let under = match prompt.purpose {
-        Purpose::Move(_) => Under::Move {
-            below: below.unwrap_or_else(|| line_height(TEXT_SMALL)),
-            lines: state.lines.len(),
-            forks: state.forks_stay().map(|note| note_galley(painter, &note).size().y),
-            drive: state.other_drive().map(|note| note_galley(painter, &note).size().y),
-        },
-        _ => Under::Import { refused: below },
+    let place = |most: usize| {
+        let under = match prompt.purpose {
+            Purpose::Move(_) => Under::Move {
+                below: below.unwrap_or_else(|| line_height(TEXT_SMALL)),
+                lines: state.lines.len(),
+                forks: state.forks_stay(most).map(|note| note_galley(painter, &note).size().y),
+                drive: state.other_drive().map(|note| note_galley(painter, &note).size().y),
+            },
+            _ => Under::Import { refused: below },
+        };
+        Places { forks_lines: most, ..folder_places(window, header.height(), rows, under) }
     };
-    let places = folder_places(window, header.height(), rows, under);
+    // In a short window the forks note names fewer of them one a line, down to none (one sentence that names them),
+    // before the rows drop under their least.
+    let least = list_height(state.lines.len().min(MOVE_LEAST_ROWS));
+    let keeps_rows = |places: &Places| places.list.is_none_or(|list| list.height() >= least - 1e-3);
+    let places = (0..=FORKS_NOTE_LINES).rev().map(place).find(keeps_rows).unwrap_or_else(|| place(0));
     Some(Plan::dialog(header, Parts::Folder(places)))
 }
 
@@ -486,7 +498,9 @@ pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Rep
     if let Some(rect) = places.list {
         list(ui, rect, &state.lines, palette, dialogs);
     }
-    for (place, note, icon) in [(places.forks, state.forks_stay(), Icon::GitBranch), (places.drive, state.other_drive(), Icon::HardDrive)] {
+    for (place, note, icon) in
+        [(places.forks, state.forks_stay(places.forks_lines), Icon::GitBranch), (places.drive, state.other_drive(), Icon::HardDrive)]
+    {
         if let (Some(rect), Some(note)) = (place, note) {
             move_note(ui.painter(), rect, &note, icon, palette);
         }
@@ -1043,29 +1057,40 @@ mod tests {
         let blocked = |pairs: &[(&str, &str)]| {
             pairs.iter().map(|(name, why)| ForksBlocked { name: (*name).to_owned(), why: (*why).to_owned() }).collect::<Vec<_>>()
         };
-        assert_eq!(forks_note(&[]), None);
+        assert_eq!(forks_note(&[], FORKS_NOTE_LINES), None);
         // One: the core's reason.
         assert_eq!(
-            forks_note(&blocked(&[("api", r"something is at E:\work\api-fork already")])).as_deref(),
+            forks_note(&blocked(&[("api", r"something is at E:\work\api-fork already")]), FORKS_NOTE_LINES).as_deref(),
             Some(r"The forks folder of api stays where it is: something is at E:\work\api-fork already.")
         );
         // Several for the same reason: one sentence.
         let same = "its Git configuration could not be read (denied)";
         assert_eq!(
-            forks_note(&blocked(&[("api", same), ("web", same)])).as_deref(),
+            forks_note(&blocked(&[("api", same), ("web", same)]), FORKS_NOTE_LINES).as_deref(),
             Some("The forks folders of api and web stay where they are: its Git configuration could not be read (denied).")
         );
         // Several for their own reasons: a line each, three at most, then how many more.
         let own = blocked(&[("a", "one"), ("b", "two"), ("c", "three"), ("d", "four"), ("e", "five")]);
         assert_eq!(
-            forks_note(&own).as_deref(),
+            forks_note(&own, FORKS_NOTE_LINES).as_deref(),
             Some(
                 "The forks folder of a stays where it is: one.\nThe forks folder of b stays where it is: two.\nThe forks folder of c stays \
                  where it is: three.\nAnd 2 more."
             )
         );
+        // Fewer lines when the window is short: the rest is counted.
         assert_eq!(
-            forks_note(&own[..3]).as_deref(),
+            forks_note(&own, 1).as_deref(),
+            Some(
+                "The forks folder of a stays where it is: one.
+And 4 more."
+            )
+        );
+        assert_eq!(forks_note(&own, 0).as_deref(), Some("The forks folders of 5 repositories stay where they are, each for a reason of its own."));
+        // A note of one, or of one reason, has nothing to give up.
+        assert_eq!(forks_note(&own[..1], 0), forks_note(&own[..1], FORKS_NOTE_LINES));
+        assert_eq!(
+            forks_note(&own[..3], FORKS_NOTE_LINES).as_deref(),
             Some(
                 "The forks folder of a stays where it is: one.\nThe forks folder of b stays where it is: two.\nThe forks folder of c stays \
                  where it is: three."
@@ -1073,7 +1098,7 @@ mod tests {
         );
         // Five for the same reason, counted, take two lines (as the dialog's places allow for).
         let five = ["a", "b", "c", "d", "e"].map(|name| (name, "something is at the place it would go already"));
-        let longest = forks_note(&blocked(&five)).unwrap();
+        let longest = forks_note(&blocked(&five), FORKS_NOTE_LINES).unwrap();
         assert!(longest.starts_with("The forks folders of 5 repositories stay"), "{longest}");
         let mut rows = 0;
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(WINDOW[0], WINDOW[1]))), ..Default::default() };
@@ -1107,7 +1132,7 @@ mod tests {
         let (list, forks) = (places.list.unwrap(), places.forks.expect("the note on the forks folder"));
         assert!(forks.top() >= list.bottom() && forks.bottom() <= places.buttons.top() && places.pane.contains_rect(forks));
         assert!(places.pane.height() > tall, "the dialog did not make room for the note");
-        let said = forks_note(&state(&window).forks).unwrap();
+        let said = forks_note(&state(&window).forks, FORKS_NOTE_LINES).unwrap();
         assert_eq!(said, format!("The forks folder of api stays where it is: something is at {} already.", there.join("api-fork").display()));
         assert!(window.texts.iter().any(|(words, rect, cut)| *words == said && !cut && forks.contains_rect(*rect)), "the note is not drawn");
         // Both still move: the note only says what stays.
@@ -1261,6 +1286,71 @@ mod tests {
         // The buttons are there to press.
         window.press("Cancel");
         assert!(!window.open() && window.repos().mode == CoreMode::List);
+    }
+
+    #[test]
+    #[cfg_attr(not(windows), ignore = "the demo's checkouts and these folders are Windows paths (drives D: and E:)")]
+    fn three_reasons_and_more_with_the_drive_note_keep_three_rows_in_the_smallest_window() {
+        // Eight checkouts on another drive; five forks folders stay, each for a reason of its own: three reason lines,
+        // "And 2 more.", and the drive note, with the folder rows open, at 960 by 600.
+        let mut repos = Repos::offline(test_settings());
+        repos.hold_work();
+        for index in 0..8 {
+            let name = format!("repository-with-a-long-name-{index}");
+            let mut repo = installed("acme", &name);
+            repo.folder.clone_from(&name);
+            repo.path = PathBuf::from(r"E:\many").join(&name);
+            repos.checkouts.push(repo.path.clone());
+            repos.marked.push(name);
+            repos.installed.push(repo);
+        }
+        repos.run_migrate(MigrateItem::Folder);
+        let mut window = Window::new(Session::demo(repos));
+        window.size = MIN_WINDOW;
+        window.frame(Vec::new());
+        type_over(&mut window, &format!("{}{}", crate::demo::CODE_DIR, std::path::MAIN_SEPARATOR));
+        assert!(widgets::folder_field_rows(&window.ctx, field_id(), 4) > 0, "the folder rows are not open");
+        let reasons: Vec<(String, String)> = (0..5)
+            .map(|index| {
+                let name = format!("repository-with-a-long-name-{index}");
+                let why = format!(r"something is at {}\{name}-fork already ({index})", crate::demo::CODE_DIR);
+                (name, why)
+            })
+            .collect();
+        let blocked: Vec<(&str, &str)> = reasons.iter().map(|(name, why)| (name.as_str(), why.as_str())).collect();
+        note_forks_stay(window.dialogs.folder.as_mut().expect("the folder dialog's state"), &blocked);
+        assert!(forks_note(&state(&window).forks, FORKS_NOTE_LINES).is_some_and(|note| note.lines().count() == 4 && note.ends_with("And 2 more.")));
+        window.frame(Vec::new());
+        window.frame(Vec::new());
+        let places = parts(&window);
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(MIN_WINDOW[0], MIN_WINDOW[1]));
+        let (list, forks, drive) = (places.list.unwrap(), places.forks.expect("no forks note"), places.drive.expect("no drive note"));
+        assert!(screen.contains_rect(places.pane), "{places:?}");
+        for part in [places.header, places.label, places.field, places.hint.unwrap(), list, forks, drive, places.buttons] {
+            assert!(places.pane.contains_rect(part), "{part:?} outside {:?}", places.pane);
+        }
+        assert!(list.bottom() <= forks.top() && forks.bottom() <= drive.top() && drive.bottom() <= places.buttons.top(), "{places:?}");
+        assert!(
+            list.height() >= list_height(MOVE_LEAST_ROWS) - 1e-3,
+            "the list shows fewer than three rows: {list:?} of {} in {places:?}",
+            list_height(MOVE_LEAST_ROWS)
+        );
+        // The note gave up its reason lines for it, and still names the five.
+        let drawn = forks_note(&state(&window).forks, places.forks_lines).unwrap();
+        assert!(places.forks_lines < FORKS_NOTE_LINES, "{}", places.forks_lines);
+        if places.forks_lines == 0 {
+            assert!(drawn.starts_with("The forks folders of 5 repositories stay where they are"), "{drawn}");
+        } else {
+            assert!(drawn.ends_with(&format!("And {} more.", 5 - places.forks_lines)), "{drawn}");
+        }
+        assert!(window.texts.iter().any(|(words, rect, _)| *words == drawn && forks.contains_rect(*rect)), "the note is not drawn");
+        // Nothing the dialog draws leaves its pane: from its title on, every text.
+        let title = window.texts.iter().position(|(words, ..)| words.starts_with("Move ")).expect("no title");
+        for (words, rect, _) in &window.texts[title..] {
+            assert!(places.pane.contains_rect(*rect), "{words:?} at {rect:?} outside {:?}", places.pane);
+        }
+        window.press("Cancel");
+        assert!(!window.open());
     }
 
     #[test]

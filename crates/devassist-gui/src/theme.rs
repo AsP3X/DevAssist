@@ -489,6 +489,10 @@ pub const MOVE_ROWS: usize = 6;
 /// The fewest rows the Move dialog's "What moves" keeps (all, when fewer) while the window is short: the folder
 /// field's rows give up their room first.
 pub const MOVE_LEAST_ROWS: usize = 3;
+/// How many of the forks folders that stay the Move dialog's note names one a line, each with its own reason, before it
+/// counts the rest ("And 2 more."). A short window takes fewer, down to one, before the rows drop under
+/// [`MOVE_LEAST_ROWS`].
+pub const FORKS_NOTE_LINES: usize = 3;
 /// The width the Move dialog's note on another drive wraps at (the design's `fixed(…, 420, …)`).
 pub const MOVE_NOTE_WIDTH: f32 = 420.0;
 /// The line height of the Move dialog's note on another drive, as a share of its size (the design's
@@ -1028,6 +1032,7 @@ mod tests {
         ];
         assert_eq!(FOLDER_ROWS, 6);
         assert_eq!(INTO_LINES, 2);
+        assert_eq!(FORKS_NOTE_LINES, 3);
         assert_eq!(LIST_PAD, [4.0, 12.0]);
         for (constant, got, expected) in want {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");
