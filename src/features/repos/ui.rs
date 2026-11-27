@@ -333,7 +333,12 @@ fn draw_forks(frame: &mut Frame, app: &mut App, header: Rect, columns: Rect, lis
         let ahead = fork_ahead(fork)
             .map(|ahead| ahead.to_string())
             .unwrap_or_default();
-        let date = day(fork.date, DayForm::Digits);
+        // A time before 1970, or none, is no day (a clock gone wrong, or nothing fetched).
+        let date = if fork.date > 0 {
+            day(fork.date, DayForm::Digits)
+        } else {
+            String::new()
+        };
         let cells = [
             if chosen { "▌ " } else { "  " }.to_string(),
             format!("{}/{}", fork.owner, fork.name),
@@ -1457,7 +1462,7 @@ fn draw_path(frame: &mut Frame, app: &mut App, screen: Rect) {
             };
             let note = match clone_target(prompt) {
                 Some(target) => format!("becomes {}", target.display()),
-                None => "each repository keeps its folder name inside".to_string(),
+                None => "each repository keeps its folder name and its forks inside".to_string(),
             };
             (" Move to another folder ", what, note, "Move", "moves")
         }
@@ -2533,6 +2538,56 @@ mod tests {
         assert!(text.contains("only forks with changes"), "{text}");
         assert!(!text.contains("cy/api"), "{text}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_move_question_says_the_forks_go_along() {
+        let mut app = app(false);
+        let repos = vec![
+            ("api".to_string(), PathBuf::from("development").join("api")),
+            ("web".to_string(), PathBuf::from("development").join("web")),
+        ];
+        app.prompt = Some(Purpose::Move(repos).prompt(&PathBuf::from("development")));
+        app.mode = Mode::Path;
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.contains("╭ Move to another folder "), "{screen}");
+        assert!(
+            screen.contains("each repository keeps its folder name and its forks inside"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_fork_whose_newest_commit_is_before_1970_or_absent_shows_no_day() {
+        use crate::features::repos::gitops::{ForkInfo, ForkList};
+        use crate::features::repos::state::testing;
+
+        let mut app = app(false);
+        app.installed = vec![local("api", false)];
+        let fork = |owner: &str, date: i64| ForkInfo {
+            owner: owner.into(),
+            name: "api".into(),
+            branches: 1,
+            pulls: 0,
+            ahead: None,
+            date,
+            folder: false,
+            gone: false,
+        };
+        let list = ForkList {
+            original: "AsP3X/api".into(),
+            dest: PathBuf::from("development").join("api-fork"),
+            forks: vec![
+                fork("ada", -86_400),
+                fork("bob", 0),
+                fork("cy", 1_795_596_570),
+            ],
+            ..ForkList::default()
+        };
+        testing::open_forks_of(&mut app, "api", list);
+        let text = render(&mut app, 120, 20);
+        assert!(!text.contains("1969") && !text.contains("1970"), "{text}");
+        assert!(text.contains("2026-11-25"), "{text}");
     }
 
     #[test]
