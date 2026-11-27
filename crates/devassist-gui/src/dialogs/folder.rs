@@ -230,7 +230,7 @@ impl State {
         self.crosses = if self.lines.is_empty() { None } else { repos.move_crosses_volumes() };
         // Only a move says why while typing; Import's line is the refusal alone.
         self.reason = if self.lines.is_empty() { None } else { repos.path_reason() };
-        self.forks = if self.lines.is_empty() { Vec::new() } else { repos.move_forks_blocked() };
+        self.forks = if self.lines.is_empty() { Vec::new() } else { repos.move_forks_blocked(&self.lines) };
         self.text = text;
     }
 
@@ -1048,10 +1048,14 @@ mod tests {
 
     #[test]
     fn a_forks_folder_that_cannot_follow_is_noted_under_the_rows() {
-        // A live session (not held): the core looks at the disk.
+        // A live session (not held): the core looks at the disk, and asks Git whether the folder is a forks collection.
+        let _live = crate::session::tests::live_git();
         let root = Temp(std::env::temp_dir().join(format!("devassist-gui-move-forks-{}", std::process::id())));
         let mut window = live_move(&root.0);
-        std::fs::create_dir_all(root.0.join("here").join("api-fork")).unwrap();
+        // api's forks collection, marked as `save_forks` marks one.
+        let git_dir = root.0.join("here").join("api-fork").join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("config"), "[devassist]\n\tforksof = acme/api\n").unwrap();
         let there = root.0.join("there");
         type_over(&mut window, &there.display().to_string());
         assert_eq!(parts(&window).forks, None, "nothing is at the target");
@@ -1068,6 +1072,11 @@ mod tests {
         assert!(window.texts.iter().any(|(words, rect, cut)| *words == said && !cut && forks.contains_rect(*rect)), "the note is not drawn");
         // Both still move: the note only says what stays.
         assert_eq!(window.said(), ["Cancel", "Move 2 repositories"]);
+        // A folder only named like a forks folder is none: no note.
+        std::fs::write(git_dir.join("config"), "[core]\n\tbare = false\n").unwrap();
+        type_over(&mut window, &there.display().to_string());
+        assert_eq!(state(&window).forks, Vec::<String>::new());
+        assert_eq!(parts(&window).forks, None);
         window.session.close();
     }
 

@@ -1070,7 +1070,26 @@ pub fn move_checkout(
     to: &Path,
     mut on_line: impl FnMut(&str, bool),
 ) -> Result<Option<String>, String> {
-    move_folder(from, to, &mut on_line)
+    move_folder(from, to, &mut on_line).map_err(|failed| failed.text)
+}
+
+/// Why a move of a folder did not happen.
+#[derive(Debug, PartialEq, Eq)]
+struct MoveFailed {
+    /// What to say, as a clause.
+    text: String,
+    /// It was a copy that was cancelled, and nothing of it is left at the
+    /// target.
+    cancelled: bool,
+}
+
+impl From<String> for MoveFailed {
+    fn from(text: String) -> Self {
+        MoveFailed {
+            text,
+            cancelled: false,
+        }
+    }
 }
 
 /// Moves the folder `from` to `to`, a path that must be free: a rename on
@@ -1080,15 +1099,15 @@ fn move_folder(
     from: &Path,
     to: &Path,
     on_line: &mut dyn FnMut(&str, bool),
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, MoveFailed> {
     if !from.is_dir() {
-        return Err(format!("{} is not there any more", from.display()));
+        return Err(format!("{} is not there any more", from.display()).into());
     }
     if to.exists() {
-        return Err(format!("{} is there already", to.display()));
+        return Err(format!("{} is there already", to.display()).into());
     }
     if paths::is_within(to, from) {
-        return Err("a folder cannot be moved into itself".into());
+        return Err(String::from("a folder cannot be moved into itself").into());
     }
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)
@@ -1101,7 +1120,7 @@ fn move_folder(
     match fs::rename(from, to) {
         Ok(()) => return Ok(None),
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {}
-        Err(err) => return Err(format!("could not move {}: {err}", from.display())),
+        Err(err) => return Err(format!("could not move {}: {err}", from.display()).into()),
     }
     copy_then_delete(from, to, on_line)
 }
@@ -1120,7 +1139,8 @@ pub struct ForksFolderMoved {
 /// moves `<from_checkout>-fork` to `<to_checkout>-fork` the way
 /// `move_checkout` moves a checkout, then repairs the fork folders in it
 /// (Git worktrees of the collection, which name each other by their
-/// paths). None when there is no forks folder. An error, as a clause, when
+/// paths). None when there is no forks collection (`forks_collection`):
+/// a folder that only has its name is left alone. An error, as a clause, when
 /// it cannot go: something is at the target already ("something is at
 /// D:\code\api-fork already"), the move failed, or it was cancelled
 /// ("cancelled"); the forks folder is then where it was, whole.
@@ -1134,25 +1154,22 @@ pub fn move_forks_folder(
     to_checkout: &Path,
     mut on_line: impl FnMut(&str, bool),
 ) -> Result<Option<ForksFolderMoved>, String> {
-    let (Some(from), Some(to)) = (forks_folder(from_checkout), forks_folder(to_checkout)) else {
+    let (Some(from), Some(to)) = (forks_collection(from_checkout), forks_folder(to_checkout))
+    else {
         return Ok(None);
     };
-    crate::sys::note_read();
-    if !from.is_dir() {
-        return Ok(None);
-    }
     if stopped(&from) {
         return Err("cancelled".into());
     }
     if fs::symlink_metadata(&to).is_ok() {
         return Err(format!("something is at {} already", to.display()));
     }
-    let left = move_folder(&from, &to, &mut on_line).map_err(|err| {
+    let left = move_folder(&from, &to, &mut on_line).map_err(|failed| {
         // A cancelled copy whose partial copy was removed again.
-        if err == format!("could not copy to {}: cancelled", to.display()) {
+        if failed.cancelled {
             "cancelled".to_string()
         } else {
-            err
+            failed.text
         }
     })?;
     on_line("Repairing the fork folders…", true);
@@ -1162,11 +1179,55 @@ pub fn move_forks_folder(
     }))
 }
 
+/// The forks collection of a checkout: the folder beside it (`forks_folder`)
+/// when it is one that `save_forks` made, which is so when its `.git` is a
+/// folder and its configuration names the repository whose forks it holds
+/// (`devassist.forksof`, any value that is not empty). None for anything
+/// else of that name, such as someone's own clone or a plain folder. The
+/// configuration file is read by Git directly, so a folder that is no
+/// repository is not mistaken for one above it.
+pub fn forks_collection(checkout: &Path) -> Option<PathBuf> {
+    let dest = forks_folder(checkout)?;
+    crate::sys::note_read();
+    let config = dest.join(".git").join("config");
+    if !config.is_file() {
+        return None;
+    }
+    let marked = git_command()
+        .arg("config")
+        .arg("--file")
+        .arg(&config)
+        .args(["--get", FORKS_KEY])
+        .output()
+        .ok()?;
+    let value = String::from_utf8_lossy(&marked.stdout);
+    (marked.status.success() && !value.trim().is_empty()).then_some(dest)
+}
+
+/// Why `git worktree repair` failed, from what it wrote to its error
+/// output: the first line that is an error, else the last line (it also
+/// writes lines of what it repaired), without a closing full stop.
+fn repair_why(stderr: &str) -> String {
+    let said = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("fatal:") || line.starts_with("error:"))
+        .map_or_else(|| last_line(stderr), str::to_string);
+    said.trim_end_matches('.').to_string()
+}
+
 /// Tells the fork collection `dest` and the fork folders in it where each
 /// other is, after the folder has moved: `git worktree repair` with the
-/// path of every fork folder, run in the collection. Why it failed, as a
-/// clause, when it did.
+/// path of every fork folder, run in the collection. Where nothing moved
+/// it changes nothing. Why it failed, as a clause, when it did.
 fn repair_fork_folders(dest: &Path) -> Result<(), String> {
+    #[cfg(any(test, feature = "testing"))]
+    if seams::repair_refused(dest) {
+        return Err(seams::refusal().to_string());
+    }
+    // The fork folders' paths are given to Git as they are: absolute, so
+    // that `-C` does not resolve them a second time.
+    let dest = &std::path::absolute(dest).map_err(|err| format!("{}: {err}", dest.display()))?;
     let folders: Vec<PathBuf> = fs::read_dir(dest)
         .map_err(|err| format!("{}: {err}", dest.display()))?
         .flatten()
@@ -1184,12 +1245,11 @@ fn repair_fork_folders(dest: &Path) -> Result<(), String> {
     match cmd.output() {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
-            let said = last_line(&String::from_utf8_lossy(&output.stderr));
-            let said = said.trim_end_matches('.');
+            let said = repair_why(&String::from_utf8_lossy(&output.stderr));
             Err(if said.is_empty() {
                 format!("git exited with {}", output.status)
             } else {
-                said.to_string()
+                said
             })
         }
         Err(err) => Err(format!("could not start git ({err})")),
@@ -1286,7 +1346,7 @@ fn copy_then_delete(
     from: &Path,
     to: &Path,
     on_line: &mut dyn FnMut(&str, bool),
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, MoveFailed> {
     on_line(
         "Another drive: copying, then deleting the old folder.",
         false,
@@ -1311,14 +1371,16 @@ fn copy_then_delete(
         // Leave nothing half-copied behind; the original is untouched.
         on_line("Removing what was copied so far…", true);
         let mut text = format!("could not copy to {}: {err}", to.display());
+        let mut cancelled = matches!(err, CopyStop::Cancelled);
         if let Err(left) = delete_tree(to) {
+            cancelled = false;
             text.push_str(&format!(
                 ". The partial copy at {} could not be removed: {}",
                 to.display(),
                 sentence(&left.to_string())
             ));
         }
-        return Err(text);
+        return Err(MoveFailed { text, cancelled });
     }
     on_line(&format!("Copied {total} files."), false);
     on_line("Deleting the old folder…", true);
@@ -1358,12 +1420,36 @@ fn count_files(dir: &Path) -> u64 {
 
 /// Copies a folder with everything in it. `on_file` hears each file that
 /// has been copied.
-fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(), String> {
+/// Why a copy stopped before it was complete.
+#[derive(Debug)]
+enum CopyStop {
+    /// The run was cancelled.
+    Cancelled,
+    /// Something could not be copied, as a clause.
+    Failed(String),
+}
+
+impl From<String> for CopyStop {
+    fn from(text: String) -> Self {
+        CopyStop::Failed(text)
+    }
+}
+
+impl std::fmt::Display for CopyStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CopyStop::Cancelled => f.write_str("cancelled"),
+            CopyStop::Failed(text) => f.write_str(text),
+        }
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(), CopyStop> {
     fs::create_dir_all(to).map_err(|err| format!("{}: {err}", to.display()))?;
     let entries = fs::read_dir(from).map_err(|err| format!("{}: {err}", from.display()))?;
     for entry in entries {
         if stopped(from) {
-            return Err("cancelled".into());
+            return Err(CopyStop::Cancelled);
         }
         let entry = entry.map_err(|err| format!("{}: {err}", from.display()))?;
         let source = entry.path();
@@ -1393,12 +1479,13 @@ fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(
                 return Err(format!(
                     "{} is not a file or a folder, so it cannot be copied",
                     source.display()
-                ));
+                )
+                .into());
             }
         }
         #[cfg(any(test, feature = "testing"))]
         if seams::refused(&source) {
-            return Err(format!("{}: {}", source.display(), seams::refusal()));
+            return Err(format!("{}: {}", source.display(), seams::refusal()).into());
         }
         fs::copy(&source, &target).map_err(|err| format!("{}: {err}", source.display()))?;
         on_file(&source);
@@ -2173,6 +2260,14 @@ fn fork_folders(
     on_line: &mut dyn FnMut(&str, bool),
 ) -> Result<u32, String> {
     use std::collections::{BTreeMap, HashMap, HashSet};
+    // Fork folders that moved with the collection (by a move that could
+    // not repair them, or by hand) are repaired, not pruned.
+    if let Err(why) = repair_fork_folders(dest) {
+        on_line(
+            &format!("The fork folders could not be repaired: {why}."),
+            false,
+        );
+    }
     let _ = git_lines(dest, &["worktree", "prune"]);
     // Every commit of the original: a branch that ends on one of them
     // has nothing of its own.
@@ -3360,12 +3455,14 @@ pub mod seams {
         refused: Vec<PathBuf>,
         far: Vec<PathBuf>,
         cancelled: Vec<PathBuf>,
+        unrepaired: Vec<PathBuf>,
     }
 
     static SET: Mutex<Set> = Mutex::new(Set {
         refused: Vec::new(),
         far: Vec::new(),
         cancelled: Vec::new(),
+        unrepaired: Vec::new(),
     });
 
     fn with<T>(act: impl FnOnce(&mut Set) -> T) -> T {
@@ -3392,6 +3489,21 @@ pub mod seams {
     /// other tests.
     pub fn cancel_within(path: &Path) {
         with(|set| set.cancelled.push(path.to_path_buf()));
+    }
+
+    /// The next repair of the fork folders of the collection `path` fails;
+    /// the one after it runs.
+    pub fn fail_repair_once(path: &Path) {
+        with(|set| set.unrepaired.push(path.to_path_buf()));
+    }
+
+    /// Whether this repair of the collection `path` is to fail; a refusal
+    /// is used up by it.
+    pub(super) fn repair_refused(path: &Path) -> bool {
+        with(|set| {
+            let at = set.unrepaired.iter().position(|known| known == path);
+            at.map(|at| set.unrepaired.remove(at)).is_some()
+        })
     }
 
     pub(super) fn cancelled(path: &Path) -> bool {
@@ -4377,7 +4489,9 @@ refs/remotes/fork/dev\tiii\t\t
         fs::write(broken.join("b"), "b").unwrap();
         seams::refuse(&broken.join("b"));
         let far = root.join("far");
-        let err = copy_then_delete(&broken, &far, &mut |_, _| {}).unwrap_err();
+        let err = copy_then_delete(&broken, &far, &mut |_, _| {})
+            .unwrap_err()
+            .text;
         assert_eq!(
             err,
             format!(
@@ -4392,7 +4506,9 @@ refs/remotes/fork/dev\tiii\t\t
         // One whose partial copy cannot be removed either says that too.
         let stuck = root.join("stuck");
         seams::refuse(&stuck);
-        let err = copy_then_delete(&broken, &stuck, &mut |_, _| {}).unwrap_err();
+        let err = copy_then_delete(&broken, &stuck, &mut |_, _| {})
+            .unwrap_err()
+            .text;
         assert!(
             err.ends_with(&format!(
                 ". The partial copy at {} could not be removed: refused by the test.",
@@ -4430,7 +4546,9 @@ refs/remotes/fork/dev\tiii\t\t
             .status()
             .is_ok_and(|status| status.success());
         assert!(made, "mkfifo");
-        let err = copy_tree(&piped, &root.join("piped-copy"), &mut |_| {}).unwrap_err();
+        let err = copy_tree(&piped, &root.join("piped-copy"), &mut |_| {})
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("is not a file or a folder"), "{err}");
     }
 
@@ -5014,6 +5132,96 @@ refs/remotes/fork/dev\tiii\t\t
         assert_eq!(moved.left, None);
         assert!(!old_forks.exists());
         assert!(forks_cloned(&new), "the forks folder moved all the same");
+    }
+
+    #[test]
+    fn a_folder_that_only_has_the_name_of_a_forks_folder_stays_untouched() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-forks-name-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        // A collection DevAssist made is one.
+        let (api, _) = checkout_with_forks(&root);
+        assert_eq!(forks_collection(&api), forks_folder(&api));
+        // A plain folder, and someone's own clone, beside a checkout are not.
+        fs::create_dir_all(root.join("mine")).unwrap();
+        git(&root.join("mine"), &["clone", "-q", "../ada", "web"]);
+        git(&root.join("mine"), &["clone", "-q", "../ada", "web-fork"]);
+        fs::create_dir_all(root.join("mine").join("docs")).unwrap();
+        fs::create_dir_all(root.join("mine").join("docs-fork")).unwrap();
+        fs::write(root.join("mine").join("docs-fork").join("notes"), "notes").unwrap();
+        for (name, file) in [
+            ("web", Path::new(".git/config")),
+            ("docs", Path::new("notes")),
+        ] {
+            let old = root.join("mine").join(name);
+            let other = forks_folder(&old).unwrap();
+            assert_eq!(forks_collection(&old), None, "{name}");
+            let before = fs::read(other.join(file)).unwrap();
+            let listing = entries(&other);
+            let new = root.join("moved").join(name);
+            assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+            let mut lines = Vec::new();
+            assert_eq!(
+                move_forks_folder(&old, &new, |line, _| lines.push(line.to_string())),
+                Ok(None),
+                "{name}"
+            );
+            assert!(lines.is_empty(), "{name}: {lines:?}");
+            assert_eq!(fs::read(other.join(file)).unwrap(), before, "{name}");
+            assert_eq!(entries(&other), listing, "{name}");
+            assert!(!forks_folder(&new).unwrap().exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_fetch_repairs_the_fork_folders_a_move_could_not() {
+        let root =
+            std::env::temp_dir().join(format!("devassist-forks-heal-{}", std::process::id()));
+        let _ = remove_tree(&root);
+        let _gone = Gone(root.clone());
+        let (old, forks) = checkout_with_forks(&root);
+        let old_forks = forks_folder(&old).unwrap();
+        let new = root.join("there").join("api");
+        let new_forks = forks_folder(&new).unwrap();
+        seams::fail_repair_once(&new_forks);
+        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        let moved = move_forks_folder(&old, &new, |_, _| {}).unwrap().unwrap();
+        assert_eq!(moved.unrepaired.as_deref(), Some("refused by the test"));
+        let status = |dir: &Path| {
+            git_command()
+                .arg("-C")
+                .arg(dir)
+                .arg("status")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(
+            !status(&new_forks.join("bob")),
+            "the fork folder works unrepaired"
+        );
+        // The next fetch repairs it, and finds the forks as they were.
+        let again = fetch_again(&root, &new, &forks);
+        assert_eq!((again.fetched, again.unchanged, again.folders), (0, 2, 1));
+        works_at(&new, &old_forks);
+    }
+
+    #[test]
+    fn the_reason_a_repair_failed_is_its_error_line() {
+        assert_eq!(
+            repair_why(
+                "repair: gitdir incorrect: /a/.git\nerror: .git file broken: /b/.git\nrepair: done\n"
+            ),
+            "error: .git file broken: /b/.git"
+        );
+        assert_eq!(
+            repair_why("fatal: not a git repository.\n"),
+            "fatal: not a git repository"
+        );
+        assert_eq!(repair_why("something\nelse happened\n"), "else happened");
+        assert_eq!(repair_why(""), "");
     }
 
     #[test]
