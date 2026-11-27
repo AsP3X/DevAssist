@@ -480,8 +480,15 @@ impl ForksView {
             shown: self.rows().len(),
             changed: self.forks.iter().filter(|fork| fork.folder).count(),
             gone: self.forks.iter().filter(|fork| fork.gone).count(),
-            branches: self.forks.iter().map(|fork| fork.branches).sum(),
-            pulls: self.forks.iter().map(|fork| fork.pulls).sum(),
+            // Held at the largest number: a sum past it is no count anyone reads.
+            branches: self
+                .forks
+                .iter()
+                .fold(0, |sum: u32, fork| sum.saturating_add(fork.branches)),
+            pulls: self
+                .forks
+                .iter()
+                .fold(0, |sum: u32, fork| sum.saturating_add(fork.pulls)),
         }
     }
 
@@ -7859,6 +7866,20 @@ mod tests {
         assert_eq!(open(&app).sort, ForkSort::Changed);
         app.toggle_fork_changed_only();
         assert!(!open(&app).changed_only);
+    }
+
+    #[test]
+    fn the_sums_of_the_overview_stop_at_the_largest_number_instead_of_overflowing() {
+        let mut huge = a_fork("bob", u32::MAX, u32::MAX, true, false);
+        huge.ahead = Some(u32::MAX);
+        let cy = gitops::ForkInfo {
+            owner: "cy".into(),
+            ..huge.clone()
+        };
+        let view = fork_view(vec![huge, cy]);
+        let counts = view.counts();
+        assert_eq!((counts.branches, counts.pulls), (u32::MAX, u32::MAX));
+        assert!(view.summary().contains(&u32::MAX.to_string()));
     }
 
     #[test]
