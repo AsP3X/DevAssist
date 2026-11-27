@@ -289,24 +289,40 @@ enum Scroll {
 
 /// Takes this frame's keys that scroll the facts in a box `height` points tall, also their repeats while held: Up
 /// and Down a list row, Page Up and Page Down the box less a row, and, unless the address field has the keys
-/// (`in_field`, where they move the cursor), Home and End to the first and the last fact.
+/// (`in_field`, where they move the cursor), Home and End to the first and the last fact. Only presses without
+/// modifiers, as the other dialogs take keys (`take_press`): Shift with them is left to the field, which selects.
 fn scroll_keys(ui: &Ui, in_field: bool, height: f32) -> Option<Scroll> {
     let page = (height - LIST_ROW).max(LIST_ROW);
     let mut by = 0.0;
     for (key, step) in [(Key::ArrowDown, LIST_ROW), (Key::ArrowUp, -LIST_ROW), (Key::PageDown, page), (Key::PageUp, -page)] {
-        let presses = ui.input_mut(|input| input.count_and_consume_key(egui::Modifiers::NONE, key));
-        by += step * f32::from(u16::try_from(presses).unwrap_or(u16::MAX));
+        by += step * f32::from(u16::try_from(take_presses(ui, key)).unwrap_or(u16::MAX));
     }
     let mut scroll = (by != 0.0).then_some(Scroll::By(by));
     if !in_field {
-        if ui.input_mut(|input| input.count_and_consume_key(egui::Modifiers::NONE, Key::Home)) > 0 {
+        if take_presses(ui, Key::Home) > 0 {
             scroll = Some(Scroll::Top);
         }
-        if ui.input_mut(|input| input.count_and_consume_key(egui::Modifiers::NONE, Key::End)) > 0 {
+        if take_presses(ui, Key::End) > 0 {
             scroll = Some(Scroll::End);
         }
     }
     scroll
+}
+
+/// Takes every press of `key` without modifiers from this frame's input, also its repeats while it is held, and
+/// says how many there were. A press with a modifier stays for whoever wants it.
+fn take_presses(ui: &Ui, key: Key) -> usize {
+    ui.input_mut(|input| {
+        let mut presses = 0;
+        input.events.retain(|event| match event {
+            egui::Event::Key { key: pressed_key, pressed: true, modifiers, .. } if *pressed_key == key && modifiers.is_none() => {
+                presses += 1;
+                false
+            }
+            _ => true,
+        });
+        presses
+    })
 }
 
 /// The track the scroll cue of a box at `rect` runs in: centred in the box's right room, from its top room to its
@@ -723,6 +739,41 @@ mod tests {
         let mut window = push_dialog(MIN_WINDOW);
         tap(&mut window, Key::End, None);
         assert!(window.dialogs.list_scroll.abs() < 1e-3, "End in the field scrolled the facts");
+    }
+
+    #[test]
+    fn shift_with_the_arrows_and_the_page_keys_is_the_fields() {
+        // The smallest window, where the facts can scroll: Shift with Up, Down, Page Up or Page Down is left to the
+        // address and leaves the facts where they are. With Up and Down the field selects; egui's field does nothing
+        // with the page keys, so with them the address stays as it was.
+        for code in [Key::ArrowUp, Key::ArrowDown, Key::PageUp, Key::PageDown] {
+            let mut window = push_dialog(MIN_WINDOW);
+            assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()));
+            // For a key up, scrolled down a line without Shift first, so that it has room to scroll.
+            if matches!(code, Key::ArrowUp | Key::PageUp) {
+                tap(&mut window, Key::ArrowDown, None);
+                assert!(window.dialogs.list_scroll > 0.0, "Down without Shift did not scroll");
+            }
+            let scrolled = window.dialogs.list_scroll;
+            // From the middle of the address, so that each key has text to select.
+            let middle = PUSH_ADDRESS.chars().count() / 2;
+            let mut field = egui::text_edit::TextEditState::load(&window.ctx, field_id()).unwrap_or_default();
+            field.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(middle))));
+            field.store(&window.ctx, field_id());
+            window.frame(vec![key(code, true, false, Modifiers::SHIFT)]);
+            window.frame(vec![key(code, false, false, Modifiers::SHIFT)]);
+            assert!((window.dialogs.list_scroll - scrolled).abs() < 1e-3, "Shift with {code:?} scrolled the facts");
+            assert_eq!(input(&window), PUSH_ADDRESS, "Shift with {code:?} changed the address");
+            let range = egui::text_edit::TextEditState::load(&window.ctx, field_id())
+                .and_then(|field| field.cursor.char_range())
+                .expect("the field has no cursor");
+            let arrow = matches!(code, Key::ArrowUp | Key::ArrowDown);
+            assert_eq!(!range.is_empty(), arrow, "Shift with {code:?}: the field's selection is {range:?}");
+            assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()));
+            // Without Shift the key scrolls as before.
+            tap(&mut window, code, None);
+            assert!((window.dialogs.list_scroll - scrolled).abs() > 1e-3, "{code:?} without Shift did not scroll");
+        }
     }
 
     #[test]

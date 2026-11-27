@@ -1058,10 +1058,11 @@ pub fn migrate_to(
 
 /// Moves a checkout to `to`, a path that must be free. On the same drive
 /// that is a rename; onto another drive everything is copied first and
-/// the original deleted after. A warning comes back when the copy is
-/// complete but the original could not be deleted, as a sentence: "The
-/// old folder D:\code\api could not be deleted: <why>." The copy is the
-/// checkout then.
+/// the original deleted after. What the move left on the disk that should
+/// not be there comes back with it (`MoveLeft`): when it is done, an
+/// original that could not be deleted after a complete copy (the copy is
+/// the checkout then); when it failed, a partial copy that could not be
+/// removed.
 ///
 /// `on_line` hears what is going on, the way Git reports a transfer: while
 /// copying, a line with a percentage and the files done out of all.
@@ -1069,18 +1070,67 @@ pub fn move_checkout(
     from: &Path,
     to: &Path,
     mut on_line: impl FnMut(&str, bool),
-) -> Result<Option<String>, String> {
-    move_folder(from, to, &mut on_line).map_err(|failed| failed.text)
+) -> Result<MoveLeft, MoveFailed> {
+    move_folder(from, to, &mut on_line)
+}
+
+/// What a move of a folder left on the disk that should not be there, each
+/// with its path and why, as the disk said it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct MoveLeft {
+    /// The copy failed, and what it had copied could not be removed.
+    pub partial: Option<(PathBuf, String)>,
+    /// The copy is complete, and the original could not be deleted.
+    pub original: Option<(PathBuf, String)>,
+}
+
+impl MoveLeft {
+    /// What was left, as sentences, the partial copy first: "The partial
+    /// copy at D:\code\api could not be removed: <why>." and "The old
+    /// folder D:\code\api could not be deleted: <why>."
+    pub fn sentences(&self) -> Vec<String> {
+        let partial = self.partial.iter().map(|(path, why)| {
+            format!(
+                "The partial copy at {} could not be removed: {}",
+                path.display(),
+                sentence(why)
+            )
+        });
+        let original = self.original.iter().map(|(path, why)| {
+            format!(
+                "The old folder {} could not be deleted: {}",
+                path.display(),
+                sentence(why)
+            )
+        });
+        partial.chain(original).collect()
+    }
 }
 
 /// Why a move of a folder did not happen.
 #[derive(Debug, PartialEq, Eq)]
-struct MoveFailed {
-    /// What to say, as a clause.
-    text: String,
+pub struct MoveFailed {
+    /// What went wrong, as a clause.
+    pub text: String,
     /// It was a copy that was cancelled, and nothing of it is left at the
     /// target.
-    cancelled: bool,
+    pub cancelled: bool,
+    /// What the failed move left on the disk (boxed: a failure is passed
+    /// around far more often than it has anything left).
+    pub left: Box<MoveLeft>,
+}
+
+impl MoveFailed {
+    /// All of it, as one text: what went wrong, then what was left
+    /// (`MoveLeft::sentences`).
+    pub fn says(&self) -> String {
+        let mut text = self.text.clone();
+        for left in self.left.sentences() {
+            text.push_str(". ");
+            text.push_str(&left);
+        }
+        text
+    }
 }
 
 impl From<String> for MoveFailed {
@@ -1088,6 +1138,7 @@ impl From<String> for MoveFailed {
         MoveFailed {
             text,
             cancelled: false,
+            left: Box::default(),
         }
     }
 }
@@ -1099,7 +1150,7 @@ fn move_folder(
     from: &Path,
     to: &Path,
     on_line: &mut dyn FnMut(&str, bool),
-) -> Result<Option<String>, MoveFailed> {
+) -> Result<MoveLeft, MoveFailed> {
     if !from.is_dir() {
         return Err(format!("{} is not there any more", from.display()).into());
     }
@@ -1118,7 +1169,7 @@ fn move_folder(
         return copy_then_delete(from, to, on_line);
     }
     match fs::rename(from, to) {
-        Ok(()) => return Ok(None),
+        Ok(()) => return Ok(MoveLeft::default()),
         Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(err) => return Err(format!("could not move {}: {err}", from.display()).into()),
     }
@@ -1174,13 +1225,14 @@ pub fn move_forks_folder(
         if failed.cancelled {
             "cancelled".to_string()
         } else {
-            failed.text
+            failed.says()
         }
     })?;
     on_line("Repairing the fork folders…", true);
     Ok(Some(ForksFolderMoved {
         unrepaired: repair_fork_folders(&to).err(),
-        left,
+        // A move that is done can have left its original, and only that.
+        left: left.sentences().pop(),
     }))
 }
 
@@ -1440,12 +1492,14 @@ fn same_device(_: &Path, _: &Path) -> Option<bool> {
 /// The slow way to move a folder: copies everything to `to`, a path that
 /// is free, and deletes `from` once the copy is complete. When the copy
 /// fails or is cancelled, what was copied is removed again; when that
-/// cannot be done either, the error says so.
+/// cannot be done either, the error has it as left (`MoveLeft::partial`).
+/// A copy that could not make its target copied nothing and leaves no
+/// partial copy.
 fn copy_then_delete(
     from: &Path,
     to: &Path,
     on_line: &mut dyn FnMut(&str, bool),
-) -> Result<Option<String>, MoveFailed> {
+) -> Result<MoveLeft, MoveFailed> {
     on_line(
         "Another drive: copying, then deleting the old folder.",
         false,
@@ -1467,29 +1521,29 @@ fn copy_then_delete(
         }
     };
     if let Err(err) = copy_tree(from, to, &mut |_| copied(on_line)) {
-        // Leave nothing half-copied behind; the original is untouched.
-        on_line("Removing what was copied so far…", true);
-        let mut text = format!("could not copy to {}: {err}", to.display());
-        let mut cancelled = matches!(err, CopyStop::Cancelled);
-        if let Err(left) = delete_tree(to) {
-            cancelled = false;
-            text.push_str(&format!(
-                ". The partial copy at {} could not be removed: {}",
-                to.display(),
-                sentence(&left.to_string())
-            ));
+        // Leave nothing half-copied behind; the original is untouched. The
+        // target was free: when it is not there, nothing was copied.
+        let mut left = MoveLeft::default();
+        if fs::symlink_metadata(to).is_ok() {
+            on_line("Removing what was copied so far…", true);
+            left.partial = delete_tree(to)
+                .err()
+                .map(|why| (to.to_path_buf(), why.to_string()));
         }
-        return Err(MoveFailed { text, cancelled });
+        return Err(MoveFailed {
+            text: format!("could not copy to {}: {err}", to.display()),
+            cancelled: matches!(err, CopyStop::Cancelled) && left.partial.is_none(),
+            left: Box::new(left),
+        });
     }
     on_line(&format!("Copied {total} files."), false);
     on_line("Deleting the old folder…", true);
-    Ok(delete_tree(from).err().map(|err| {
-        format!(
-            "The old folder {} could not be deleted: {}",
-            from.display(),
-            sentence(&err.to_string())
-        )
-    }))
+    Ok(MoveLeft {
+        partial: None,
+        original: delete_tree(from)
+            .err()
+            .map(|why| (from.to_path_buf(), why.to_string())),
+    })
 }
 
 /// `text` ending as a sentence does, with one full stop.
@@ -1544,6 +1598,10 @@ impl std::fmt::Display for CopyStop {
 /// Copies a folder with everything in it. `on_file` hears each file that
 /// has been copied. It stops between entries when the run is cancelled.
 fn copy_tree(from: &Path, to: &Path, on_file: &mut dyn FnMut(&Path)) -> Result<(), CopyStop> {
+    #[cfg(any(test, feature = "testing"))]
+    if seams::uncreatable(to) {
+        return Err(format!("{}: {}", to.display(), seams::refusal()).into());
+    }
     fs::create_dir_all(to).map_err(|err| format!("{}: {err}", to.display()))?;
     let entries = fs::read_dir(from).map_err(|err| format!("{}: {err}", from.display()))?;
     for entry in entries {
@@ -3588,6 +3646,7 @@ pub mod seams {
     /// folders of its own, so a path names one test's case.
     struct Set {
         refused: Vec<PathBuf>,
+        uncreatable: Vec<PathBuf>,
         far: Vec<PathBuf>,
         cancelled: Vec<PathBuf>,
         unrepaired: Vec<PathBuf>,
@@ -3595,6 +3654,7 @@ pub mod seams {
 
     static SET: Mutex<Set> = Mutex::new(Set {
         refused: Vec::new(),
+        uncreatable: Vec::new(),
         far: Vec::new(),
         cancelled: Vec::new(),
         unrepaired: Vec::new(),
@@ -3611,6 +3671,16 @@ pub mod seams {
     /// the file `path`.
     pub fn refuse(path: &Path) {
         with(|set| set.refused.push(path.to_path_buf()));
+    }
+
+    /// From now on, a copy cannot make the folder `path` it copies into:
+    /// the first thing a copy does there fails.
+    pub fn refuse_creating(path: &Path) {
+        with(|set| set.uncreatable.push(path.to_path_buf()));
+    }
+
+    pub(super) fn uncreatable(path: &Path) -> bool {
+        with(|set| set.uncreatable.iter().any(|known| known == path))
     }
 
     /// From now on, moving the folder `path` copies and deletes it, as onto
@@ -4556,9 +4626,13 @@ refs/remotes/fork/dev\tiii\t\t
         fs::create_dir_all(root.join("taken").join("api")).unwrap();
 
         // A path that is in use, or inside the checkout, is refused.
-        let taken = move_checkout(&old, &root.join("taken").join("api"), |_, _| {}).unwrap_err();
+        let taken = move_checkout(&old, &root.join("taken").join("api"), |_, _| {})
+            .unwrap_err()
+            .text;
         assert!(taken.contains("there already"), "{taken}");
-        let inside = move_checkout(&old, &old.join("deeper").join("api"), |_, _| {}).unwrap_err();
+        let inside = move_checkout(&old, &old.join("deeper").join("api"), |_, _| {})
+            .unwrap_err()
+            .text;
         assert!(inside.contains("into itself"), "{inside}");
         // Inside it by a name that differs only in case: the same folder on
         // Windows, where it is refused before anything is made. Elsewhere the
@@ -4570,7 +4644,9 @@ refs/remotes/fork/dev\tiii\t\t
         if cfg!(windows) {
             let cased = move_checkout(&old, &upper, |_, _| {});
             assert!(
-                cased.as_ref().is_err_and(|err| err.contains("into itself")),
+                cased
+                    .as_ref()
+                    .is_err_and(|err| err.text.contains("into itself")),
                 "{cased:?}"
             );
         } else {
@@ -4580,7 +4656,10 @@ refs/remotes/fork/dev\tiii\t\t
 
         // The folder it goes into is made when it is not there yet.
         let new = root.join("there").join("deeper").join("api");
-        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&old, &new, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         assert!(!old.exists());
         assert_eq!(status(&new).unwrap().branch, "main");
 
@@ -4601,7 +4680,7 @@ refs/remotes/fork/dev\tiii\t\t
         let warning = copy_then_delete(&new, &far, &mut |line, progress| {
             lines.push((line.to_string(), progress))
         });
-        assert_eq!(warning, Ok(None));
+        assert_eq!(warning, Ok(MoveLeft::default()));
         assert!(!new.exists());
         assert_eq!(status(&far).unwrap().branch, "main");
         let last = format!("Copying files: 100% ({files}/{files})");
@@ -4627,13 +4706,20 @@ refs/remotes/fork/dev\tiii\t\t
         let new = root.join("new").join("api");
         seams::refuse(&old);
         seams::as_if_another_drive(&old);
-        let warning = move_checkout(&old, &new, |_, _| {}).unwrap();
+        let left = move_checkout(&old, &new, |_, _| {}).unwrap();
         assert_eq!(
-            warning,
-            Some(format!(
+            left,
+            MoveLeft {
+                partial: None,
+                original: Some((old.clone(), "refused by the test".into())),
+            }
+        );
+        assert_eq!(
+            left.sentences(),
+            [format!(
                 "The old folder {} could not be deleted: refused by the test.",
                 old.display()
-            ))
+            )]
         );
         assert_eq!(
             fs::read_to_string(new.join("src").join("main.rs")).unwrap(),
@@ -4647,34 +4733,51 @@ refs/remotes/fork/dev\tiii\t\t
         fs::write(broken.join("b"), "b").unwrap();
         seams::refuse(&broken.join("b"));
         let far = root.join("far");
-        let err = copy_then_delete(&broken, &far, &mut |_, _| {})
-            .unwrap_err()
-            .text;
-        assert_eq!(
-            err,
-            format!(
-                "could not copy to {}: {}: refused by the test",
-                far.display(),
-                broken.join("b").display()
-            )
+        let err = copy_then_delete(&broken, &far, &mut |_, _| {}).unwrap_err();
+        let failed = format!(
+            "could not copy to {}: {}: refused by the test",
+            far.display(),
+            broken.join("b").display()
         );
+        assert_eq!(err.text, failed);
+        assert_eq!(*err.left, MoveLeft::default());
+        assert_eq!(err.says(), failed);
         assert!(!far.exists(), "the partial copy is removed");
         assert!(broken.join("b").exists(), "the original is untouched");
 
         // One whose partial copy cannot be removed either says that too.
         let stuck = root.join("stuck");
         seams::refuse(&stuck);
-        let err = copy_then_delete(&broken, &stuck, &mut |_, _| {})
-            .unwrap_err()
-            .text;
+        let err = copy_then_delete(&broken, &stuck, &mut |_, _| {}).unwrap_err();
+        assert_eq!(
+            err.left.partial,
+            Some((stuck.clone(), "refused by the test".into()))
+        );
         assert!(
-            err.ends_with(&format!(
+            err.says().ends_with(&format!(
                 ". The partial copy at {} could not be removed: refused by the test.",
                 stuck.display()
             )),
-            "{err}"
+            "{}",
+            err.says()
         );
         assert!(stuck.exists());
+
+        // One that could not make its target copied nothing: no partial
+        // copy is said to stay, for there is none.
+        let unmade = root.join("unmade");
+        seams::refuse_creating(&unmade);
+        let err = copy_then_delete(&broken, &unmade, &mut |_, _| {}).unwrap_err();
+        let failed = format!(
+            "could not copy to {}: {}: refused by the test",
+            unmade.display(),
+            unmade.display()
+        );
+        assert_eq!(err.text, failed);
+        assert_eq!(*err.left, MoveLeft::default());
+        assert_eq!(err.says(), failed);
+        assert!(!unmade.exists());
+        assert!(broken.join("b").exists(), "the original is untouched");
     }
 
     #[cfg(unix)]
@@ -5181,7 +5284,10 @@ refs/remotes/fork/dev\tiii\t\t
 
         // On the same drive: the checkout, then its forks folder.
         let new = root.join("there").join("api");
-        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&old, &new, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         let mut lines = Vec::new();
         let moved = move_forks_folder(&old, &new, |line, _| lines.push(line.to_string()));
         assert_eq!(moved, Ok(Some(ForksFolderMoved::default())), "{lines:?}");
@@ -5199,7 +5305,10 @@ refs/remotes/fork/dev\tiii\t\t
         // Onto another drive: everything is copied, then the old one goes.
         let far = root.join("far").join("api");
         let new_forks = forks_folder(&new).unwrap();
-        assert_eq!(move_checkout(&new, &far, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&new, &far, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         seams::as_if_another_drive(&new_forks);
         let mut lines = Vec::new();
         let moved = move_forks_folder(&new, &far, |line, _| lines.push(line.to_string()));
@@ -5229,7 +5338,10 @@ refs/remotes/fork/dev\tiii\t\t
         let taken = forks_folder(&new).unwrap();
         fs::create_dir_all(&taken).unwrap();
         fs::write(taken.join("mine"), "mine").unwrap();
-        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&old, &new, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         assert_eq!(
             move_forks_folder(&old, &new, |_, _| {}),
             Err(format!("something is at {} already", taken.display()))
@@ -5240,7 +5352,10 @@ refs/remotes/fork/dev\tiii\t\t
 
         // Cancelled before it starts: it stays where it is, whole.
         let other = root.join("other").join("api");
-        assert_eq!(move_checkout(&new, &other, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&new, &other, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         let new_forks = forks_folder(&new).unwrap();
         remove_tree(&taken).unwrap();
         fs::rename(&old_forks, &new_forks).unwrap();
@@ -5255,7 +5370,10 @@ refs/remotes/fork/dev\tiii\t\t
         // Cancelled while it is copied onto another drive: the partial copy
         // goes, the old one stays whole.
         let last = root.join("last").join("api");
-        assert_eq!(move_checkout(&other, &last, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&other, &last, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         let other_forks = forks_folder(&other).unwrap();
         fs::rename(&new_forks, &other_forks).unwrap();
         seams::as_if_another_drive(&other_forks);
@@ -5283,7 +5401,10 @@ refs/remotes/fork/dev\tiii\t\t
         // Bob's folder no longer says where its repository is.
         fs::write(old_forks.join("bob").join(".git"), "nonsense").unwrap();
         let new = root.join("there").join("api");
-        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&old, &new, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         let moved = move_forks_folder(&old, &new, |_, _| {}).unwrap().unwrap();
         let why = moved.unrepaired.expect("the repair failed");
         assert!(!why.is_empty() && !why.ends_with('.'), "{why}");
@@ -5321,7 +5442,10 @@ refs/remotes/fork/dev\tiii\t\t
             let before = fs::read(other.join(file)).unwrap();
             let listing = entries(&other);
             let new = root.join("moved").join(name);
-            assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+            assert_eq!(
+                move_checkout(&old, &new, |_, _| {}),
+                Ok(MoveLeft::default())
+            );
             let mut lines = Vec::new();
             assert_eq!(
                 move_forks_folder(&old, &new, |line, _| lines.push(line.to_string())),
@@ -5548,7 +5672,10 @@ refs/remotes/fork/dev\tiii\t\t
         let new = root.join("there").join("api");
         let new_forks = forks_folder(&new).unwrap();
         seams::fail_repair_once(&new_forks);
-        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&old, &new, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         let moved = move_forks_folder(&old, &new, |_, _| {}).unwrap().unwrap();
         assert_eq!(moved.unrepaired.as_deref(), Some("refused by the test"));
         let status = |dir: &Path| {
@@ -5598,7 +5725,10 @@ refs/remotes/fork/dev\tiii\t\t
         git(&root.join("here"), &["init", "-q", "-b", "main", "api"]);
         commit(&old, "one");
         let new = root.join("there").join("api");
-        assert_eq!(move_checkout(&old, &new, |_, _| {}), Ok(None));
+        assert_eq!(
+            move_checkout(&old, &new, |_, _| {}),
+            Ok(MoveLeft::default())
+        );
         let mut lines = Vec::new();
         assert_eq!(
             move_forks_folder(&old, &new, |line, _| lines.push(line.to_string())),

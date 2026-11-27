@@ -2089,6 +2089,8 @@ impl Repos {
             let mut failed = Vec::new();
             // What was left on the disk that should not have been.
             let mut left: Vec<String> = Vec::new();
+            // A cancel stopped work that was still to do.
+            let mut cut_short = false;
             for (index, (name, from)) in repos.iter().enumerate() {
                 if process::was_cancelled() {
                     return Err(cancelled_leaving(&left));
@@ -2115,20 +2117,21 @@ impl Repos {
                     send_line(tx, line, progress)
                 });
                 match moving {
-                    Ok(warning) => {
+                    Ok(stays) => {
                         moved += 1;
                         let _ = tx.send(Msg::Moved {
                             from: from.clone(),
                             to: to.clone(),
                         });
-                        let mut note = match warning {
-                            Some(warning) => {
-                                send_line(tx, &warning, false);
-                                left.push(warning);
-                                "moved, the old folder stayed"
-                            }
-                            None => "moved",
+                        let mut note = if stays.original.is_some() {
+                            "moved, the old folder stayed"
+                        } else {
+                            "moved"
                         };
+                        for words in stays.sentences() {
+                            send_line(tx, &words, false);
+                            left.push(words);
+                        }
                         let forks = match (&kind, blocked) {
                             (gitops::ForksFolder::NotOne, _) => Ok(None),
                             (_, Some(why)) => Err(why),
@@ -2138,6 +2141,7 @@ impl Repos {
                         };
                         if forks.is_err() {
                             note = "moved, its forks folder stayed";
+                            cut_short |= process::was_cancelled();
                         }
                         for (words, stays) in forks_moved_words(name, from, &to, forks) {
                             send_line(tx, &words, false);
@@ -2148,18 +2152,20 @@ impl Repos {
                         send(tx, JobEvent::Done(index, note.into()));
                     }
                     Err(err) => {
-                        if let Some((_, rest)) = err.split_once(". The partial copy at ") {
-                            left.push(format!("The partial copy at {rest}"));
-                        }
+                        cut_short |= process::was_cancelled();
+                        left.extend(err.left.sentences());
                         failed.push(name.clone());
-                        send(tx, JobEvent::Failed(index, err));
+                        send(tx, JobEvent::Failed(index, err.says()));
                     }
                 }
             }
-            if process::was_cancelled() {
-                return Err(cancelled_leaving(&left));
+            let ended = move_ended(cut_short, &named, &dir, (moved, stayed), &failed, &left);
+            if !cut_short {
+                // Done: a cancel that came when nothing was still to do (while
+                // the last old folder was deleted) does not undo it.
+                process::clear_cancel();
             }
-            moved_words(&named, &dir, (moved, stayed), &failed, &left)
+            ended
         });
     }
 
@@ -4963,6 +4969,24 @@ fn moved_words(
     }
 }
 
+/// How a move ends once every checkout had its turn: cancelled, with what
+/// was `left`, when a cancel stopped work that was still to do
+/// (`cut_short`); else as `moved_words` says, however late a cancel came.
+fn move_ended(
+    cut_short: bool,
+    named: &str,
+    dir: &Path,
+    counts: (usize, usize),
+    failed: &[String],
+    left: &[String],
+) -> Result<String, String> {
+    if cut_short {
+        Err(cancelled_leaving(left))
+    } else {
+        moved_words(named, dir, counts, failed, left)
+    }
+}
+
 /// Each of `repos` (name and checkout) with where a move into `dir` puts
 /// it and whether that move will be refused, as `Repos::move_lines` tells
 /// it and `move_checkouts` runs it. `held`: nothing on the disk is looked
@@ -7474,6 +7498,172 @@ mod tests {
         assert!(there.join("api").join("readme").is_file());
     }
 
+    /// A checkout `name` at `root/here/name` with a file in it, put on the
+    /// list of `app`, and copied when it moves, as onto another drive.
+    /// Where it is comes back.
+    fn far_checkout(app: &mut Repos, root: &Path, name: &str) -> PathBuf {
+        let old = root.join("here").join(name);
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("readme"), name).unwrap();
+        let mut repo = installed("acme", name);
+        repo.path = old.clone();
+        app.checkouts.push(old.clone());
+        app.installed.push(repo);
+        gitops::seams::as_if_another_drive(&old);
+        old
+    }
+
+    /// The note each task of the run on screen ended with.
+    fn notes(app: &Repos) -> Vec<String> {
+        let job = app.job.as_ref().unwrap();
+        job.items.iter().map(|item| item.note.clone()).collect()
+    }
+
+    #[test]
+    fn what_a_move_left_reads_the_same_in_each_case() {
+        let temp = Temp::new("move-left-words");
+        let root = temp.0.clone();
+        let session = |root: &Path| {
+            Repos::empty(Settings {
+                config_path: root.join("devassist.toml"),
+                ..test_settings()
+            })
+        };
+        let refused = "refused by the test";
+
+        // Nothing is left: the copy is complete, the original deleted.
+        let case = root.join("neither");
+        let mut app = session(&case);
+        let api = far_checkout(&mut app, &case, "api");
+        let there = case.join("there");
+        app.move_checkouts(vec![("api".into(), api)], there.clone());
+        finish(&mut app);
+        assert_eq!(app.status, format!("Moved api to {}.", there.display()));
+        assert!(!app.status_error);
+        assert_eq!(notes(&app), ["moved"]);
+
+        // The original is left: the copy is the checkout.
+        let case = root.join("original");
+        let mut app = session(&case);
+        let api = far_checkout(&mut app, &case, "api");
+        gitops::seams::refuse(&api);
+        let there = case.join("there");
+        app.move_checkouts(vec![("api".into(), api.clone())], there.clone());
+        finish(&mut app);
+        let original = format!(
+            "The old folder {} could not be deleted: {refused}.",
+            api.display()
+        );
+        assert_eq!(
+            app.status,
+            format!("Moved api to {}. {original}", there.display())
+        );
+        assert!(app.status_error);
+        assert_eq!(notes(&app), ["moved, the old folder stayed"]);
+        assert!(first_lines(&app).contains(&original));
+
+        // A partial copy is left: the copy failed and could not be removed.
+        let case = root.join("partial");
+        let mut app = session(&case);
+        let web = far_checkout(&mut app, &case, "web");
+        gitops::seams::refuse(&web.join("readme"));
+        let there = case.join("there");
+        gitops::seams::refuse(&there.join("web"));
+        app.move_checkouts(vec![("web".into(), web.clone())], there.clone());
+        finish(&mut app);
+        let partial = format!(
+            "The partial copy at {} could not be removed: {refused}.",
+            there.join("web").display()
+        );
+        let failed = format!(
+            "could not copy to {}: {}: {refused}. {partial}",
+            there.join("web").display(),
+            web.join("readme").display()
+        );
+        assert_eq!(app.status, format!("Moved 0, 1 failed: web. {partial}"));
+        assert!(app.status_error);
+        assert_eq!(notes(&app), [failed]);
+
+        // Both, of two checkouts in one move.
+        let case = root.join("both");
+        let mut app = session(&case);
+        let api = far_checkout(&mut app, &case, "api");
+        gitops::seams::refuse(&api);
+        let web = far_checkout(&mut app, &case, "web");
+        gitops::seams::refuse(&web.join("readme"));
+        let there = case.join("there");
+        gitops::seams::refuse(&there.join("web"));
+        let repos = vec![("api".into(), api.clone()), ("web".into(), web.clone())];
+        app.move_checkouts(repos, there.clone());
+        finish(&mut app);
+        let original = format!(
+            "The old folder {} could not be deleted: {refused}.",
+            api.display()
+        );
+        let partial = format!(
+            "The partial copy at {} could not be removed: {refused}.",
+            there.join("web").display()
+        );
+        let failed = format!(
+            "could not copy to {}: {}: {refused}. {partial}",
+            there.join("web").display(),
+            web.join("readme").display()
+        );
+        assert_eq!(
+            app.status,
+            format!("Moved 1, 1 failed: web. {original} {partial}")
+        );
+        assert_eq!(
+            notes(&app),
+            ["moved, the old folder stayed".to_string(), failed]
+        );
+
+        // The forks folder's copy is complete, its original is left.
+        let case = root.join("forks-original");
+        let (mut app, api) = api_with_forks(&case);
+        let from = case.join("here").join("api-fork");
+        gitops::seams::as_if_another_drive(&from);
+        gitops::seams::refuse(&from);
+        let there = case.join("there");
+        app.move_checkouts(vec![("api".into(), api)], there.clone());
+        finish(&mut app);
+        let original = format!(
+            "The old folder {} could not be deleted: {refused}.",
+            from.display()
+        );
+        assert_eq!(
+            app.status,
+            format!("Moved api to {}. {original}", there.display())
+        );
+        assert_eq!(notes(&app), ["moved"]);
+        assert!(first_lines(&app).contains(&original));
+
+        // The forks folder's copy failed, and its partial copy is left.
+        let case = root.join("forks-partial");
+        let (mut app, api) = api_with_forks(&case);
+        let from = case.join("here").join("api-fork");
+        let there = case.join("there");
+        let to = there.join("api-fork");
+        gitops::seams::as_if_another_drive(&from);
+        gitops::seams::refuse(&from.join("bob"));
+        gitops::seams::refuse(&to);
+        app.move_checkouts(vec![("api".into(), api)], there.clone());
+        finish(&mut app);
+        let stayed = format!(
+            "The forks folder of api stayed at {}: could not copy to {}: {}: {refused}. The \
+             partial copy at {} could not be removed: {refused}.",
+            from.display(),
+            to.display(),
+            from.join("bob").display(),
+            to.display()
+        );
+        assert_eq!(
+            app.status,
+            format!("Moved api to {}. {stayed}", there.display())
+        );
+        assert_eq!(notes(&app), ["moved, its forks folder stayed"]);
+    }
+
     /// A session with one checkout, api, at `root/here/api`, a file in it,
     /// and a forks collection beside it with a file of its own; its
     /// settings are kept in `root`. Where api is comes back with it.
@@ -8705,6 +8895,37 @@ mod tests {
         );
         assert_eq!(
             finished_words(Err(cancelled_leaving(&[])), true, false),
+            ("Cancelled.".into(), false)
+        );
+    }
+
+    #[test]
+    fn a_cancel_after_the_last_work_leaves_the_move_finished() {
+        let dir = Path::new("/srv/new");
+        let old = "The old folder /srv/old/api could not be deleted: busy.".to_string();
+        let left = std::slice::from_ref(&old);
+        // Pressed while the last old folder was deleted: nothing was still
+        // to do, so the run says the finished move's own words, and the
+        // move clears the cancel, so the run does not end as cancelled.
+        let finished = move_ended(false, "api", dir, (1, 0), &[], left);
+        assert_eq!(finished, Err(format!("Moved api to /srv/new. {old}")));
+        assert_eq!(
+            finished_words(finished, false, false),
+            (format!("Moved api to /srv/new. {old}"), true)
+        );
+        assert_eq!(
+            move_ended(false, "api", dir, (1, 0), &[], &[]),
+            Ok("Moved api to /srv/new.".into())
+        );
+        // A cancel that stopped work still to do stays "Cancelled.", with
+        // what was left.
+        let cut = move_ended(true, "api", dir, (1, 0), &[], left);
+        assert_eq!(
+            finished_words(cut, true, false),
+            (format!("Cancelled. {old}"), true)
+        );
+        assert_eq!(
+            finished_words(move_ended(true, "api", dir, (0, 0), &[], &[]), true, false),
             ("Cancelled.".into(), false)
         );
     }
