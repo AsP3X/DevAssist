@@ -129,7 +129,7 @@ pub fn open_menu(repos: &mut Repos, key: &str) {
 /// How a capsule of actions shows them, or the top row its actions and its main button: with their words, or with
 /// their icons only when the room is too narrow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fit {
+pub(crate) enum Fit {
     /// Icons and words.
     Full,
     /// Icons only; each word is its button's name and hover text. In the top row, the capsule's actions; the main
@@ -164,15 +164,15 @@ struct Toolbar {
 }
 
 /// The top row's controls: the capsule with "Import" and "Update all", the main button "Add repository" at its right,
-/// and how they fit.
+/// and how they fit. The forks screen places its own the same way.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Top {
+pub(crate) struct Top {
     /// The capsule.
-    actions: Rect,
+    pub(crate) actions: Rect,
     /// The main button.
-    main: Rect,
+    pub(crate) main: Rect,
     /// How they fit.
-    fit: Fit,
+    pub(crate) fit: Fit,
 }
 
 impl Plan {
@@ -291,7 +291,7 @@ fn places(toolbar: Rect, view_width: f32, widths: Option<[f32; 3]>) -> (Rect, Re
 /// rightmost and [`BAR_GAP`] between them. They take the first fit that fits: all words ([`Fit::Full`]), then the
 /// capsule's icons only ([`Fit::Compact`]: the main button keeps its words longest), then the main button's icon
 /// too ([`Fit::Bare`]); `None` when not even that fits, so nothing lies over the title or leaves the row.
-fn top_place(room: Rect, [full, compact]: [f32; 2], [main_full, main_compact]: [f32; 2]) -> Option<Top> {
+pub(crate) fn top_place(room: Rect, [full, compact]: [f32; 2], [main_full, main_compact]: [f32; 2]) -> Option<Top> {
     let fits = [(Fit::Full, full, main_full), (Fit::Compact, compact, main_full), (Fit::Bare, compact, main_compact)];
     let (fit, actions, main) = fits.into_iter().find(|(_, actions, main)| actions + BAR_GAP + main <= room.width())?;
     let main = Rect::from_min_max(pos2(room.right() - main, room.top()), room.max);
@@ -560,6 +560,14 @@ pub(crate) fn follow(heights: &[f32], index: usize, scroll: f32, room: f32) -> f
 /// The id of the filter field.
 fn filter_id() -> Id {
     Id::unique("repositories-filter")
+}
+
+/// Takes the keyboard from the screen's filter while another screen has the page (the forks of a repository): it
+/// neither keeps the focus there nor gets it back when the screen returns.
+pub(crate) fn leave(ctx: &egui::Context, screen: &mut Screen) {
+    ctx.memory_mut(|memory| memory.surrender_focus(filter_id()));
+    screen.filter_focused = false;
+    screen.refocus = false;
 }
 
 /// The id of the top row's main button.

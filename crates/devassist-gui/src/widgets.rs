@@ -21,7 +21,7 @@ use crate::theme::{
     ACTION_GAP, ACTION_HEIGHT, ACTION_PAD, BUTTON_OFF_OPACITY, BUTTON_PAD, BUTTON_RADIUS, CAPSULE_GAP, CAPSULE_PAD, CHECK_MARK, CHECKBOX,
     CHECKBOX_STROKE_OPACITY, DIALOG_FIELD_HEIGHT, DIALOG_FIELD_RADIUS, DIVIDER_HEIGHT, DIVIDER_OPACITY, DIVIDER_WIDTH, FIELD_EDGE_OPACITY, FIELD_PAD,
     FOCUS_GAP, FOCUS_RING, FOLDER_GAP, FOLDER_INSET_PAD, FOLDER_PICK, FOLDER_ROW, FOLDER_ROWS, HAIRLINE, HOVER_OPACITY, ICON, ICON_GAP, LABEL_PAD,
-    MAIN_ACTION_PAD, Palette, RADIUS_SMALL, Surface, TEXT,
+    MAIN_ACTION_PAD, Palette, RADIUS_SMALL, SEGMENT_COUNT_GAP, SEGMENT_PAD, Surface, TEXT, TEXT_SMALL,
 };
 
 /// The mark that ends a text cut short.
@@ -254,6 +254,84 @@ pub fn capsule(ui: &mut Ui, rect: Rect, items: &[Item<'_>], palette: Palette) ->
     pressed
 }
 
+/// A segment of a segmented control ([`segments`]): its words, the count after them, and whether it is the chosen
+/// one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Segment<'a> {
+    /// Its words, in the medium face.
+    pub words: &'a str,
+    /// The count after them, small and quiet.
+    pub count: &'a str,
+    /// It is the chosen one, on the selection's fill.
+    pub chosen: bool,
+}
+
+/// The faces of a segment's words and of its count.
+fn segment_faces() -> (FontId, FontId) {
+    (font(TEXT, assets::medium_family()), font(TEXT_SMALL, assets::medium_family()))
+}
+
+/// How wide `segment` is in its capsule.
+fn segment_width(painter: &Painter, segment: &Segment<'_>) -> f32 {
+    let (words, count) = segment_faces();
+    SEGMENT_PAD[0] + width(painter, segment.words, &words) + SEGMENT_COUNT_GAP + width(painter, segment.count, &count) + SEGMENT_PAD[1]
+}
+
+/// How wide a segmented control holding `segments` is: a capsule's padding at its ends and its gap between them.
+#[must_use]
+pub fn segments_width(painter: &Painter, segments: &[Segment<'_>]) -> f32 {
+    let gaps = CAPSULE_GAP * f32::from(u16::try_from(segments.len().saturating_sub(1)).unwrap_or(u16::MAX));
+    2.0 * CAPSULE_PAD + segments.iter().map(|segment| segment_width(painter, segment)).sum::<f32>() + gaps
+}
+
+/// The places of `segments` in a segmented control at `rect`, each [`ACTION_HEIGHT`] high and centred on its height.
+pub(crate) fn segment_rects(painter: &Painter, rect: Rect, segments: &[Segment<'_>]) -> Vec<Rect> {
+    let mut left = rect.left() + CAPSULE_PAD;
+    segments
+        .iter()
+        .map(|segment| {
+            let place = Rect::from_min_size(pos2(left, rect.center().y - ACTION_HEIGHT / 2.0), vec2(segment_width(painter, segment), ACTION_HEIGHT));
+            left = place.right() + CAPSULE_GAP;
+            place
+        })
+        .collect()
+}
+
+/// Draws a segmented control at `rect`, whose glass is baked ([`add_glass`]), as the design's `segments` draws it:
+/// each segment's words in the medium face, its count after them small and quiet, the chosen one on the
+/// selection's fill and another under the pointer on the hover's. Like every control of a screen it senses clicks
+/// but never takes the keyboard's focus. Says which segment was pressed.
+pub fn segments(ui: &mut Ui, rect: Rect, segments: &[Segment<'_>], palette: Palette) -> Option<usize> {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let (words_face, count_face) = segment_faces();
+    let mut pressed = None;
+    for (index, (segment, place)) in segments.iter().zip(segment_rects(&painter, rect, segments)).enumerate() {
+        let response = ui.interact(place, ui.scope_id().with(("segment", rect.min.x.to_bits(), index)), Sense::CLICK);
+        response.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, segment.chosen, format!("{} {}", segment.words, segment.count)));
+        let fill = if segment.chosen {
+            palette.selection
+        } else if response.hovered() {
+            palette.on_glass.gamma_multiply(HOVER_OPACITY)
+        } else {
+            Color32::TRANSPARENT
+        };
+        painter.rect_filled(place, ACTION_HEIGHT / 2.0, fill);
+        let drawn = painter.text(
+            pos2(place.left() + SEGMENT_PAD[0], place.center().y),
+            Align2::LEFT_CENTER,
+            segment.words,
+            words_face.clone(),
+            palette.on_glass,
+        );
+        let x = drawn.right() + SEGMENT_COUNT_GAP;
+        painter.text(pos2(x, place.center().y), Align2::LEFT_CENTER, segment.count, count_face.clone(), palette.quiet);
+        if response.clicked() {
+            pressed = Some(index);
+        }
+    }
+    pressed
+}
+
 /// How wide the top row's main button with `icon` and `words` is ([`main_action`]): with its words, or as wide as
 /// it is `high` with its icon alone (`compact`).
 #[must_use]
@@ -304,7 +382,7 @@ pub fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon,
 
 /// [`field`], which also keeps the focus on Esc when `escape` (egui's own Esc takes it away).
 #[expect(clippy::too_many_arguments, reason = "the field's own seven and whether it keeps Esc")]
-fn field_keeping(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon, palette: Palette, id: Id, escape: bool) -> Response {
+pub(crate) fn field_keeping(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, icon: Icon, palette: Palette, id: Id, escape: bool) -> Response {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     draw_icon(&painter, pos2(rect.left() + FIELD_PAD + ICON / 2.0, rect.center().y), icon, ICON, palette.quiet);
     let room = Rect::from_min_max(pos2(rect.left() + FIELD_PAD + ICON + ICON_GAP, rect.top()), pos2(rect.right() - FIELD_PAD, rect.bottom()));

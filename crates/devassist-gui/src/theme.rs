@@ -156,6 +156,17 @@ pub const FORK_COLUMN_NEWEST: f32 = 112.0;
 pub const FORK_COLUMN_STATE: f32 = 168.0;
 /// The width of the forks table's column with a row's two buttons.
 pub const FORK_COLUMN_ACTIONS: f32 = 72.0;
+/// A fork row's round button (open its folder, open it on GitHub), as wide as high: the drawing's `rowButton`
+/// (`width: 32, height: 32`); two of them stand from the left of [`FORK_COLUMN_ACTIONS`].
+pub const ROW_BUTTON: f32 = 32.0;
+/// The corners of a fork row's button: round (`cornerRadius: 16`).
+pub const ROW_BUTTON_RADIUS: f32 = ROW_BUTTON / 2.0;
+/// The room inside a segment of a segmented control (the forks' "All" and "With changes") before its words and
+/// after its count, left then right: the drawing's `segments` (`padding: [0, 12]`). It is [`ACTION_HEIGHT`] high,
+/// round at its ends, and the segments stand [`CAPSULE_GAP`] apart in a capsule padded by [`CAPSULE_PAD`].
+pub const SEGMENT_PAD: [f32; 2] = [12.0, 12.0];
+/// The gap between a segment's words and its count (`gap: 6`).
+pub const SEGMENT_COUNT_GAP: f32 = 6.0;
 /// The least width the forks table's fork column keeps before columns give way; it takes what the others leave.
 pub const FORK_NAME_LEAST: f32 = 160.0;
 /// How many commits the forks table's ahead rule has room for, from its left edge; more are drawn broken.

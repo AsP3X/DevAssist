@@ -181,7 +181,7 @@ impl eframe::App for App {
         let planned = self.pages.plan(&painter, size, &self.session);
         // The dialog or the menu the core's mode asks for, on any screen: opened now when the core's workers asked for
         // it. The menu stands under the row's button the screen placed in the last frame.
-        let dialog = dialogs::before(&ctx, self.session.repos(), repos_screen::menu_anchor(&self.pages.screen), &mut self.dialogs);
+        let dialog = dialogs::before(&ctx, self.session.repos(), self.pages.menu_anchor(), &mut self.dialogs);
         let mut wants = planned.wants();
         for want in dialog.iter().flat_map(dialogs::Plan::wants) {
             wants.add(want);
@@ -216,7 +216,6 @@ impl eframe::App for App {
 
 /// The page the sidebar has chosen and what its screens keep between frames: the Repositories screen, or the forks
 /// of a repository in its place while the core has them open.
-#[derive(Default)]
 pub(crate) struct Pages {
     /// The page the sidebar has chosen.
     pub(crate) page: Page,
@@ -226,6 +225,13 @@ pub(crate) struct Pages {
     screen: Screen,
     /// What the forks screen keeps between frames.
     forks: forks_screen::Screen,
+}
+
+impl Default for Pages {
+    /// As the window starts: on the Repositories page, the sidebar shown.
+    fn default() -> Pages {
+        Pages { page: Page::default(), sidebar_shown: true, screen: Screen::default(), forks: forks_screen::Screen::default() }
+    }
 }
 
 /// What a frame's screen draws, decided before the bake: the layout, the Repositories screen's controls or the
@@ -246,7 +252,16 @@ impl Planned {
         if let Some(plan) = &self.plan {
             plan.add_wants(&mut wants);
         }
+        if let Some(forks) = &self.forks {
+            forks.add_wants(&mut wants);
+        }
         wants
+    }
+
+    /// The forks' plan, while they show.
+    #[cfg(test)]
+    pub(crate) fn forks(&self) -> Option<&forks_screen::Plan> {
+        self.forks.as_ref()
     }
 }
 
@@ -255,17 +270,31 @@ impl Pages {
     /// while the core has them open and the page is Repositories, else the Repositories screen there.
     pub(crate) fn plan(&self, painter: &egui::Painter, size: egui::Vec2, session: &Session) -> Planned {
         let on_repositories = self.page == Page::Repositories;
-        let layout = shell::layout(size, self.sidebar_shown, on_repositories && repos_screen::has_toolbar(session));
-        let plan = if on_repositories { repos_screen::plan(painter, &layout, session) } else { None };
         let view = session.repos().and_then(|repos| repos.forks.as_ref()).filter(|_| on_repositories);
+        // The forks have their toolbar always; the table when there are repositories to filter, sort and tick.
+        let toolbar = view.is_some() || (on_repositories && repos_screen::has_toolbar(session));
+        let layout = shell::layout(size, self.sidebar_shown, toolbar);
+        let plan = if on_repositories { repos_screen::plan(painter, &layout, session) } else { None };
+        let repos = view.and(session.repos());
         Planned {
             plan,
-            forks: view.map(|view| forks_screen::plan(view, layout.panel)),
-            title: view.and(session.repos()).and_then(forks_screen::title),
-            status: view.map(forks_screen::status),
+            forks: view.map(|view| forks_screen::plan(view, &layout, painter)),
+            title: repos.and_then(forks_screen::title),
+            status: repos.and_then(forks_screen::status),
             layout,
             on_repositories,
         }
+    }
+
+    /// Where the menu stands under: the "…" of the row the Repositories screen opened it on, in the last frame.
+    pub(crate) fn menu_anchor(&self) -> Option<egui::Rect> {
+        repos_screen::menu_anchor(&self.screen)
+    }
+
+    /// What the forks screen keeps, for the tests.
+    #[cfg(test)]
+    pub(crate) fn forks_screen(&self) -> &forks_screen::Screen {
+        &self.forks
     }
 
     /// Draws the shell and the screen `planned` (this frame's [`Pages::plan`]) on `ui` and does what their presses
@@ -287,22 +316,22 @@ impl Pages {
         // Under an open overlay the screen has no keyboard and takes no press.
         let keys = !overlay::is_open(&ctx);
         if let Some(forks_plan) = &planned.forks {
+            // The table's filter does not keep the keyboard under the forks, nor get it back after them.
+            repos_screen::leave(&ctx, &mut self.screen);
             let asked = forks_screen::show(ui, &planned.layout, forks_plan, sheet, mode, &mut self.forks, keys);
             if let Some(repos) = session.repos_mut() {
-                if back {
-                    repos.close_forks();
-                } else if let Some(command) = asked {
-                    forks_screen::apply(command, repos);
-                }
+                forks_screen::apply_all(if back { vec![forks_screen::Command::Back] } else { asked }, repos);
             }
         } else if planned.on_repositories {
             repos_screen::show(ui, &planned.layout, planned.plan.as_ref(), session, sheet, mode, &mut self.screen, keys);
         } else {
             shell::placeholder(ui, planned.layout.panel, sheet, theme::palette(mode));
         }
-        // Closed, the forks leave nothing behind: the next forks opened start at the top, their highlight followed.
+        // Closed, the forks leave nothing behind: the next forks opened start at the top, their highlight followed, and
+        // their filter has no keyboard.
         if !session.repos().is_some_and(forks_screen::shown) {
             self.forks = forks_screen::Screen::default();
+            forks_screen::leave(&ctx);
         }
     }
 }
