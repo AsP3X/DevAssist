@@ -713,7 +713,9 @@ pub struct Repos {
     /// The running update or clone, or the last one that ran.
     pub job: Option<Job>,
     /// The job is a fetch of forks: what the lines of its task running now
-    /// said. None for every other job.
+    /// said. None for every other job. Set by `start_fork_job` and
+    /// `hold_fork_job`, cleared by `start_job`: code that assigns `job`
+    /// itself bypasses it, and only tests do that.
     fork_watch: Option<ForkWatch>,
     pub status: String,
     pub status_error: bool,
@@ -4399,7 +4401,7 @@ impl Repos {
     /// The collection folder the fetch of forks that runs now fetches
     /// into, for the task running now, once its lines have said it.
     pub fn fork_job_into(&self) -> Option<PathBuf> {
-        self.running_fork_watch()?.into().map(Path::to_path_buf)
+        self.running_fork_watch()?.folder().map(Path::to_path_buf)
     }
 
     /// What the lines of the fetch of forks said, while one runs.
@@ -7395,7 +7397,8 @@ mod tests {
         Some(ForkProgress {
             done,
             total,
-            at_a_time: 8,
+            // Eight at a time, or as many as there are.
+            at_a_time: (total as usize).clamp(1, 8),
             pause: pause.map(String::from),
         })
     }
@@ -7464,6 +7467,36 @@ mod tests {
         app.job.as_mut().unwrap().finish(Ok("Done.".into()), false);
         assert_eq!(app.fork_progress(), None);
         assert_eq!(app.fork_job_into(), None);
+    }
+
+    #[test]
+    fn the_facts_outlast_the_kept_lines_and_end_with_the_run() {
+        let mut app = grouped_app();
+        let job = gitprogress::job("Updating the forks of api", vec!["api".into()], 0);
+        app.start_fork_job("Updating the forks of api…".into(), job, |_| {
+            Ok("Done.".into())
+        });
+        job_says(&mut app, JobEvent::Start(0));
+        job_line(&mut app, "600 forks, into api-fork", false);
+        for fork in 0..600 {
+            job_line(&mut app, &format!("Fetching fork{fork}/api."), false);
+        }
+        job_line(&mut app, "Fetching forks:   5% (30/600)", true);
+        let output = &app.job.as_ref().unwrap().items[0].output;
+        assert!(
+            !output.iter().any(|line| line.contains(" forks, into ")),
+            "the total line is still kept"
+        );
+        assert_eq!(app.fork_progress(), fork_fetch(30, 600, None));
+        assert_eq!(app.fork_job_into(), Some(PathBuf::from("api-fork")));
+        // What comes after the run ended is not heard.
+        app.job.as_mut().unwrap().finish(Ok("Done.".into()), false);
+        let before = app.fork_watch.as_ref().unwrap().progress();
+        job_says(&mut app, JobEvent::Start(0));
+        job_line(&mut app, "3 forks, into other-fork", false);
+        job_line(&mut app, "The fetch timed out. Paused for 0:10.", false);
+        assert_eq!(app.fork_watch.as_ref().unwrap().progress(), before);
+        assert_eq!(app.fork_progress(), None);
     }
 
     #[test]

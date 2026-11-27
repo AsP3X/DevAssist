@@ -3,6 +3,7 @@
 //! here only, so the wording cannot drift between the two.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::gitops::FORK_JOBS;
 use crate::task::job::JobEvent;
@@ -59,34 +60,48 @@ pub fn going_on() -> String {
 
 /// What a line of a fetch of forks says, when it is one of the lines
 /// above. Every other line is None.
+/// Each kind is tried in turn, a total before a pause, and a line that
+/// is not quite one kind is tried as the others.
 pub fn parse(line: &str) -> Option<ForkLine> {
-    if line == GOING_ON {
-        return Some(ForkLine::GoingOn);
-    }
-    if let Some(left) = line.strip_prefix(COUNTDOWN) {
-        return read_clock(left).map(|seconds| ForkLine::Countdown { seconds });
-    }
-    if let Some(rest) = line.strip_prefix(FETCHING) {
-        let (_, counted) = rest.split_once('(')?;
-        let (done, total) = counted.strip_suffix(')')?.split_once('/')?;
-        return Some(ForkLine::Fetching {
-            done: done.parse().ok()?,
-            total: total.parse().ok()?,
-        });
-    }
-    if let Some((why, wait)) = line.split_once(PAUSED)
-        && !why.is_empty()
-    {
-        let seconds = read_clock(wait.strip_suffix('.')?)?;
-        return Some(ForkLine::Paused {
-            why: why.to_string(),
-            seconds,
-        });
-    }
+    (line == GOING_ON)
+        .then_some(ForkLine::GoingOn)
+        .or_else(|| parse_countdown(line))
+        .or_else(|| parse_fetching(line))
+        .or_else(|| parse_total(line))
+        .or_else(|| parse_paused(line))
+}
+
+fn parse_countdown(line: &str) -> Option<ForkLine> {
+    let seconds = read_clock(line.strip_prefix(COUNTDOWN)?)?;
+    Some(ForkLine::Countdown { seconds })
+}
+
+fn parse_fetching(line: &str) -> Option<ForkLine> {
+    let (_, counted) = line.strip_prefix(FETCHING)?.split_once('(')?;
+    let (done, total) = counted.strip_suffix(')')?.split_once('/')?;
+    Some(ForkLine::Fetching {
+        done: done.parse().ok()?,
+        total: total.parse().ok()?,
+    })
+}
+
+fn parse_total(line: &str) -> Option<ForkLine> {
     let (forks, into) = line.split_once(INTO)?;
     Some(ForkLine::Total {
         forks: forks.parse().ok()?,
         into: PathBuf::from(into),
+    })
+}
+
+fn parse_paused(line: &str) -> Option<ForkLine> {
+    // The reason may say anything; the clock is at the end.
+    let (why, wait) = line.rsplit_once(PAUSED)?;
+    if why.is_empty() {
+        return None;
+    }
+    Some(ForkLine::Paused {
+        why: why.to_string(),
+        seconds: read_clock(wait.strip_suffix('.')?)?,
     })
 }
 
@@ -118,71 +133,127 @@ pub struct ForkProgress {
     /// How many forks are fetched at the same time.
     pub at_a_time: usize,
     /// "The fetch timed out. Paused, going on in 0:12.", while the fetch
-    /// pauses.
+    /// pauses. It changes with time: the time left counts down on the
+    /// core's own clock from what the pause lines said, so whoever shows
+    /// it asks again each second. With several pauses at once it names
+    /// the one that ends last, until every one has gone on; a count of
+    /// forks hides it until the next pause line.
     pub pause: Option<String>,
 }
 
+/// A pause that has not gone on yet: why, and when it ends.
+#[derive(Clone, Debug)]
+struct Pause {
+    why: String,
+    ends: Instant,
+}
+
 /// What the lines of the task running now in a fetch of forks said so
-/// far. A new task starts from nothing.
+/// far. A new task starts from nothing, and an ended one says nothing.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ForkWatch {
+    /// The task the facts are of.
+    task: Option<usize>,
     /// The collection, and the forks counted so far of how many: known
     /// once the task has said its total.
     said: Option<(PathBuf, u32, u32)>,
-    /// Why the fetch pauses, and the seconds left: from the newest pause
-    /// line and the newest countdown after it.
-    pause: Option<(String, u64)>,
+    /// The pauses heard that have not said "Going on." yet, oldest first.
+    pauses: Vec<Pause>,
+    /// A count of forks came after the newest pause line.
+    hidden: bool,
 }
 
 impl ForkWatch {
-    /// Hears what the job heard: a task that starts starts from nothing.
+    /// Hears what the job heard: a task that starts starts from nothing,
+    /// and one that ends leaves nothing.
     pub(crate) fn on(&mut self, event: &JobEvent) {
+        self.on_at(event, Instant::now());
+    }
+
+    /// `on`, heard at `now`.
+    fn on_at(&mut self, event: &JobEvent, now: Instant) {
         match event {
-            JobEvent::Start(_) => *self = Self::default(),
-            JobEvent::Line(line, _) => self.hear(line),
+            JobEvent::Start(index) => {
+                *self = Self {
+                    task: Some(*index),
+                    ..Self::default()
+                };
+            }
+            JobEvent::Done(index, _) | JobEvent::Failed(index, _) if self.task == Some(*index) => {
+                *self = Self::default();
+            }
+            JobEvent::Line(line, _) => self.hear(line, now),
             _ => {}
         }
     }
 
-    fn hear(&mut self, line: &str) {
+    fn hear(&mut self, line: &str, now: Instant) {
+        let after = |seconds: u64| now + Duration::from_secs(seconds);
         match parse(line) {
             Some(ForkLine::Total { forks, into }) => {
                 self.said = Some((into, 0, forks));
-                self.pause = None;
+                self.pauses.clear();
+                self.hidden = false;
             }
             Some(ForkLine::Fetching { done, total }) => {
                 if let Some((_, counted, of)) = self.said.as_mut() {
                     (*counted, *of) = (done, total);
                 }
-                self.pause = None;
+                self.hidden = true;
             }
-            Some(ForkLine::Paused { why, seconds }) => self.pause = Some((why, seconds)),
+            Some(ForkLine::Paused { why, seconds }) => {
+                self.pauses.push(Pause {
+                    why,
+                    ends: after(seconds),
+                });
+                self.hidden = false;
+            }
             Some(ForkLine::Countdown { seconds }) => {
-                if let Some((_, left)) = self.pause.as_mut() {
-                    *left = seconds;
+                // Only the job's own line counts down: its newest pause.
+                if let Some(pause) = self.pauses.last_mut() {
+                    pause.ends = after(seconds);
+                }
+                self.hidden = false;
+            }
+            Some(ForkLine::GoingOn) => {
+                // The pause that goes on is the one due first.
+                if let Some(first) = (0..self.pauses.len()).min_by_key(|&at| self.pauses[at].ends) {
+                    self.pauses.remove(first);
                 }
             }
-            Some(ForkLine::GoingOn) => self.pause = None,
             None => {}
         }
     }
 
     /// How far the task is, once it has said how many forks there are.
     pub(crate) fn progress(&self) -> Option<ForkProgress> {
+        self.progress_at(Instant::now())
+    }
+
+    /// `progress`, at `now`.
+    fn progress_at(&self, now: Instant) -> Option<ForkProgress> {
         let (_, done, total) = self.said.as_ref()?;
+        let pause = self
+            .pauses
+            .iter()
+            .max_by_key(|pause| pause.ends)
+            .filter(|_| !self.hidden)
+            .map(|pause| {
+                let left = pause.ends.saturating_duration_since(now);
+                // A second begun is a second left: it reads 0:12 when heard.
+                let seconds = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+                format!("{}. Paused, going on in {}.", pause.why, clock(seconds))
+            });
         Some(ForkProgress {
             done: *done,
             total: *total,
-            at_a_time: FORK_JOBS,
-            pause: self
-                .pause
-                .as_ref()
-                .map(|(why, left)| format!("{why}. Paused, going on in {}.", clock(*left))),
+            at_a_time: FORK_JOBS.min(*total as usize).max(1),
+            pause,
         })
     }
 
     /// The collection the task fetches into, once it has said so.
-    pub(crate) fn into(&self) -> Option<&Path> {
+    pub(crate) fn folder(&self) -> Option<&Path> {
         self.said.as_ref().map(|(into, _, _)| into.as_path())
     }
 }
@@ -286,5 +357,223 @@ mod tests {
         ] {
             assert_eq!(parse(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn a_line_that_looks_like_two_kinds_reads_as_the_one_it_is() {
+        // A collection whose path reads like a pause is still a total.
+        let into = PathBuf::from("code").join("api. Paused for 0:10.");
+        assert_eq!(
+            parse(&total(38, &into)),
+            Some(ForkLine::Total {
+                forks: 38,
+                into: into.clone()
+            })
+        );
+        // A reason that says "Paused" is still the reason.
+        let why = "Paused by GitHub. Paused for a while";
+        assert_eq!(
+            parse(&paused(why, 10)),
+            Some(ForkLine::Paused {
+                why: why.to_string(),
+                seconds: 10
+            })
+        );
+        // A clock that cannot be read leaves the line to the other kinds.
+        for why in ["Paused, going on in soon", "Fetching forks: (x"] {
+            assert_eq!(
+                parse(&paused(why, 5)),
+                Some(ForkLine::Paused {
+                    why: why.to_string(),
+                    seconds: 5
+                }),
+                "{why}"
+            );
+        }
+        // Clocks at their edges, and a count of none.
+        for seconds in [600, 3599] {
+            assert_eq!(
+                parse(&countdown(seconds)),
+                Some(ForkLine::Countdown { seconds })
+            );
+            assert_eq!(
+                parse(&paused("The fetch timed out", seconds)),
+                Some(ForkLine::Paused {
+                    why: "The fetch timed out".into(),
+                    seconds
+                })
+            );
+        }
+        assert_eq!(countdown(600), "Paused, going on in 10:00");
+        assert_eq!(countdown(3599), "Paused, going on in 59:59");
+        assert_eq!(fetching(0, 0), "Fetching forks:   0% (0/0)");
+        assert_eq!(
+            parse(&fetching(0, 0)),
+            Some(ForkLine::Fetching { done: 0, total: 0 })
+        );
+    }
+
+    /// A watch that has heard `lines` of the task at index 0, each at the
+    /// given second after `start`.
+    fn heard(start: Instant, lines: &[(u64, &str)]) -> ForkWatch {
+        let mut watch = ForkWatch::default();
+        watch.on_at(&JobEvent::Start(0), start);
+        for (second, line) in lines {
+            watch.on_at(
+                &JobEvent::Line((*line).to_string(), false),
+                at(start, *second),
+            );
+        }
+        watch
+    }
+
+    fn at(start: Instant, second: u64) -> Instant {
+        start + std::time::Duration::from_secs(second)
+    }
+
+    fn pause_at(watch: &ForkWatch, start: Instant, second: u64) -> Option<String> {
+        watch.progress_at(at(start, second))?.pause
+    }
+
+    #[test]
+    fn a_pause_counts_down_on_its_own_clock() {
+        let start = Instant::now();
+        let total = "38 forks, into api-fork";
+        // A fork's own timeout: no countdown line ever comes.
+        let watch = heard(
+            start,
+            &[(0, total), (1, "The fetch timed out. Paused for 0:10.")],
+        );
+        let said = |second| pause_at(&watch, start, second);
+        assert_eq!(
+            said(1).as_deref(),
+            Some("The fetch timed out. Paused, going on in 0:10.")
+        );
+        assert_eq!(
+            said(4).as_deref(),
+            Some("The fetch timed out. Paused, going on in 0:07.")
+        );
+        assert_eq!(
+            said(30).as_deref(),
+            Some("The fetch timed out. Paused, going on in 0:00.")
+        );
+        // The design's case: a countdown line sets the clock again.
+        let watch = heard(
+            start,
+            &[
+                (0, total),
+                (2, "The fetch timed out. Paused for 0:30."),
+                (20, "Paused, going on in 0:12"),
+            ],
+        );
+        assert_eq!(
+            pause_at(&watch, start, 20).as_deref(),
+            Some("The fetch timed out. Paused, going on in 0:12.")
+        );
+        assert_eq!(
+            pause_at(&watch, start, 25).as_deref(),
+            Some("The fetch timed out. Paused, going on in 0:07.")
+        );
+    }
+
+    #[test]
+    fn overlapping_pauses_show_the_one_that_ends_last() {
+        let start = Instant::now();
+        let total = "38 forks, into api-fork";
+        let mut watch = heard(
+            start,
+            &[
+                (0, total),
+                (1, "The fetch timed out. Paused for 0:10."),
+                (2, "GitHub did not answer. Paused for 0:30."),
+            ],
+        );
+        assert_eq!(
+            pause_at(&watch, start, 2).as_deref(),
+            Some("GitHub did not answer. Paused, going on in 0:30.")
+        );
+        // The first goes on; the second still pauses.
+        watch.on_at(&JobEvent::Line("Going on.".into(), false), at(start, 11));
+        assert_eq!(
+            pause_at(&watch, start, 11).as_deref(),
+            Some("GitHub did not answer. Paused, going on in 0:21.")
+        );
+        watch.on_at(&JobEvent::Line("Going on.".into(), false), at(start, 32));
+        assert_eq!(pause_at(&watch, start, 32), None);
+        // The longer one is shown, whichever came first.
+        let watch = heard(
+            start,
+            &[
+                (0, total),
+                (1, "The fetch timed out. Paused for 0:40."),
+                (2, "GitHub did not answer. Paused for 0:05."),
+            ],
+        );
+        assert_eq!(
+            pause_at(&watch, start, 2).as_deref(),
+            Some("The fetch timed out. Paused, going on in 0:39.")
+        );
+    }
+
+    #[test]
+    fn a_count_hides_a_pause_until_the_next_pause_line() {
+        let start = Instant::now();
+        let mut watch = heard(
+            start,
+            &[
+                (0, "38 forks, into api-fork"),
+                (1, "The fetch timed out. Paused for 0:30."),
+            ],
+        );
+        watch.on_at(
+            &JobEvent::Line("Fetching forks:  65% (25/38)".into(), true),
+            at(start, 3),
+        );
+        let progress = watch.progress_at(at(start, 3)).unwrap();
+        assert_eq!(
+            (progress.done, progress.total, progress.pause),
+            (25, 38, None)
+        );
+        // Another pause brings it back, with the one that ends last.
+        watch.on_at(
+            &JobEvent::Line("GitHub did not answer. Paused for 0:05.".into(), false),
+            at(start, 5),
+        );
+        assert_eq!(
+            pause_at(&watch, start, 5).as_deref(),
+            Some("The fetch timed out. Paused, going on in 0:26.")
+        );
+    }
+
+    #[test]
+    fn a_task_that_ends_says_nothing_more() {
+        let start = Instant::now();
+        let lines = [
+            (0, "38 forks, into api-fork"),
+            (1, "Fetching forks:  63% (24/38)"),
+        ];
+        let mut watch = heard(start, &lines);
+        // The end of another task changes nothing.
+        watch.on_at(&JobEvent::Done(1, "done".into()), at(start, 2));
+        assert!(watch.progress_at(at(start, 2)).is_some());
+        watch.on_at(&JobEvent::Done(0, "38 forks".into()), at(start, 2));
+        assert_eq!(watch.progress_at(at(start, 2)), None);
+        assert_eq!(watch.folder(), None);
+        let mut watch = heard(start, &lines);
+        watch.on_at(&JobEvent::Failed(0, "fatal".into()), at(start, 2));
+        assert_eq!(watch.progress_at(at(start, 2)), None);
+    }
+
+    #[test]
+    fn as_many_run_at_a_time_as_there_are_forks_up_to_the_limit() {
+        let start = Instant::now();
+        let at_a_time = |line: &str| {
+            heard(start, &[(0, line)])
+                .progress_at(start)
+                .map(|progress| progress.at_a_time)
+        };
+        assert_eq!(at_a_time("3 forks, into api-fork"), Some(3));
+        assert_eq!(at_a_time("38 forks, into api-fork"), Some(FORK_JOBS));
+        assert_eq!(at_a_time("0 forks, into api-fork"), Some(1));
     }
 }
