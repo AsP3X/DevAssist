@@ -662,7 +662,8 @@ pub fn palette(mode: Mode) -> Palette {
             accent: rgb(0x2a, 0x66, 0xd6),
             progress: rgb(0xc7, 0xd7, 0xf4),
             // The user's decision, 2026-11-27: lightened from #487cdc so the ring holds 3.0 on the fetch dialog over the
-            // lake backdrop (was 2.92). The accent #2a66d6 mixed with white, in steps of 0.01: 0.16.
+            // lake backdrop (was 2.92). #5281de keeps the hue and saturation of the accent #2a66d6 (in HSL about 220
+            // and 68 percent against its 219 and 68) with the lightness raised from 50 to 60 percent.
             focus: rgb(0x52, 0x81, 0xde),
             field: rgba(255, 255, 255, 0x1a),
             scrim: rgba(0, 0, 0, 0x73),
