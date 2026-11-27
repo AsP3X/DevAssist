@@ -329,6 +329,9 @@ impl Pages {
             let asked = forks_screen::show(ui, &planned.layout, forks_plan, sheet, mode, &mut self.forks, keys);
             if let Some(repos) = session.repos_mut() {
                 forks_screen::apply_all(if back { vec![forks_screen::Command::Back] } else { asked }, repos);
+                if repos.forks.is_some() {
+                    forks_screen::status_bar(ui, &planned.layout, repos, keys);
+                }
             }
         } else if planned.on_repositories {
             repos_screen::show(ui, &planned.layout, planned.plan.as_ref(), session, sheet, mode, &mut self.screen, keys);

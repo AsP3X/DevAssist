@@ -2103,8 +2103,8 @@ mod tests {
     /// The fetch's dialog over the forks screen (`--show forks-fetching`), each press on a fresh one: every input of
     /// [`every_input`]; Cancel and Hide clicked and double-clicked; a click and a double click on every text it draws
     /// (its title, the line under it, the count's inset, the pause, the output) and on its scrim; Tab, the arrows, Enter
-    /// and Esc; and Hide, then `l` on the forks, which shows it again. Nothing ends or changes the held fetch; Cancel
-    /// says the held notice.
+    /// and Esc; and Hide, then `l` on the forks, which shows it again, and Hide, then a click on the status bar, which
+    /// does too. Nothing ends or changes the held fetch; Cancel says the held notice.
     fn walk_the_fetch_dialog_over_the_forks(win: &mut Win, before: [usize; 5]) {
         for (press, release) in every_input() {
             fresh_fetch(win);
@@ -2181,6 +2181,22 @@ mod tests {
         win.frame(Vec::new());
         assert!(fetch_open(win) && win.drew(&format!("{FETCH_DONE} of {FETCH_TOTAL} forks, 8 at a time")), "l did not show the fetch again");
         fetch_left(win, "l on the forks, after Hide", &job, before);
+        // Hidden again (a second later, so no click is part of a double click with the one before), then shown by a
+        // click on the status bar, as on the table.
+        win.step = 1.0;
+        win.frame(Vec::new());
+        win.step = 0.02;
+        win.click(hide);
+        win.frame(Vec::new());
+        assert!(!fetch_open(win), "Hide did not hide the fetch's dialog again");
+        let bar = win.pages_layout().status.center();
+        win.click(bar);
+        win.frame(Vec::new());
+        assert!(
+            fetch_open(win) && win.drew(&format!("{FETCH_DONE} of {FETCH_TOTAL} forks, 8 at a time")),
+            "a click on the status bar did not show the fetch again"
+        );
+        fetch_left(win, "a click on the status bar, after Hide", &job, before);
     }
 
     /// The demo with exactly one repository chosen: no ticks, `row` highlighted.

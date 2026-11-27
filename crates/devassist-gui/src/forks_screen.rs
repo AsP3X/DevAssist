@@ -793,6 +793,19 @@ pub fn show(ui: &mut Ui, layout: &Layout, plan: &Plan, sheet: Option<&Sheet>, mo
     asked
 }
 
+/// A hidden run says how it goes in the status bar at `layout.status`; while there is a run, a click there shows its
+/// dialog again, as `l` does and as on the Repositories screen. Not without `keys` (an overlay is open), nor for the
+/// rest of a double click whose first click closed one.
+pub fn status_bar(ui: &Ui, layout: &Layout, repos: &mut Repos, keys: bool) {
+    if !keys || overlay::stale_click(ui.ctx()) || repos.job.is_none() {
+        return;
+    }
+    let response = ui.interact(layout.status, Id::unique("forks-status-bar"), Sense::CLICK).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        repos.show_job();
+    }
+}
+
 /// Draws the table of `plan` on its panel: the head row, each row in view with its buttons, the highlight followed
 /// into view when it moved and the rows from the top when the filter or the segment changed; with `presses`, adds
 /// what a click asked to `asked`.
@@ -2305,6 +2318,34 @@ pub(crate) mod tests {
         win.key(Key::Escape, None);
         win.frame(Vec::new());
         assert!(!dialog_open(&win) && win.repos().forks.is_some());
+    }
+
+    #[test]
+    fn a_click_on_the_status_bar_shows_a_hidden_run_again() {
+        use devassist_core::repos::forklines;
+        // With no run, a click there does nothing and says nothing.
+        let mut win = Win::demo();
+        let bar = win.pages_layout().status.center();
+        let stamp = win.repos().status_stamp();
+        win.click(bar);
+        assert!(!dialog_open(&win) && win.repos().status_stamp() == stamp, "a click on the status bar without a run did something");
+        // A fetch hidden by Hide (Enter, which has the focus): the click shows it again, as on the table, and the
+        // forks stay under it.
+        let into = view(win.repos()).dest.clone();
+        let lines = [forklines::total(38, &into), forklines::fetching(24, 38)];
+        testing::fork_job(win.repos_mut(), "api", &[(lines[0].as_str(), false), (lines[1].as_str(), true)]);
+        win.frame(Vec::new());
+        win.frame(Vec::new());
+        win.key(Key::Enter, None);
+        win.frame(Vec::new());
+        assert!(!dialog_open(&win), "Hide did not hide the fetch");
+        win.step = 1.0;
+        win.frame(Vec::new());
+        win.step = 0.1;
+        win.click(bar);
+        win.frame(Vec::new());
+        assert!(dialog_open(&win) && win.drew("24 of 38 forks, 8 at a time"), "the click did not show the fetch again");
+        assert!(win.repos().forks.is_some(), "the forks went");
     }
 
     #[test]
