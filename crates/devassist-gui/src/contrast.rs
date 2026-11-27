@@ -1875,7 +1875,10 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                         // (the controller's ruling of 2026-11-26).
                         let on_inset =
                             shot.over.is_dialog() && fills.iter().any(|(fill, name, overlaid)| *overlaid && name == "field" && fill.contains(centre));
-                        let danger_status = shot.over == Over::Nothing && region(centre) == "status" && ink_name == "danger";
+                        // Danger text on the status bar the shell draws, on any screen (not on an overlay over it), keyed
+                        // by that place alone. The user's decision, 2026-11-27: the status bar's danger text is held to
+                        // 4.5 on every screen (measured on the forks screen in light: 4.57 at its lowest).
+                        let danger_status = !on_overlay && region(centre) == "status" && ink_name == "danger";
                         // The words of an installed row of the Add list (its name, description and "Installed") are
                         // set back yet still information (the row can be highlighted): held to 4.5, whatever their
                         // size, by their place (the controller's ruling of 2026-11-26). Every other text keeps its bar.
