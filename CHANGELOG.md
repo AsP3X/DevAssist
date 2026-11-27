@@ -84,6 +84,16 @@ What changed in each version of DevAssist. The format follows
 - A fetch of the forks first repairs the fork folders of a forks folder that
   was moved, instead of leaving them out. A repair that fails is a line in the
   progress dialog, nothing is pruned then, and the fetch goes on.
+- A read of the forks that fails takes the forks it listed before away, so
+  none of them can be opened or acted on: the overview says "The forks could
+  not be read. r tries again." with Git's words, in the terminal app as in the
+  window, whose status bar says the error too.
+- An overview of the forks that is open while its repository moves follows
+  it: after the move it reads the forks at the new place, and **Read again**
+  works there.
+- The window's fetch dialog keeps the last count of a fetch of forks once it
+  has ended, also when the dialog was hidden while it ran: shown again, it no
+  longer loses the count or shows an old one.
 
 ## [0.7.0] - 2026-11-26
 

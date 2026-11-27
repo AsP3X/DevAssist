@@ -32,11 +32,10 @@ cargo run -- --config scratch.toml
 `devassist-gui` is a second program, a window in a "liquid glass" design. It
 shows your repositories and acts on them: update, watch, open, group and
 remove, and it adds, imports, moves and pushes them, and shows and updates
-their forks. What the program does
-by itself it also does here: it fetches every repository when it starts, and
-it pulls the repositories you watch when their interval is over, as the
-terminal app does (see the window in [USAGE.md](USAGE.md)). It is not in the
-installers or the release downloads.
+their forks. What the program does by itself it also does here: it fetches
+every repository when it starts, and it pulls the repositories you watch when
+their interval is over, as the terminal app does (see the window in
+[USAGE.md](USAGE.md)). It is not in the installers or the release downloads.
 
 ```
 cargo run -p devassist-gui

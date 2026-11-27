@@ -353,8 +353,11 @@ there. The heading counts them.
 | `Esc`, `←` | back to the repositories |
 
 A double-click opens the folder too. After a fetch the overview reads the
-folder again by itself. The window has this overview too (see "The forks"
-under "The window").
+folder again by itself. When a read fails, the forks that were listed go, so
+nothing old is acted on: the list says "The forks could not be read. r tries
+again." and the line under the status gives Git's own words. An overview that
+is open while its repository moves reads the forks at the new place from then
+on. The window has this overview too (see "The forks" under "The window").
 
 A limit or a timeout does not end the run. Without a sign-in GitHub answers
 only 60 requests an hour, enough to list about 6,000 forks. When that limit
@@ -394,8 +397,9 @@ Choose with `↑` `↓` and `Enter`, press the letter shown on the right, or cli
 **Migrate** (`t`) opens a submenu; `Esc` goes back to the menu. Its line
 **Move to another folder…** (`f`) asks for a folder and moves the highlighted
 repository, or every ticked one, into it. Each keeps its folder name, so
-`D:\code\api` moved to `E:\work` becomes `E:\work\api`. The folder is created
-when it is not there yet.
+`D:\code\api` moved to `E:\work` becomes `E:\work\api`, and the question says
+"each repository keeps its folder name and its forks inside". The folder is
+created when it is not there yet.
 
 The repository stays on the list with everything it had: its group, the
 automatic pull and the saved pull requests. On the same drive the move is
@@ -406,12 +410,12 @@ Close programs that have files of the repository open first: Windows does not
 move a folder that is in use.
 
 The forks go along. When the repository has a forks folder beside it
-(`D:\code\api-fork`, see "Cloning the forks"), it moves after the repository to the same
-place under the new folder (`E:\work\api-fork`), the same way: renamed on the
-same drive, copied and then deleted onto another. Its fork folders are then
-repaired with `git worktree repair`, so they work at the new place, and the
-next fetch of the forks takes up where the last one stopped. The progress
-dialog says "Its forks folder went along to E:\work\api-fork."
+(`D:\code\api-fork`, see "Cloning the forks"), it moves after the repository
+to the same place under the new folder (`E:\work\api-fork`), the same way:
+renamed on the same drive, copied and then deleted onto another. Its fork
+folders are then repaired with `git worktree repair`, so they work at the new
+place, and the next fetch of the forks takes up where the last one stopped.
+The progress dialog says "Its forks folder went along to E:\work\api-fork."
 
 Only a forks folder DevAssist made goes along: one whose Git configuration
 says whose forks it holds (`devassist.forksof`, which cloning the forks sets).
@@ -602,17 +606,18 @@ A click on a row highlights it, on its box ticks it, on a group's header
 highlights and folds it, and on the box in the head ticks every row shown. A
 row's "…" opens its menu. If the row is not ticked, the menu is for that row
 alone and the other ticks are cleared; if it is ticked, the menu is for every
-ticked row. In the top row, beside the window's own buttons, "Import"
-opens Import, "Update all" updates every repository, "Update all forks" brings
-the forks of every repository that has them cloned up to date, and "Add
+ticked row. In the top row, beside the window's own buttons, "Import" opens
+Import, "Update all" updates every repository, "Update all forks" brings the
+forks of every repository that has them cloned up to date, and "Add
 repository" opens Add; they are there with no repositories too. "Update all
 forks" does what "Update the forks of all repositories" does in the row's
 menu, whatever is ticked or highlighted; with no forks cloned anywhere it says
-"No forks are cloned yet. Clone the forks of a repository first." on the status
-line. In a narrow window the buttons show their icons only. Once something is ticked, a bar above the table
-says how many, with Update, Move to group, Open folder and Remove, and a
-button that clears the ticks. A double click on a button acts once. A double
-click on a row does not update, as it does in the terminal app.
+"No forks are cloned yet. Clone the forks of a repository first." on the
+status line. In a narrow window the buttons show their icons only. Once
+something is ticked, a bar above the table says how many, with Update, Move to
+group, Open folder and Remove, and a button that clears the ticks. A double
+click on a button acts once. A double click on a row does not update, as it
+does in the terminal app.
 
 While the filter has the keyboard, `↑` `↓` and `PgUp` `PgDn` still move the
 highlight. `Home` and `End` belong to the text. `Tab` keeps the keyboard in the
@@ -791,7 +796,10 @@ files of the repositories open should be closed first. When something is at
 the place a repository's forks folder would go, or another row of the move
 goes there, or its Git configuration cannot be read, a note under the rows
 says that it stays and why: "The forks folder of api stays where it is:
-something is at E:\work\api-fork already." The repository itself still moves.
+something is at E:\work\api-fork already." Several for reasons of their own
+take a line each, three at most, then "And 2 more."; in a window too short for
+that and three rows, the note names fewer, down to one sentence that names
+them all. The repository itself still moves.
 
 The main button counts only the rows that move: "Move" for one, "Move 3
 repositories" for three. It is off while none can move. `Enter` in the field
@@ -899,14 +907,15 @@ says "The forks of homelab are not cloned yet. Clone the forks does it." With
 several repositories ticked, or none highlighted, it says "Highlight one
 repository to see its forks."
 
-In the top row, **Read again** and **Open the folder** share a capsule, and the
-main button is **Fetch the forks**. In a narrow window the capsule shows its
-icons only, and in a narrower one the main button too. Under it, the toolbar
-has a field "Filter by owner or name", the segments **All** and **With
-changes**, each with how many forks it holds, and a button with the sort at its
-right end. A click on the button changes the sort, in this order: "Most changes
-first" (forks with commits of their own first, the one furthest ahead on top),
-"Newest commit first" and "By name".
+In the top row, **Read again** and **Open the folder** share a capsule, and
+the main button is **Fetch the forks**. **Open the folder** there opens the
+folder of the highlighted fork, as `Enter` does. In a narrow window the
+capsule shows its icons only, and in a narrower one the main button too. Under
+it, the toolbar has a field "Filter by owner or name", the segments **All**
+and **With changes**, each with how many forks it holds, and a button with the
+sort at its right end. A click on the button changes the sort, in this order:
+"Most changes first" (forks with commits of their own first, the one furthest
+ahead on top), "Newest commit first" and "By name".
 
 Each fork is a row, in the order of the sort:
 
@@ -915,7 +924,7 @@ Each fork is a row, in the order of the sort:
 | Fork | The owner and name of the fork, as `bob/api` |
 | Branches | How many branches were fetched from it |
 | Pull requests | How many pull requests were fetched from it, or "None" |
-| Ahead of ada/main | How many commits its furthest branch is ahead ("3 ahead", with a rule that grows with the number), or "Nothing". The head names what the forks are compared with: the owner of the original and its default branch. When that cannot be read it says "Ahead of the original" |
+| Ahead of ada/main | How many commits its furthest branch is ahead ("3 ahead", with a rule that grows with the number), or "Nothing"; a dash for a fork with a folder whose commits ahead could not be counted (Git older than 2.41, or the original's main branch could not be read). The head names what the forks are compared with: the owner of the original and its default branch. When that cannot be read it says "Ahead of the original" |
 | Newest commit | The date of its newest commit, as "23 Nov 2026"; empty when nothing was fetched from it |
 | State | "Changes, folder", "No changes", "Not fetched" or "Gone from GitHub", as in the terminal app with a capital letter |
 
@@ -930,7 +939,8 @@ folder. Where the panel has no row it says why, in these words:
 
 - "Reading the forks…" while the folder is read.
 - "The forks could not be read. r tries again." when it could not, with Git's
-  own words under it. **Read again** is the way on.
+  own words under it. The rows that were there go with it, so no old row is
+  acted on. **Read again** is the way on.
 - "No fork is in the folder yet. u fetches them." when the folder holds none.
 - "No fork matches. esc clears the filter, c shows the forks without changes."
   when the filter or the segment hides every fork. Enter, `o` and `g` do
@@ -964,42 +974,47 @@ gives the keyboard back to the list without going back. `Enter` and `↓` give
 it back too. The filter and the segment start the rows again at the top.
 
 The status bar says, at its left, what the program said since you last did
-something here, such as that a folder was opened or could not be. Otherwise it
-says the forks in one sentence, as "38 forks. 6 have changes and a folder. 1 is
-gone from GitHub. 61 branches and 9 pull requests are saved.", leaving out the
-parts that are none. At its right it names the forks' folder and when they were
-last fetched, as "Fetched 25 Nov 2026" (the day the collection's file of
-stamps was last written, in UTC). In a narrow window the folder, cut from its
-left, and the day give way first. While a run exists, a click on the status
-bar shows its dialog again, as `l` does.
+something here, such as that a folder was opened or could not be. After a read
+that failed it says the read's error, in the danger colour, until a read goes
+well. Otherwise it says the forks in one sentence, as "38 forks. 6 have
+changes and a folder. 1 is gone from GitHub. 61 branches and 9 pull requests
+are saved.", leaving out the parts that are none. At its right it names the
+forks' folder and when they were last fetched, as "Fetched 25 Nov 2026" (the
+day the collection's file of stamps was last written, in UTC). In a narrow
+window the day gives way first, then the folder is cut from its left, and then
+it goes too; the words at the left stay whole. While a run exists, a click on
+the status bar shows its dialog again, as `l` does.
 
 **Fetch the forks**, `u`, and the menu's lines that clone or update forks
-start a run, whose progress dialog has a count of the forks. Under its title it
-says where the forks go ("Into D:\code\api-fork. What the checkout has already
-is taken from disk, so only what the forks added is downloaded."), and above
-its output it counts: "24 of 38 forks, 8 at a time", with one bar. A fetch of
-one repository's forks has no list of tasks, as the count stands in its place;
-a run for several repositories keeps the list, and the count is of the
-repository being fetched now. When the fetch pauses, a line with a pause icon
-under the bar says why and for how long, counting down: "The fetch timed out.
-Paused, going on in 0:12." or "GitHub's limit is reached. Paused, going on in
-4:10." The line goes when the fetch goes on. Cancel, Hide, `Esc` and the
-closing of the dialog are as for any run. When the run ends, the forks are
-read again by themselves.
+start a run, whose progress dialog has a count of the forks. Under its title,
+once the run has said where the forks go, it says so ("Into D:\code\api-fork.
+What the checkout has already is taken from disk, so only what the forks added
+is downloaded."), and above its output it counts: "24 of 38 forks, 8 at a
+time", with one bar. A fetch of one repository's forks has no list of tasks,
+as the count stands in its place; a run for several repositories keeps the
+list, and the count is of the repository being fetched now. When the fetch
+pauses, a line with a pause icon under the bar says why and for how long,
+counting down: "The fetch timed out. Paused, going on in 0:12." or "GitHub's
+limit is reached. Paused, going on in 4:10." The line goes when the fetch goes
+on. Cancel, Hide, `Esc` and the closing of the dialog are as for any run.
+Between two repositories of a run, and once the run has ended, the dialog
+keeps the last count, without a pause, also when it was hidden meanwhile; the
+next run starts afresh. When the run ends, the forks are read again by
+themselves.
 
 ### The demo
 
 `--demo` holds all work. Every menu and dialog opens, but nothing is run,
-opened, copied or written, and the status line says "This is a demo. Nothing is
-run or changed." With `--demo --show NAME` the window opens with one of them
-already open: `progress`, `remove`, `group`, `menu`, `migrate` (the menu with
-its side menu), `add`, `add-folder` (Add with the folder field's suggestions
-showing), `import`, `move`, `push`, `forks` (the forks of `api`, with `bob`
-highlighted) or `forks-fetching` (those forks with a fetch of them held in the
-progress dialog). The demo reads no folder and runs no
-Git, so its folders are made up and its move changes nothing. A folder or an
-address you type into one of its dialogs is checked by its text alone: the
-demo does not look whether it is there.
+opened, copied or written, and the status line says "This is a demo. Nothing
+is run or changed." With `--demo --show NAME` the window opens with one of
+them already open: `progress`, `remove`, `group`, `menu`, `migrate` (the menu
+with its side menu), `add`, `add-folder` (Add with the folder field's
+suggestions showing), `import`, `move`, `push`, `forks` (the forks of `api`,
+with `bob` highlighted) or `forks-fetching` (those forks with a fetch of them
+held in the progress dialog). The demo reads no folder and runs no Git, so its
+folders are made up and its move changes nothing. A folder or an address you
+type into one of its dialogs is checked by its text alone: the demo does not
+look whether it is there.
 
 ## Docker
 
