@@ -53,6 +53,7 @@ pub fn quiet_opacity(mode: Mode) -> f32 {
         Mode::Dark => QUIET_OPACITY_DARK,
     }
 }
+
 /// How strong the count on the chosen segment of a segmented control is in the light mode, of the full text colour:
 /// above the quiet strength, the least step of 0.01 that holds 6.0 for its 12-point ink on the chosen segment's fill
 /// on every backdrop (the controller's ruling of 2026-11-27: the text is nudged, never the fill). The count on a
@@ -68,6 +69,7 @@ pub fn chosen_count_opacity(mode: Mode) -> f32 {
         Mode::Dark => QUIET_OPACITY_DARK,
     }
 }
+
 /// How far up from the window's bottom the veil keeps its lower strength, as a share of the height; above, it
 /// rises evenly to its strength at the top.
 pub const VEIL_KNEE: f32 = 0.45;

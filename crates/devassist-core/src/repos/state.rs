@@ -119,6 +119,7 @@ pub struct ForksBlocked {
     /// Why, as a clause: "something is at E:\work\api-fork already".
     pub why: String,
 }
+
 /// One checkout the move question asks about. A line that is `there` or
 /// `taken` does not move: the dialog shows it as staying where it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2692,6 +2693,7 @@ impl Repos {
             })
             .collect()
     }
+
     /// Every path the list knows as a checkout: none of them is ever taken
     /// for the forks collection of another.
     fn listed_paths(&self) -> Vec<PathBuf> {
@@ -5108,6 +5110,7 @@ fn forks_blocked_why(
         }
     }
 }
+
 /// The line a move says before the checkout of `name` moves, when its
 /// forks folder will not be able to follow it, for the reason `why`.
 fn forks_cannot_follow(name: &str, why: &str) -> String {
