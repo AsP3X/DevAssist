@@ -467,6 +467,9 @@ pub struct ForksView {
     base: Option<String>,
     /// When the forks were last fetched, in seconds since 1970.
     fetched: Option<i64>,
+    /// The status stamp when the person last did something to the
+    /// overview (`Repos::fork_notice`).
+    seen: u64,
 }
 
 impl ForksView {
@@ -728,6 +731,9 @@ pub struct Repos {
     fork_watch: Option<ForkWatch>,
     pub status: String,
     pub status_error: bool,
+    /// How often the status has been said: one more each time `notice`
+    /// sets it, the same words again too (`status_stamp`).
+    status_stamp: u64,
     pub busy: bool,
     pub fetching: bool,
     pub tick: u64,
@@ -912,6 +918,7 @@ impl Repos {
             job_close_at: None,
             status: "Looking for repositories…".to_string(),
             status_error: false,
+            status_stamp: 0,
             busy: false,
             fetching: false,
             tick: 0,
@@ -1445,6 +1452,7 @@ impl Repos {
             changed_only: false,
             base: None,
             fetched: None,
+            seen: self.status_stamp,
         });
         self.load_forks();
     }
@@ -1470,6 +1478,7 @@ impl Repos {
         }
         view.filter = text.to_string();
         view.scroll = 0;
+        self.forks_looked_at();
     }
 
     /// Empties the fork overview's filter and ends its typing.
@@ -1488,6 +1497,7 @@ impl Repos {
         if view.sort != sort {
             view.sort = sort;
             view.scroll = 0;
+            self.forks_looked_at();
         }
     }
 
@@ -1500,12 +1510,22 @@ impl Repos {
         if view.changed_only != on {
             view.changed_only = on;
             view.scroll = 0;
+            self.forks_looked_at();
         }
     }
 
-    /// Reads the fork folder of the open overview again, in the background.
-    /// Held, it takes the forks `hold_forks` gave at once.
+    /// Reads the fork folder of the open overview again, in the background,
+    /// as the person asks: what the core said before is old news to the
+    /// overview then (`fork_notice`). Held, it takes the forks
+    /// `hold_forks` gave at once.
     pub fn load_forks(&mut self) {
+        self.forks_looked_at();
+        self.read_forks();
+    }
+
+    /// `load_forks`, which leaves what the core said news: for a read the
+    /// core makes itself, as after a run.
+    fn read_forks(&mut self) {
         let Some(view) = self.forks.as_mut() else {
             return;
         };
@@ -1548,6 +1568,7 @@ impl Repos {
             .collect();
         let delta = delta.clamp(-(names.len() as isize), names.len() as isize);
         list::move_by(&mut view.selected, &names, delta);
+        self.forks_looked_at();
     }
 
     /// Opens the folder with the files of the highlighted fork.
@@ -1638,6 +1659,7 @@ impl Repos {
         };
         view.selected = Some(owner.to_string());
         view.filtering = false;
+        self.forks_looked_at();
     }
 
     pub fn is_marked_local(&self, folder: &str) -> bool {
@@ -4374,6 +4396,35 @@ impl Repos {
     fn notice(&mut self, text: impl Into<String>, error: bool) {
         self.status = text.into();
         self.status_error = error;
+        self.status_stamp += 1;
+    }
+
+    /// How often the status has been said so far: it grows by one each
+    /// time the core says something, the same words again too.
+    pub fn status_stamp(&self) -> u64 {
+        self.status_stamp
+    }
+
+    /// What the core said since the person last did something to the
+    /// open fork overview (opened it, moved its highlight, changed its
+    /// filter, sort or segment, or read it again), and whether it is an
+    /// error; `None` when it said nothing since, or no overview is open.
+    /// For a window, whose status line shows the overview's own sentence
+    /// otherwise.
+    pub fn fork_notice(&self) -> Option<(&str, bool)> {
+        self.forks
+            .as_ref()
+            .filter(|view| self.status_stamp > view.seen)
+            .map(|_| (self.status.as_str(), self.status_error))
+    }
+
+    /// Notes that the person did something to the open fork overview:
+    /// what the core said before is old news to it (`fork_notice`).
+    fn forks_looked_at(&mut self) {
+        let stamp = self.status_stamp;
+        if let Some(view) = self.forks.as_mut() {
+            view.seen = stamp;
+        }
     }
 
     fn ready_message(&self) -> String {
@@ -4812,8 +4863,9 @@ impl Repos {
                 self.load_rows();
                 self.prune_marks();
                 self.spawn_status(self.generation, false);
-                // A run may have fetched the forks that are on screen.
-                self.load_forks();
+                // A run may have fetched the forks that are on screen; what
+                // it said stays news to them.
+                self.read_forks();
             }
         }
     }
@@ -5320,6 +5372,41 @@ pub mod testing {
     pub fn fork_job(repos: &mut Repos, repo: &str, lines: &[(&str, bool)]) {
         repos.hold_work();
         repos.hold_fork_job(repo, lines);
+    }
+
+    /// Opens the fork overview of `repo` (by row name) on `list`, as a
+    /// read of its collection would have found it, without reading
+    /// anything: for the window's tests of what a core that is not held
+    /// answers (a fork without a folder that is asked to open it). Work
+    /// is not held by it: what the overview is asked after runs for real.
+    pub fn open_forks_of(repos: &mut Repos, repo: &str, list: gitops::ForkList) {
+        let path = repos
+            .installed
+            .iter()
+            .find(|installed| installed.folder == repo)
+            .map(|installed| installed.path.clone())
+            .unwrap_or_default();
+        let mut view = ForksView {
+            repo: repo.to_string(),
+            path,
+            original: String::new(),
+            dest: PathBuf::new(),
+            forks: Vec::new(),
+            loading: false,
+            error: None,
+            selected: None,
+            scroll: 0,
+            sort: ForkSort::Changed,
+            filter: String::new(),
+            filtering: false,
+            changed_only: false,
+            base: None,
+            fetched: None,
+            seen: repos.status_stamp,
+        };
+        view.take(list);
+        repos.forks = Some(view);
+        repos.mode = Mode::List;
     }
 
     /// Makes `source` where `repos` gets a token for GitHub from, in place
@@ -7652,6 +7739,7 @@ mod tests {
             changed_only: false,
             base: None,
             fetched: None,
+            seen: 0,
         }
     }
 
@@ -7771,6 +7859,108 @@ mod tests {
         assert_eq!(open(&app).sort, ForkSort::Changed);
         app.toggle_fork_changed_only();
         assert!(!open(&app).changed_only);
+    }
+
+    #[test]
+    fn the_forks_overview_hears_what_the_core_said_since_the_person_last_looked() {
+        let mut app = grouped_app();
+        app.notice("Said before the forks opened.", false);
+        assert_eq!(app.fork_notice(), None, "no overview, nothing to hear");
+        let mut view = fork_view(vec![
+            a_fork("bob", 1, 0, true, false),
+            a_fork("cy", 1, 0, false, false),
+            a_fork("dee", 1, 0, false, true),
+        ]);
+        view.seen = app.status_stamp();
+        app.forks = Some(view);
+        assert_eq!(app.fork_notice(), None, "what was said before is old");
+
+        // A refusal is heard, in the danger colour, until the highlight moves.
+        app.pick_fork("cy");
+        app.open_fork_folder();
+        assert_eq!(
+            app.fork_notice(),
+            Some((
+                "cy has no commits of its own, so it has no folder. g opens it on GitHub.",
+                true
+            ))
+        );
+        app.move_fork(1);
+        assert_eq!(app.fork_notice(), None, "the highlight moved");
+        app.open_fork_on_github();
+        assert_eq!(
+            app.fork_notice(),
+            Some(("dee/api is no longer on GitHub.", true))
+        );
+
+        // The filter, the sort and the segment each make it old; the same
+        // filter, sort or segment again changes nothing, and so does not.
+        app.set_fork_filter("e");
+        assert_eq!(app.fork_notice(), None, "the filter changed");
+        app.notice("Plain news.", false);
+        assert_eq!(app.fork_notice(), Some(("Plain news.", false)));
+        app.set_fork_filter("e");
+        assert_eq!(app.fork_notice(), Some(("Plain news.", false)));
+        app.set_fork_sort(ForkSort::Name);
+        assert_eq!(app.fork_notice(), None, "the sort changed");
+        app.notice("Plain news.", false);
+        app.set_fork_sort(ForkSort::Name);
+        assert_eq!(
+            app.fork_notice(),
+            Some(("Plain news.", false)),
+            "the same words said again are news again"
+        );
+        app.cycle_fork_sort();
+        assert_eq!(app.fork_notice(), None);
+        app.notice("Plain news.", false);
+        app.set_fork_changed_only(false);
+        assert!(app.fork_notice().is_some());
+        app.set_fork_changed_only(true);
+        assert_eq!(app.fork_notice(), None, "the segment changed");
+        app.notice("Plain news.", false);
+        app.toggle_fork_changed_only();
+        assert_eq!(app.fork_notice(), None);
+        app.notice("Plain news.", false);
+        app.close_forks();
+        assert_eq!(app.fork_notice(), None, "no overview, nothing to hear");
+        let before = app.status_stamp();
+        app.notice("Plain news.", false);
+        assert_eq!(app.status_stamp(), before + 1, "every saying counts");
+    }
+
+    #[test]
+    fn a_read_the_person_asks_for_makes_old_news_and_a_fetchs_end_is_heard() {
+        let (mut app, root) = held_app("forks-heard");
+        let _temp = Temp(root.clone());
+        app.hold_forks(
+            "tool",
+            gitops::ForkList {
+                original: "acme/tool".into(),
+                forks: vec![a_fork("bob", 3, 1, true, false)],
+                ..gitops::ForkList::default()
+            },
+        );
+        app.notice("Said before the forks opened.", false);
+        app.open_forks_plain();
+        assert!(app.forks.is_some());
+        assert_eq!(app.fork_notice(), None, "opening the forks makes old news");
+        // Held, what would run or open says the demo's words, and they are
+        // heard.
+        app.update_shown_forks();
+        assert_eq!(app.fork_notice(), Some((HELD, false)));
+        app.load_forks();
+        assert_eq!(app.fork_notice(), None, "the person read again");
+        app.open_fork_folder();
+        assert_eq!(app.fork_notice(), Some((HELD, false)));
+        // The end of a run is heard, though the run reads the forks again.
+        app.on_msg(Msg::JobFinished(Ok("Fetched the forks.".into())));
+        assert_eq!(app.fork_notice(), Some(("Fetched the forks.", false)));
+        // A read that finishes from the worker makes no old news by itself.
+        app.on_msg(Msg::Forks {
+            generation: app.forks_generation,
+            result: Err("the folder could not be read".into()),
+        });
+        assert_eq!(app.fork_notice(), Some(("Fetched the forks.", false)));
     }
 
     #[test]
