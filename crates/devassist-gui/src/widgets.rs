@@ -110,6 +110,14 @@ pub fn path_to_fit(path: &str, font: &FontId, room: f32, ui: &Ui) -> String {
     if low == 0 { String::new() } else { shorten_path(path, low) }
 }
 
+/// `words` with their first letter in upper case, as the window writes the core's words that start a line or a
+/// cell ("changes, folder" to "Changes, folder").
+#[must_use]
+pub fn capitalised(words: &str) -> String {
+    let mut chars = words.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
 /// How wide `text` is in `font`, in points.
 #[must_use]
 pub fn width(painter: &Painter, text: &str, font: &FontId) -> f32 {

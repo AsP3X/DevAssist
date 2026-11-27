@@ -190,7 +190,7 @@ pub fn height(line: &Line) -> f32 {
 }
 
 /// The head row of the table at `rect`.
-fn head_rect(rect: Rect) -> Rect {
+pub(crate) fn head_rect(rect: Rect) -> Rect {
     Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + HEAD_HEIGHT.min(rect.height())))
 }
 
@@ -203,7 +203,7 @@ pub fn body_rect(rect: Rect) -> Rect {
 
 /// The lines in view in the room `body`, each with its index and the whole row it fills (which may reach past
 /// `body` at the top or the bottom).
-fn placed(body: Rect, heights: &[f32], scroll: f32) -> Vec<(usize, Rect)> {
+pub(crate) fn placed(body: Rect, heights: &[f32], scroll: f32) -> Vec<(usize, Rect)> {
     let (first, count, top) = in_view(heights, scroll, body.height());
     let mut y = body.top() + top;
     (first..first + count)
@@ -221,7 +221,7 @@ fn tick_rect(row: Rect, columns: &Columns) -> Rect {
 }
 
 /// `scroll` held between the top and the furthest the lines of `content` points can be moved up in `room`.
-fn held(scroll: f32, content: f32, room: f32) -> f32 {
+pub(crate) fn held(scroll: f32, content: f32, room: f32) -> f32 {
     let furthest = (content - room).max(0.0);
     if scroll.is_nan() { 0.0 } else { scroll.clamp(0.0, furthest) }
 }
@@ -258,12 +258,12 @@ fn bar_pieces(left: f32, width: f32, over: bool, outer_left: bool) -> Vec<(f32, 
 }
 
 /// The text colour at `opacity`.
-fn soft(palette: Palette, opacity: f32) -> Color32 {
+pub(crate) fn soft(palette: Palette, opacity: f32) -> Color32 {
     palette.on_glass.gamma_multiply(opacity)
 }
 
 /// The cell of `span` in the row at `row`.
-fn cell(row: Rect, span: Span) -> Rect {
+pub(crate) fn cell(row: Rect, span: Span) -> Rect {
     Rect::from_min_max(pos2(row.left() + span.left, row.top()), pos2(row.left() + span.right(), row.bottom()))
 }
 
@@ -290,22 +290,22 @@ fn takes_hover(line: &Line) -> bool {
 }
 
 /// Where a line's fill goes.
-struct Fill {
+pub(crate) struct Fill {
     /// The whole row.
-    row: Rect,
+    pub(crate) row: Rect,
     /// The part of it shown.
-    shown: Rect,
+    pub(crate) shown: Rect,
     /// The panel, whose round corners the fill keeps inside.
-    panel: Rect,
+    pub(crate) panel: Rect,
     /// A line is drawn along the row's bottom.
-    under_line: bool,
+    pub(crate) under_line: bool,
     /// The pointer is over it.
-    hovered: bool,
+    pub(crate) hovered: bool,
 }
 
 /// Paints a line's fills, one over the other, the hover's over them, and the line under it; each cut to the
 /// panel's round corners.
-fn draw_fill(painter: &Painter, fill: &Fill, fills: &[Color32], palette: Palette) {
+pub(crate) fn draw_fill(painter: &Painter, fill: &Fill, fills: &[Color32], palette: Palette) {
     let hover = if fill.hovered { soft(palette, HOVER_OPACITY) } else { Color32::TRANSPARENT };
     for &colour in fills.iter().chain([&hover]) {
         fill_inside(painter, fill.shown, fill.panel, colour);
@@ -317,7 +317,7 @@ fn draw_fill(painter: &Painter, fill: &Fill, fills: &[Color32], palette: Palette
 }
 
 /// Paints the line along the bottom of `row`.
-fn draw_line_under(painter: &Painter, row: Rect, palette: Palette) {
+pub(crate) fn draw_line_under(painter: &Painter, row: Rect, palette: Palette) {
     painter.rect_filled(Rect::from_min_max(pos2(row.left(), row.bottom() - HAIRLINE), row.max), 0.0, soft(palette, LINE_OPACITY));
 }
 
@@ -385,12 +385,17 @@ fn panel_outline(panel: Rect) -> Vec<Pos2> {
         .collect()
 }
 
-/// Paints the head row's fill, its line and its words (its checkbox is drawn by the caller).
-fn draw_head(ui: &Ui, head: Rect, columns: &Columns, palette: Palette) {
-    let painter = ui.painter();
+/// Paints a head row's fill at `head`, its top corners the panel's, and the line under it.
+pub(crate) fn draw_head_fill(painter: &Painter, head: Rect, palette: Palette) {
     let corners = CornerRadiusF32 { nw: RADIUS_PANEL, ne: RADIUS_PANEL, sw: 0.0, se: 0.0 };
     painter.rect_filled(head, corners, soft(palette, HEAD_FILL_OPACITY));
     draw_line_under(painter, head, palette);
+}
+
+/// Paints the head row's fill, its line and its words (its checkbox is drawn by the caller).
+fn draw_head(ui: &Ui, head: Rect, columns: &Columns, palette: Palette) {
+    let painter = ui.painter();
+    draw_head_fill(painter, head, palette);
     let medium = font(TEXT, assets::medium_family());
     let y = head.center().y;
     let word = |span: Span, text: &str| {
@@ -428,7 +433,7 @@ fn draw_group(ui: &Ui, row: Rect, columns: &Columns, group: &GroupLine, palette:
 }
 
 /// Paints `text` at the left of `x`, centred on `y`, unless it is empty; gives back where its right end is.
-fn draw_text(painter: &Painter, x: f32, y: f32, text: String, medium: bool, colour: Color32) -> f32 {
+pub(crate) fn draw_text(painter: &Painter, x: f32, y: f32, text: String, medium: bool, colour: Color32) -> f32 {
     if text.is_empty() {
         return x;
     }
@@ -586,19 +591,48 @@ fn draw_origin(ui: &Ui, cell: Rect, origin: &Origin, palette: Palette) {
 /// the warning colour) and ahead.
 fn draw_rule(painter: &Painter, left: f32, y: f32, behind: u32, ahead: u32, palette: Palette) {
     let top = y - RULE_HEIGHT / 2.0;
+    draw_scale(painter, left, top, &columns::ticks(), palette);
+    let rule = columns::rule(behind, ahead);
+    draw_mark(painter, left + rule.zero, top, palette);
+    let bars = [(rule.behind, rule.behind_over, true, palette.warning), (rule.ahead, rule.ahead_over, false, palette.on_glass)];
+    for (bar, over, outer_left, colour) in bars {
+        if let Some(bar) = bar {
+            draw_bar(painter, left, top, bar, over, outer_left, colour);
+        }
+    }
+}
+
+/// Paints the forks table's rule from `left`, centred on `y`: the ticks of its `room` commits, the origin mark at its
+/// left edge and the bar of `forward` to the right of it, broken past its room. The same pieces as the table's rule.
+pub(crate) fn draw_forward(painter: &Painter, left: f32, y: f32, forward: columns::Forward, room: u32, palette: Palette) {
+    let top = y - RULE_HEIGHT / 2.0;
+    draw_scale(painter, left, top, &columns::scale(room), palette);
+    draw_mark(painter, left, top, palette);
+    if let Some(bar) = forward.bar {
+        draw_bar(painter, left, top, bar, forward.over, false, palette.on_glass);
+    }
+}
+
+/// Paints the ticks of a rule whose left edge is `left` and top `top`: each at its place of `ticks`, the fifths
+/// taller and stronger.
+fn draw_scale(painter: &Painter, left: f32, top: f32, ticks: &[(f32, bool)], palette: Palette) {
     let bottom = top + RULE_HEIGHT;
-    for (x, fifth) in columns::ticks() {
+    for &(x, fifth) in ticks {
         let (tall, opacity) = if fifth { (RULE_TICK_FIFTH, RULE_FIFTH_OPACITY) } else { (RULE_TICK, RULE_TICK_OPACITY) };
         painter.rect_filled(Rect::from_min_max(pos2(left + x, bottom - tall), pos2(left + x + HAIRLINE, bottom)), 0.0, soft(palette, opacity));
     }
-    let rule = columns::rule(behind, ahead);
-    painter.rect_filled(Rect::from_min_max(pos2(left + rule.zero, top), pos2(left + rule.zero + RULE_ZERO_WIDTH, bottom)), 0.0, palette.on_glass);
-    let bars = [(rule.behind, rule.behind_over, true, palette.warning), (rule.ahead, rule.ahead_over, false, palette.on_glass)];
-    for (bar, over, outer_left, colour) in bars {
-        let Some((start, width)) = bar else { continue };
-        for (piece, length) in bar_pieces(left + start, width, over, outer_left) {
-            painter.rect_filled(Rect::from_min_size(pos2(piece, top + RULE_BAR_TOP), vec2(length, RULE_BAR)), 0.0, colour);
-        }
+}
+
+/// Paints a rule's mark (its zero line, or the forks rule's origin) at `x`, the rule's height from `top`.
+fn draw_mark(painter: &Painter, x: f32, top: f32, palette: Palette) {
+    painter.rect_filled(Rect::from_min_max(pos2(x, top), pos2(x + RULE_ZERO_WIDTH, top + RULE_HEIGHT)), 0.0, palette.on_glass);
+}
+
+/// Paints a rule's bar, `(start, width)` from the rule's left edge `left`, under its top `top`, in `colour`: broken
+/// near its outer end (its left one when `outer_left`) when it is `over` the rule's room ([`bar_pieces`]).
+fn draw_bar(painter: &Painter, left: f32, top: f32, (start, width): (f32, f32), over: bool, outer_left: bool, colour: Color32) {
+    for (piece, length) in bar_pieces(left + start, width, over, outer_left) {
+        painter.rect_filled(Rect::from_min_size(pos2(piece, top + RULE_BAR_TOP), vec2(length, RULE_BAR)), 0.0, colour);
     }
 }
 

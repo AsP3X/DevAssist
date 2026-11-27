@@ -144,6 +144,26 @@ pub const RULE_LABEL_GAP: f32 = 12.0;
 pub const RULE_TICK_OPACITY: f32 = 0.28;
 /// How strong the rule's taller ticks are, of the text colour.
 pub const RULE_FIFTH_OPACITY: f32 = 0.5;
+/// The width of the forks table's column with a fork's branches.
+pub const FORK_COLUMN_BRANCHES: f32 = 80.0;
+/// The width of the forks table's column with a fork's pull requests.
+pub const FORK_COLUMN_PULLS: f32 = 104.0;
+/// The width of the forks table's column with how far a fork is ahead: its rule, [`RULE_LABEL_GAP`] and its words.
+pub const FORK_COLUMN_AHEAD: f32 = 264.0;
+/// The width of the forks table's column with the date of a fork's newest commit.
+pub const FORK_COLUMN_NEWEST: f32 = 112.0;
+/// The width of the forks table's column with a fork's state.
+pub const FORK_COLUMN_STATE: f32 = 168.0;
+/// The width of the forks table's column with a row's two buttons.
+pub const FORK_COLUMN_ACTIONS: f32 = 72.0;
+/// The least width the forks table's fork column keeps before columns give way; it takes what the others leave.
+pub const FORK_NAME_LEAST: f32 = 160.0;
+/// How many commits the forks table's ahead rule has room for, from its left edge; more are drawn broken.
+pub const FORK_RULE_COMMITS: u32 = 20;
+/// The fewest commits the ahead rule keeps room for when a narrow table shrinks it.
+pub const FORK_RULE_LEAST: u32 = 10;
+/// The least room the folder in the status bar keeps, cut from its left, before it gives way.
+pub const STATUS_PATH_LEAST: f32 = 120.0;
 /// The room between a view capsule's edge and the controls in it.
 pub const CAPSULE_PAD: f32 = 4.0;
 /// The gap between two controls in a capsule.

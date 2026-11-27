@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use devassist_core::config::Settings;
+use devassist_core::repos::forks::ForkState;
 use devassist_core::repos::github::{PullCounts, RemoteRepo};
-use devassist_core::repos::gitops::{LocalRepo, PendingPulls};
+use devassist_core::repos::gitops::{self, ForkInfo, ForkList, LocalRepo, PendingPulls};
 use devassist_core::repos::state::{Action, MenuItem, MigrateItem, Repos};
 use devassist_core::task::job::{Job, JobEvent};
 
@@ -154,12 +155,80 @@ pub fn repos() -> Repos {
     }
     repos.pulls = pulls;
     STATUS.clone_into(&mut repos.status);
+    repos.hold_forks(FORKS_OF, forks());
     repos
+}
+
+/// The repository whose forks the demo holds: the drawing's api.
+const FORKS_OF: &str = "api";
+/// The fork the drawing highlights.
+const FORK_HIGHLIGHTED: &str = "bob";
+/// The branch the forks are compared with, on the demo's account.
+const FORKS_BASE: &str = "main";
+/// One of the drawing's forks: owner, name, branches, pull requests, commits ahead, the day of the newest commit
+/// (year, month, day) and its state.
+type DemoFork = (&'static str, &'static str, u32, u32, u32, (i64, i64, i64), ForkState);
+/// The drawing's forks of api: owner, name, branches, pull requests, commits ahead, the day of the newest commit
+/// (year, month, day) and its state. `Changes` forks have a folder; the gone one is no longer on GitHub.
+const FORKS: [DemoFork; 13] = [
+    ("mkoenig", "api", 4, 2, 47, (2026, 11, 23), ForkState::Changes),
+    ("tessera-labs", "api", 6, 5, 18, (2026, 11, 25), ForkState::Changes),
+    ("bob", "api", 2, 1, 9, (2026, 11, 19), ForkState::Changes),
+    ("lin-wei", "api-next", 3, 0, 6, (2026, 11, 2), ForkState::Changes),
+    ("sgarcia", "api", 2, 1, 3, (2026, 10, 14), ForkState::Changes),
+    ("northwind-it", "api", 1, 0, 1, (2026, 9, 30), ForkState::Changes),
+    ("a-petrov", "api", 1, 0, 0, (2026, 11, 8), ForkState::Unchanged),
+    ("devkit-bot", "api", 2, 0, 0, (2026, 11, 8), ForkState::Unchanged),
+    ("hanna-l", "api", 1, 0, 0, (2026, 10, 21), ForkState::Unchanged),
+    ("jmeier", "api", 1, 0, 0, (2026, 9, 3), ForkState::Unchanged),
+    ("old-contrib", "api", 2, 0, 0, (2025, 3, 11), ForkState::Gone),
+    ("quiet-otter", "api", 1, 0, 0, (2026, 7, 17), ForkState::Unchanged),
+    ("zed-0", "api", 1, 0, 0, (2026, 6, 2), ForkState::Unchanged),
+];
+/// The day the demo's forks were fetched.
+const FORKS_FETCHED: (i64, i64, i64) = (2026, 11, 25);
+
+/// Noon in UTC of the day `(year, month, day)`, in seconds since 1970 (the days from the civil calendar, as the
+/// core's `day` reads them back).
+const fn noon((year, month, day): (i64, i64, i64)) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let of_era = year - era * 400;
+    let shifted = if month > 2 { month - 3 } else { month + 9 };
+    let of_year = (153 * shifted + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    (era * 146_097 + of_cycle - 719_468) * 86_400 + 43_200
+}
+
+/// The forks the demo's core holds for api, as a collection beside its checkout would give them. Reads nothing: the
+/// folder is the core's name for it beside the demo's made-up checkout.
+fn forks() -> ForkList {
+    let checkout = ENTRIES.iter().find(|entry| entry.name == FORKS_OF).map_or_else(PathBuf::new, |entry| PathBuf::from(entry.path));
+    let forks = FORKS
+        .iter()
+        .map(|&(owner, name, branches, pulls, ahead, date, state)| ForkInfo {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+            branches,
+            pulls,
+            ahead: (state != ForkState::Gone).then_some(ahead),
+            date: noon(date),
+            folder: state == ForkState::Changes,
+            gone: state == ForkState::Gone,
+        })
+        .collect();
+    ForkList {
+        original: format!("{OWNER}/{FORKS_OF}"),
+        dest: gitops::forks_folder(&checkout).unwrap_or_default(),
+        forks,
+        base: Some(format!("{OWNER}/{FORKS_BASE}")),
+        fetched: Some(noon(FORKS_FETCHED)),
+    }
 }
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 10] = [
+pub const SHOWS: [(&str, Opener); 11] = [
     ("progress", show_progress),
     ("remove", show_remove),
     ("group", show_group),
@@ -170,7 +239,20 @@ pub const SHOWS: [(&str, Opener); 10] = [
     ("import", show_import),
     ("move", show_move),
     ("push", show_push),
+    (FORKS_SCREEN, show_forks),
 ];
+
+/// The name `--show` opens the forks of api by: a screen of the Repositories page, not an overlay.
+pub const FORKS_SCREEN: &str = "forks";
+
+/// The forks of api as the drawing has them, opened through the core (`open_forks_plain`) from api highlighted
+/// alone (the ticks are cleared: the core shows the forks of one repository), bob highlighted.
+fn show_forks(repos: &mut Repos) {
+    repos.clear_marks();
+    repos.pick(FORKS_OF);
+    repos.open_forks_plain();
+    repos.pick_fork(FORK_HIGHLIGHTED);
+}
 
 /// The name `--show` opens the Add dialog by with the keyboard in its folder field, so a picture shows the folders
 /// it suggests (the window gives the field the focus once the dialog is open).
@@ -389,8 +471,36 @@ mod tests {
         assert!(repos.mode == Mode::Progress && !repos.waiting());
         assert_eq!(
             show(&mut repos, "nothing").unwrap_err(),
-            "--show knows progress, remove, group, menu, migrate, add, add-folder, import, move, push, not nothing"
+            "--show knows progress, remove, group, menu, migrate, add, add-folder, import, move, push, forks, not nothing"
         );
+    }
+
+    #[test]
+    fn the_demos_forks_are_the_drawings_and_read_no_disk() {
+        let _live = crate::session::tests::live_git();
+        let before = reached_now();
+        let mut repos = repos();
+        show(&mut repos, FORKS_SCREEN).unwrap();
+        assert!(repos.mode == Mode::List && !repos.status_error, "{}", repos.status);
+        let view = repos.forks.as_ref().expect("the forks of api are open");
+        assert_eq!((view.repo.as_str(), view.original.as_str(), view.base()), ("api", "acme/api", Some("acme/main")));
+        assert_eq!(view.dest, gitops::forks_folder(std::path::Path::new(r"D:\code\work\api")).unwrap());
+        assert_eq!(view.chosen().map(|fork| fork.owner.as_str()), Some("bob"));
+        let days: Vec<String> =
+            view.forks.iter().map(|fork| devassist_core::repos::forks::day(fork.date, devassist_core::repos::forks::DayForm::Words)).collect();
+        assert_eq!(days[..4], ["23 Nov 2026", "25 Nov 2026", "19 Nov 2026", "2 Nov 2026"]);
+        assert_eq!(days[10], "11 Mar 2025");
+        assert_eq!(
+            view.fetched().map(|at| devassist_core::repos::forks::day(at, devassist_core::repos::forks::DayForm::Words)).as_deref(),
+            Some("25 Nov 2026")
+        );
+        let states: Vec<ForkState> = view.forks.iter().map(ForkState::of).collect();
+        assert_eq!(states.iter().filter(|state| **state == ForkState::Changes).count(), 6);
+        assert_eq!(states.iter().filter(|state| **state == ForkState::Gone).count(), 1);
+        // Back to the table: the demo's repositories are as they were, but for the ticks the forks cleared.
+        repos.close_forks();
+        assert_eq!(repos.installed.len(), 12);
+        assert_eq!(reached_now(), before, "the forks reached a program, the clipboard, the network or the disk");
     }
 
     #[test]
@@ -691,8 +801,12 @@ mod tests {
     /// The overlays the walk opens, by name, each with what opens it on a fresh demo and what is done once it is open:
     /// every overlay `--show` opens, and the Add dialog with GitHub failed (Retry) and searched (a hidden tick).
     fn walked_overlays() -> Vec<(&'static str, Opener, Prepare)> {
-        let mut overlays: Vec<(&'static str, Opener, Prepare)> =
-            SHOWS.iter().map(|&(name, open)| (name, open, if name == ADD_FOLDER { into_the_folder_field as Prepare } else { as_opened })).collect();
+        // The forks are a screen, not an overlay: they are not walked as one.
+        let mut overlays: Vec<(&'static str, Opener, Prepare)> = SHOWS
+            .iter()
+            .filter(|(name, _)| *name != FORKS_SCREEN)
+            .map(|&(name, open)| (name, open, if name == ADD_FOLDER { into_the_folder_field as Prepare } else { as_opened }))
+            .collect();
         overlays.push(("add failed", show_add_failed, as_opened));
         overlays.push(("add searched", show_add_searched, as_opened));
         overlays

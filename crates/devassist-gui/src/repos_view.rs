@@ -143,7 +143,7 @@ pub enum Tone {
 }
 
 /// What the status line says.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     /// The core's last message.
     pub text: String,
@@ -151,6 +151,12 @@ pub struct Status {
     pub error: bool,
     /// What is switched on, each with its icon.
     pub notes: Vec<(Icon, String)>,
+    /// The message is kept whole and the notes give way, the last first; otherwise the notes are kept and the
+    /// message is cut.
+    pub keep_text: bool,
+    /// The place among `notes` of the one that is a folder's path: cut from its left so its last folder shows, all
+    /// of it on hover.
+    pub path: Option<usize>,
 }
 
 /// The table's lines, in the core's order: with groups, each header and the repositories under it that are not
@@ -185,7 +191,7 @@ pub fn status(repos: &Repos) -> Status {
     if repos.pull_requests {
         notes.push((Icon::GitPullRequest, "Pull request backup is on".to_owned()));
     }
-    Status { text: repos.status.clone(), error: repos.status_error, notes }
+    Status { text: repos.status.clone(), error: repos.status_error, notes, ..Status::default() }
 }
 
 /// How many repositories a group holds, and how many of them wait for an update.

@@ -1143,7 +1143,7 @@ mod tests {
                     open(ui.ctx(), Some(ids[2]));
                 }
                 let status = repos_screen::status(&session);
-                let shown = Shown { mode, waiting: 0, status: status.as_ref() };
+                let shown = Shown { mode, waiting: 0, status: status.as_ref(), back: None };
                 shell::draw(ui, &layout, &mut true, &mut Page::Repositories, shown);
                 repos_screen::show(ui, &layout, Some(&plan), &mut session, Some(&sheet), mode, &mut screen, !dialog);
                 if !dialog {

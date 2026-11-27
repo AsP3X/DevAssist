@@ -7,6 +7,7 @@ pub mod baker;
 pub mod columns;
 pub mod demo;
 pub mod dialogs;
+pub mod forks_screen;
 pub mod frost;
 pub mod launch;
 pub mod logger;

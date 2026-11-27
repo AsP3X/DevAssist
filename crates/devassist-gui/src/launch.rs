@@ -28,7 +28,7 @@ pub struct Launch {
     pub sidebar_hidden: bool,
     /// The window shows the drawing's twelve repositories instead of the real ones, reading no disk and no network.
     pub demo: bool,
-    /// The overlay the demo opens before anything is drawn (one of `demo::SHOWS`): for pictures of a dialog.
+    /// The overlay or screen the demo opens before anything is drawn (one of `demo::SHOWS`): for pictures of a dialog.
     pub show: Option<String>,
 }
 
@@ -49,7 +49,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Launch, String> {
             "--no-blur" => launch.no_blur = true,
             "--no-sidebar" => launch.sidebar_hidden = true,
             "--demo" => launch.demo = true,
-            "--show" => launch.show = Some(args.next().ok_or("--show needs the name of a dialog or menu")?),
+            "--show" => launch.show = Some(args.next().ok_or("--show needs the name of a dialog, menu or screen")?),
             flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
             other => return Err(format!("unexpected argument {other}")),
         }
@@ -111,11 +111,12 @@ mod tests {
         assert_eq!(args(&["--show", "progress", "--demo"]).unwrap().show.as_deref(), Some("progress"));
         assert_eq!(args(&["--show", "progress"]).unwrap_err(), "--show is for the demo: add --demo");
         assert_eq!(args(&["--demo", "--show", "menu"]).unwrap().show.as_deref(), Some("menu"));
+        assert_eq!(args(&["--demo", "--show", "forks"]).unwrap().show.as_deref(), Some("forks"));
         assert_eq!(
-            args(&["--demo", "--show", "forks"]).unwrap_err(),
-            "--show knows progress, remove, group, menu, migrate, add, add-folder, import, move, push, not forks"
+            args(&["--demo", "--show", "drawer"]).unwrap_err(),
+            "--show knows progress, remove, group, menu, migrate, add, add-folder, import, move, push, forks, not drawer"
         );
-        assert_eq!(args(&["--demo", "--show"]).unwrap_err(), "--show needs the name of a dialog or menu");
+        assert_eq!(args(&["--demo", "--show"]).unwrap_err(), "--show needs the name of a dialog, menu or screen");
         assert_eq!(args(&["--demo"]).unwrap().show, None);
     }
 

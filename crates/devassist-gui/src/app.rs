@@ -10,6 +10,7 @@ use crate::assets;
 use crate::baker::{Baker, Scene};
 use crate::demo;
 use crate::dialogs::{self, Dialogs};
+use crate::forks_screen;
 use crate::launch::{self, Launch};
 use crate::overlay;
 use crate::repos_screen::{self, Screen};
@@ -58,7 +59,7 @@ pub fn window_warning(settings: &Result<Settings, String>) -> Option<String> {
 /// [`NOTICE_TIME`] has passed since the window opened (`elapsed`), as an error.
 #[must_use]
 pub fn notice_status(notice: Option<&str>, elapsed: std::time::Duration) -> Option<Status> {
-    notice.filter(|_| elapsed < NOTICE_TIME).map(|text| Status { text: text.to_owned(), error: true, notes: Vec::new() })
+    notice.filter(|_| elapsed < NOTICE_TIME).map(|text| Status { text: text.to_owned(), error: true, ..Status::default() })
 }
 
 /// Opens the window for `launch`, in the look of `settings` (from [`load_settings`]), and runs it until it is
@@ -106,6 +107,8 @@ pub struct App {
     page: Page,
     /// What the Repositories screen keeps between frames.
     screen: Screen,
+    /// What the forks screen keeps between frames.
+    forks: forks_screen::Screen,
     /// What the dialogs keep between frames.
     dialogs: Dialogs,
     /// The settings warning, said in the status bar for the first [`NOTICE_TIME`]: a window started without a
@@ -136,6 +139,7 @@ impl App {
             session: Session::start(settings, launch),
             page: Page::default(),
             screen: Screen::default(),
+            forks: forks_screen::Screen::default(),
             dialogs: Dialogs::default(),
             notice,
             folder_focus: launch.demo && launch.show.as_deref() == Some(demo::ADD_FOLDER),
@@ -182,10 +186,16 @@ impl eframe::App for App {
         // A dialog is on the Repositories screen: one the core's workers opened brings its page back.
         self.page = dialogs::page_for(self.session.repos(), self.page);
         let on_repositories = self.page == Page::Repositories;
+        // The forks of a repository take the table's place while the core has them open.
+        let forks = on_repositories && self.session.repos().is_some_and(forks_screen::shown);
         let layout = shell::layout(size, self.sidebar_shown, on_repositories && repos_screen::has_toolbar(&self.session));
         let painter = ctx.layer_painter(LayerId::background());
         // The screen's glass is placed before the bake, so it is baked where the screen draws over it.
         let plan = if on_repositories { repos_screen::plan(&painter, &layout, &self.session) } else { None };
+        let forks_view = self.session.repos().and_then(|repos| repos.forks.as_ref()).filter(|_| forks);
+        let forks_plan = forks_view.map(|view| forks_screen::plan(view, layout.panel));
+        let forks_title = self.session.repos().and_then(forks_screen::title).filter(|_| forks);
+        let forks_status = forks_view.map(forks_screen::status);
         // The dialog or the menu the core's mode asks for, on any screen: opened now when the core's workers asked for
         // it. The menu stands under the row's button the screen placed in the last frame.
         let dialog = dialogs::before(&ctx, self.session.repos(), repos_screen::menu_anchor(&self.screen), &mut self.dialogs);
@@ -213,12 +223,23 @@ impl eframe::App for App {
         // The frosted panel is no picture: the screen paints it from the sheet, which costs nothing to move.
         let sheet = self.baker.sheet(Surface::Panel);
         let notice = notice_status(self.notice.as_deref(), self.start.elapsed());
-        let status = notice.or_else(|| repos_screen::status(&self.session));
+        let status = notice.or(forks_status).or_else(|| repos_screen::status(&self.session));
         let waiting = self.session.repos().map_or(0, |repos| repos.queue.len());
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| {
-            let shown = Shown { mode, waiting, status: status.as_ref() };
-            shell::draw(ui, &layout, &mut self.sidebar_shown, &mut self.page, shown);
-            if on_repositories {
+            let shown = Shown { mode, waiting, status: status.as_ref(), back: forks_title.as_deref() };
+            let back = shell::draw(ui, &layout, &mut self.sidebar_shown, &mut self.page, shown);
+            if let Some(forks_plan) = &forks_plan {
+                // Under an open overlay the screen takes no press.
+                let presses = !overlay::is_open(&ctx);
+                let asked = forks_screen::show(ui, &layout, forks_plan, sheet.as_ref(), mode, &mut self.forks, presses);
+                if let Some(repos) = self.session.repos_mut() {
+                    if back {
+                        repos.close_forks();
+                    } else if let Some(command) = asked {
+                        forks_screen::apply(command, repos);
+                    }
+                }
+            } else if on_repositories {
                 // Under an open overlay the screen has no keyboard and takes no press.
                 let keys = !overlay::is_open(&ctx);
                 repos_screen::show(ui, &layout, plan.as_ref(), &mut self.session, sheet.as_ref(), mode, &mut self.screen, keys);

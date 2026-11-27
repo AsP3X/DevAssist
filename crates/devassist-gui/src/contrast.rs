@@ -44,7 +44,7 @@ use crate::theme::{
     MIN_WINDOW, Mode, PANEL_TEXT_INSET, PROGRESS_HEIGHT, PROGRESS_TRACK_OPACITY, PUSH_SCROLL_CUE, Palette, RADIUS_PANEL, ROW_PAD_RIGHT, ROW_PADDING,
     RULE_LABEL_GAP, RULE_WIDTH, SIDEBAR_PADDING, SIDEBAR_TOP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, WINDOW,
 };
-use crate::{demo, frost, overlay, shell, table, widgets};
+use crate::{demo, forks_screen, frost, overlay, shell, table, widgets};
 
 /// The least contrast of text at `TEXT` (WCAG's level AA for normal text).
 const LEAST_TEXT: f64 = 4.5;
@@ -606,6 +606,20 @@ enum Over {
     /// A dialog of the core's with a folder field, on its scrim, the field with the keyboard and its rows of folders
     /// shown (the Add dialog's folder field is given the keyboard as `--show add-folder` gives it).
     Rows(RowsShot),
+    /// Nothing, the forks of a repository in the table's place: every text and graphic of that screen is measured,
+    /// with the pointer where this says.
+    Forks(Pointing),
+}
+
+/// Where the pointer rests in a shot of the forks screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pointing {
+    /// Nowhere on the window.
+    Nowhere,
+    /// On the row of the fork of this owner, which is drawn on the hover's fill.
+    Row(&'static str),
+    /// On the round button back to the repositories.
+    Back,
 }
 
 /// What the rows of a dialog's folder field show in a shot over [`Over::Rows`].
@@ -637,7 +651,7 @@ impl Over {
 
     /// Nothing is over the screen.
     fn is_screen(self) -> bool {
-        matches!(self, Over::Nothing | Over::MainHovered | Over::TopRow)
+        matches!(self, Over::Nothing | Over::MainHovered | Over::TopRow | Over::Forks(_))
     }
 }
 
@@ -682,7 +696,7 @@ struct Shot {
 /// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was); the
 /// Add and the Import dialog with their folder field's rows shown on their own glass, the first row lit and under
 /// the pointer.
-const SHOTS: [Shot; 37] = [
+const SHOTS: [Shot; 45] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -880,7 +894,65 @@ const SHOTS: [Shot; 37] = [
     // The Import dialog's field (it has the keyboard as it opens) in the demo's made-up folder: its four folders.
     Shot { name: "import folder rows lit", over: Over::Rows(RowsShot::Lit), set_up: set_up_import_rows },
     Shot { name: "import folder rows hovered", over: Over::Rows(RowsShot::Hovered), set_up: set_up_import_rows },
+    // The forks of api as `--show forks` opens them: bob (with changes) highlighted, every kind of cell resting.
+    Shot { name: "forks", over: Over::Forks(Pointing::Nowhere), set_up: set_up_forks },
+    // A fork without changes under the pointer.
+    Shot { name: "forks hovered", over: Over::Forks(Pointing::Row("a-petrov")), set_up: set_up_forks },
+    // The gone fork highlighted (followed into view), a fork with changes under the pointer.
+    Shot {
+        name: "forks gone highlighted",
+        over: Over::Forks(Pointing::Row("lin-wei")),
+        set_up: |repos| {
+            set_up_forks(repos);
+            repos.pick_fork("old-contrib");
+        },
+    },
+    // By name (the arrow in the Fork column's head): a fork without changes highlighted, the gone one under the pointer.
+    Shot {
+        name: "forks by name",
+        over: Over::Forks(Pointing::Row("old-contrib")),
+        set_up: |repos| {
+            set_up_forks(repos);
+            repos.set_fork_sort(devassist_core::repos::state::ForkSort::Name);
+            repos.pick_fork("hanna-l");
+        },
+    },
+    Shot { name: "forks back hovered", over: Over::Forks(Pointing::Back), set_up: set_up_forks },
+    // The panel's sentence instead of the rows: nothing in the folder, the folder being read, and an error.
+    Shot {
+        name: "forks empty",
+        over: Over::Forks(Pointing::Nowhere),
+        set_up: |repos| {
+            set_up_forks(repos);
+            repos.forks.as_mut().unwrap().forks.clear();
+        },
+    },
+    Shot {
+        name: "forks loading",
+        over: Over::Forks(Pointing::Nowhere),
+        set_up: |repos| {
+            set_up_forks(repos);
+            let view = repos.forks.as_mut().unwrap();
+            view.forks.clear();
+            view.loading = true;
+        },
+    },
+    Shot {
+        name: "forks error",
+        over: Over::Forks(Pointing::Nowhere),
+        set_up: |repos| {
+            set_up_forks(repos);
+            let view = repos.forks.as_mut().unwrap();
+            view.forks.clear();
+            view.error = Some("the folder could not be read".to_owned());
+        },
+    },
 ];
+
+/// The demo's forks of api open, as `--show forks` opens them.
+fn set_up_forks(repos: &mut Repos) {
+    demo::show(repos, demo::FORKS_SCREEN).unwrap();
+}
 
 /// The shot of the Move dialog noting that api's forks folder stays where it is. A held demo reads no folder, so its
 /// core never finds a forks folder that cannot follow: the note is given to the dialog as a live core would have it
@@ -1085,6 +1157,45 @@ fn graphic(shape: &RectShape, palette: Palette) -> Option<(&'static str, f64, Co
     None
 }
 
+/// What the names of the forks table's rule graphics start with.
+const RULE_GRAPHIC: &str = "graphic: ahead rule's";
+/// The fewest pixels a place of the forks table's rule measures: its pieces are hairlines and short bars (the origin
+/// mark of one row is 9 pixels above its tick), so a row's few are enough.
+const LEAST_RULE_PIXELS: usize = 9;
+
+/// A graphic of the forks table's ahead rule inside `panel`, as the table paints it ([`table::draw_forward`]): a
+/// tick, a fifth's tick, the origin mark, the bar, and the short piece of a broken bar. Each is held to 3.0, as
+/// graphics are. Gives its name, the contrast it needs, its colour, its rectangle and which pixels count.
+fn rule_graphic(shape: &RectShape, palette: Palette, panel: Rect) -> Option<(&'static str, f64, Color32, Rect, Inside)> {
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+    let (rect, fill) = (shape.rect, shape.fill);
+    if !panel.contains_rect(rect) {
+        return None;
+    }
+    // The ticks are a scale at the strength the design gives them (the Repositories table's rule has the same): they
+    // fall short of 3.0 everywhere, so they are reported, not held, until the controller rules (Task 4's report).
+    let (name, least, area) =
+        if near(rect.width(), theme::HAIRLINE) && near(rect.height(), theme::RULE_TICK) && fill == table::soft(palette, theme::RULE_TICK_OPACITY) {
+            ("graphic: ahead rule's tick (reported, not held)", 1.0, rect)
+        } else if near(rect.width(), theme::HAIRLINE)
+            && near(rect.height(), theme::RULE_TICK_FIFTH)
+            && fill == table::soft(palette, theme::RULE_FIFTH_OPACITY)
+        {
+            ("graphic: ahead rule's fifth tick (reported, not held)", 1.0, rect)
+        } else if near(rect.width(), theme::RULE_ZERO_WIDTH) && near(rect.height(), theme::RULE_HEIGHT) && fill == palette.on_glass {
+            // Measured above the fifth tick it is painted over: there it stands against the panel, below against the tick.
+            let above = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - theme::RULE_TICK_FIFTH));
+            ("graphic: ahead rule's origin mark", LEAST_GRAPHIC, above)
+        } else if near(rect.height(), theme::RULE_BAR) && fill == palette.on_glass {
+            let name =
+                if near(rect.width(), theme::RULE_BREAK_END) { "graphic: ahead rule's broken bar, short piece" } else { "graphic: ahead rule's bar" };
+            (name, LEAST_GRAPHIC, rect)
+        } else {
+            return None;
+        };
+    Some((name, least, fill, area, Box::new(|_| true)))
+}
+
 /// A baked glass pane's id and the bits of its rectangle's corners.
 type PaneKey = (&'static str, [u32; 4]);
 
@@ -1176,6 +1287,9 @@ struct Frame {
     menu_lit: (Option<usize>, Option<usize>),
     /// The row of the Add list the core highlights, when it is among the rows.
     add_lit: Option<Rect>,
+    /// The forks screen's rows, whole, each with whether it is the highlighted one; and what the pointer rests on in
+    /// a shot of it: a row, or the button back.
+    forks: (Vec<(Rect, bool)>, Option<Rect>),
 }
 
 /// Draws `shot` on `stage` as the window draws it, for [`SETTLE`] frames and one more, and gives the last; the
@@ -1196,9 +1310,10 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let (mut folder_text, folder_suggestions) = test_folder(shot.over);
     let (mut pointer, mut found, mut reason, mut main, mut field, mut menu) = (None, None, None, None, None, None);
     let mut rows: Vec<(Rect, bool)> = Vec::new();
+    let mut forks = ForksShot::default();
     for frame in 0..=SETTLE {
         let mut drew = None;
-        let events = shot_events(shot.over, frame, pointer, found, main, field);
+        let events = [shot_events(shot.over, frame, pointer, found, main, field), forks.events(frame)].concat();
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
         let mut output = ctx.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
@@ -1228,13 +1343,11 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             if let Some(plan) = &plan {
                 plan.add_wants(&mut wants);
             }
-            if shot.over.is_screen() {
-                let status = repos_screen::status(&session);
-                let shown = ShellShown { mode, waiting: 0, status: status.as_ref() };
-                shell::draw(ui, &layout, &mut true, &mut Page::Repositories, shown);
-            }
+            draw_shell(ui, shot, &layout, &session, mode);
             let keys = !overlay::is_open(&ctx);
-            repos_screen::show(ui, &layout, plan.as_ref(), &mut session, Some(&sheet), mode, &mut screen, keys);
+            if !forks.show(ui, shot, &layout, &session, &sheet, mode, keys) {
+                repos_screen::show(ui, &layout, plan.as_ref(), &mut session, Some(&sheet), mode, &mut screen, keys);
+            }
             if let Over::Folder(_) = shot.over {
                 let shown =
                     widgets::tests::show_folder_dialog(&ctx, window, &mut folder_text, &folder_suggestions, theme::palette(mode), &overlay_glass);
@@ -1273,6 +1386,7 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
             menu,
             menu_lit: menu_lit(&session),
             add_lit: add_lit(&session, &rows),
+            forks: (forks.rows.clone(), forks.pointer.map(|(_, rect)| rect)),
         });
     }
     if !shot.over.is_screen() {
@@ -1285,6 +1399,65 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let last = last.unwrap();
     state_lands(shot, &last, size, mode);
     last
+}
+
+/// Draws the shell in `layout` under a shot of the screen (`shot`, of `session` in `mode`), as the window does: its
+/// status bar and title the forks' while they show, else the Repositories screen's.
+fn draw_shell(ui: &mut egui::Ui, shot: &Shot, layout: &shell::Layout, session: &Session, mode: Mode) {
+    if !shot.over.is_screen() {
+        return;
+    }
+    let view = session.repos().and_then(|repos| repos.forks.as_ref());
+    let status = view.map(forks_screen::status).or_else(|| repos_screen::status(session));
+    let title = session.repos().and_then(forks_screen::title);
+    let shown = ShellShown { mode, waiting: 0, status: status.as_ref(), back: title.as_deref() };
+    shell::draw(ui, layout, &mut true, &mut Page::Repositories, shown);
+}
+
+/// The forks screen in a shot's frames: what it keeps, its rows as it placed them in the last frame (whole, each with
+/// whether it is highlighted), and where the pointer rests in the next frame with what it rests on.
+#[derive(Default)]
+struct ForksShot {
+    screen: forks_screen::Screen,
+    rows: Vec<(Rect, bool)>,
+    pointer: Option<(Pos2, Rect)>,
+}
+
+impl ForksShot {
+    /// The pointer's move onto what the shot rests it on, from the frame after the first.
+    fn events(&self, frame: usize) -> Vec<egui::Event> {
+        self.pointer.filter(|_| frame >= 1).map(|(at, _)| egui::Event::PointerMoved(at)).into_iter().collect()
+    }
+
+    /// Draws the forks screen of `session` in `layout` when it shows, taking no press, and notes its rows and where
+    /// `shot`'s pointer goes; whether it was drawn.
+    #[expect(clippy::too_many_arguments, reason = "the screen's own entry, as a shot's frame calls it")]
+    fn show(&mut self, ui: &mut egui::Ui, shot: &Shot, layout: &shell::Layout, session: &Session, sheet: &Sheet, mode: Mode, keys: bool) -> bool {
+        let Some(view) = session.repos().and_then(|repos| repos.forks.as_ref()) else { return false };
+        let plan = forks_screen::plan(view, layout.panel);
+        assert_eq!(forks_screen::show(ui, layout, &plan, Some(sheet), mode, &mut self.screen, keys), None, "{}: a press", shot.name);
+        let place = |owner: &str| forks_screen::row_rect(&plan, self.screen.scroll(), owner);
+        self.rows = plan.rows.iter().filter_map(|row| place(&row.owner).map(|rect| (rect, row.chosen))).collect();
+        self.pointer = match shot.over {
+            Over::Forks(Pointing::Row(owner)) => {
+                let rect = place(owner).unwrap_or_else(|| panic!("{}: no row of {owner}", shot.name));
+                Some((rect.center(), rect))
+            }
+            Over::Forks(Pointing::Back) => Some((layout.toggle.center(), layout.toggle)),
+            _ => None,
+        };
+        true
+    }
+}
+
+/// On the forks screen, a fill that names what lies under the texts and graphics over it: a row's (cut to the
+/// panel's round corners, a path) and the hover's round fill on the button back; where it is and its colour.
+fn forks_fill(shape: &Shape) -> Option<(Rect, Color32)> {
+    match shape {
+        Shape::Path(path) if path.fill.a() > 0 => Some((path.visual_bounding_rect(), path.fill)),
+        Shape::Circle(circle) if circle.fill.a() > 0 => Some((circle.visual_bounding_rect(), circle.fill)),
+        _ => None,
+    }
 }
 
 /// The overlay's panes `wanted` as a shot's frame draws them: each baked on `stage` into `glass` (kept while it
@@ -1423,7 +1596,47 @@ fn state_lands(shot: &Shot, last: &Frame, size: egui::Vec2, mode: Mode) {
         Over::Folder(FolderShot::Hovered) => {
             assert!(filled(folder_row(1)), "{name} at {size:?} in {mode:?}: the folder under the pointer is not on the hover's fill");
         }
+        Over::Forks(pointing) => forks_state_lands(last, pointing, &format!("{name} at {size:?} in {mode:?}"), mode),
         _ => {}
+    }
+}
+
+/// Checks that a shot of the forks screen draws what it claims: with rows, one highlighted row whole on the
+/// selection's fill (the panel's rows are cut to its round corners, so their fill is a path), in view; the row the
+/// pointer rests on, whole in the panel, on the hover's fill and not the selection's; the button back, under the
+/// pointer, on the hover's fill.
+fn forks_state_lands(last: &Frame, pointing: Pointing, what: &str, mode: Mode) {
+    let palette = theme::palette(mode);
+    let hover = palette.on_glass.gamma_multiply(HOVER_OPACITY);
+    let filled_path = |colour: Color32, place: Rect| {
+        last.shapes.iter().any(|clipped| {
+            matches!(&clipped.shape, Shape::Path(path) if path.fill == colour && place.expand(0.5).contains_rect(path.visual_bounding_rect()))
+        })
+    };
+    let lit: Vec<Rect> = last.forks.0.iter().filter(|(_, chosen)| *chosen).map(|(rect, _)| *rect).collect();
+    if !last.forks.0.is_empty() {
+        assert_eq!(lit.len(), 1, "{what}: not one highlighted fork");
+        assert!(table::body_rect(last.layout.panel).contains_rect(lit[0]), "{what}: the highlighted fork is not in view");
+        assert!(filled_path(theme::selected_fill(mode), lit[0]), "{what}: the highlighted fork is not on the selection's fill");
+    }
+    match pointing {
+        Pointing::Row(_) => {
+            let row = last.forks.1.unwrap_or_else(|| panic!("{what}: no row under the pointer"));
+            assert!(table::body_rect(last.layout.panel).contains_rect(row), "{what}: the row under the pointer is not in view");
+            assert!(
+                filled_path(hover, row) && !filled_path(theme::selected_fill(mode), row),
+                "{what}: the row under the pointer is not on the hover's fill"
+            );
+        }
+        Pointing::Back => {
+            let back = last.forks.1.unwrap_or_else(|| panic!("{what}: no button back"));
+            let circled = last
+                .shapes
+                .iter()
+                .any(|clipped| matches!(&clipped.shape, Shape::Circle(circle) if circle.fill == hover && back.contains(circle.center)));
+            assert!(circled, "{what}: the button back is not on the hover's fill");
+        }
+        Pointing::Nowhere => {}
     }
 }
 
@@ -1474,6 +1687,11 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                         Over::TopRow => controls.iter().any(|(_, control)| control.contains(rect.center())),
                         Over::Dialog | Over::Entered | Over::Hovering(_) | Over::Folder(_) | Over::Rows(_) => on_overlay,
                         Over::Menu => on_overlay || words == dots,
+                        // The forks screen's every text: its panel, the status bar, the button back and the title.
+                        Over::Forks(_) => {
+                            let l = &frame.layout;
+                            [l.panel, l.status, l.toggle, l.title].iter().any(|place| place.contains(rect.center()))
+                        }
                     };
                     if wanted {
                         let ink_name = colour_name(ink, mode);
@@ -1509,7 +1727,11 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                 }
             }
             Shape::Rect(rect) => {
-                if on_overlay && let Some((name, least, ink, area, inside)) = graphic(rect, palette) {
+                // Only what is painted of it: a row scrolled under the head row is cut to the rows' room.
+                let forks_graphic = if let Over::Forks(_) = shot.over { rule_graphic(rect, palette, frame.layout.panel) } else { None }
+                    .map(|(name, least, ink, area, inside)| (name, least, ink, area.intersect(clipped.clip_rect), inside))
+                    .filter(|(.., area, _)| area.is_positive());
+                if let Some((name, least, ink, area, inside)) = forks_graphic.or_else(|| if on_overlay { graphic(rect, palette) } else { None }) {
                     let (found, all) = measured(&bitmap, area, ink, &inside);
                     probes.push(Probe {
                         // Named by what is under its top edge's middle, where it is drawn (a ring's middle is its button).
@@ -1532,7 +1754,11 @@ fn measure_shot(shot: &Shot, stage: &Stage, tag: &str) -> Vec<Probe> {
                 let glass = if shot.over == Over::Menu { "menu glass" } else { "dialog glass" };
                 fills.push((mesh.calc_bounds(), glass.to_owned(), on_overlay));
             }
-            _ => {}
+            shape => {
+                if let Some((area, fill)) = forks_fill(shape).filter(|_| matches!(shot.over, Over::Forks(_))) {
+                    fills.push((area.intersect(clipped.clip_rect), colour_name(fill, mode), on_overlay));
+                }
+            }
         }
         picture::paint(&mut bitmap, &frame.ctx.tessellate(vec![clipped], 1.0), &textures);
     }
@@ -1611,7 +1837,14 @@ fn rows_of(light: Vec<Taken>, dark: Vec<Taken>) -> Vec<ShotRow> {
     }
     for row in &rows {
         assert!(
-            row.row.found.count >= if row.row.name.contains("focus ring") { LEAST_RING_PIXELS } else { LEAST_PIXELS },
+            row.row.found.count
+                >= if row.row.name.contains("focus ring") {
+                    LEAST_RING_PIXELS
+                } else if row.row.name.contains(RULE_GRAPHIC) {
+                    LEAST_RULE_PIXELS
+                } else {
+                    LEAST_PIXELS
+                },
             "{:?} {} {:?} {}: only {} pixels measured",
             row.row.rendering,
             row.row.backdrop,

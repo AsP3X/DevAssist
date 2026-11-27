@@ -191,17 +191,19 @@ impl Plan {
     }
 }
 
-/// Whether the screen has its toolbar: when there are repositories to filter, sort and tick.
+/// Whether the screen has its toolbar: when there are repositories to filter, sort and tick, and the forks of one
+/// do not stand in the table's place ([`crate::forks_screen::shown`]).
 #[must_use]
 pub fn has_toolbar(session: &Session) -> bool {
-    session.repos().is_some_and(|repos| !repos.installed.is_empty())
+    session.repos().is_some_and(|repos| !repos.installed.is_empty() && !crate::forks_screen::shown(repos))
 }
 
 /// The screen's controls in `layout`, measured with `painter`'s faces: the top row's, and the toolbar when there are
-/// repositories; `None` when nothing is loaded (the settings file has a mistake).
+/// repositories; `None` when nothing is loaded (the settings file has a mistake) or while the forks of a repository
+/// take the table's place: the forks screen has the page then.
 #[must_use]
 pub fn plan(painter: &Painter, layout: &Layout, session: &Session) -> Option<Plan> {
-    let repos = session.repos()?;
+    let repos = session.repos().filter(|repos| !crate::forks_screen::shown(repos))?;
     let toolbar = has_toolbar(session).then(|| {
         let sort = if repos.sort == SortMode::NeedsUpdate { ATTENTION_FIRST } else { BY_NAME };
         let view_width = widgets::capsule_width(painter, &view_items(sort));
@@ -542,7 +544,7 @@ pub(crate) fn top_row(plan: &Plan) -> Option<(Rect, Rect)> {
 
 /// The scroll that shows the whole line at `index` of lines of `heights` in `room` points, moving `scroll` as
 /// little as it takes.
-fn follow(heights: &[f32], index: usize, scroll: f32, room: f32) -> f32 {
+pub(crate) fn follow(heights: &[f32], index: usize, scroll: f32, room: f32) -> f32 {
     let Some(height) = heights.get(index) else { return scroll };
     let top: f32 = heights[..index].iter().sum();
     let bottom = top + height;
@@ -1493,7 +1495,7 @@ mod tests {
         let layout = shell::layout(vec2(WINDOW[0], WINDOW[1]), true, true);
         let output = ctx.run_ui(input, |ui| {
             let (mut sidebar, mut page) = (true, shell::Page::Repositories);
-            shell::draw(ui, &layout, &mut sidebar, &mut page, shell::Shown { mode, waiting: 0, status: Some(&shown_status) });
+            shell::draw(ui, &layout, &mut sidebar, &mut page, shell::Shown { mode, waiting: 0, status: Some(&shown_status), back: None });
         });
         let colour = output.shapes.iter().find_map(|clipped| match &clipped.shape {
             egui::Shape::Text(text) if text.galley.text() == shown_status.text => Some(text.fallback_color),

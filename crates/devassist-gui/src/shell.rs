@@ -15,8 +15,8 @@ use crate::repos_view::Status;
 use crate::theme::{
     self, BADGE_HEIGHT, BADGE_INSET, BADGE_PAD, BAR_GAP, BAR_HEIGHT, CAPTION_BUTTON, GROUP_GAP, HOVER_OPACITY, ICON, ICON_GAP, INSET, LABEL_GAP,
     LABEL_ROW, Mode, NAV_ROW, Palette, RADIUS_PANE, RADIUS_PANEL, RADIUS_ROW, RADIUS_SMALL, ROW_GAP, ROW_PADDING, SIDEBAR_PADDING, SIDEBAR_TOP,
-    SIDEBAR_WIDTH, STATUS_GAP, STATUS_HEIGHT, STATUS_ICON, STATUS_ICON_GAP, STATUS_PADDING, Surface, TEXT, TEXT_SMALL, TEXT_TITLE, TITLE_ROOM,
-    WORKSPACE_MARK,
+    SIDEBAR_WIDTH, STATUS_GAP, STATUS_HEIGHT, STATUS_ICON, STATUS_ICON_GAP, STATUS_PADDING, STATUS_PATH_LEAST, Surface, TEXT, TEXT_SMALL, TEXT_TITLE,
+    TITLE_ROOM, WORKSPACE_MARK,
 };
 use crate::widgets::{self, draw_icon, font};
 
@@ -24,6 +24,8 @@ use crate::widgets::{self, draw_icon, font};
 const SIDEBAR: &str = "sidebar";
 /// The round button that shows and hides the sidebar.
 const SIDEBAR_TOGGLE: &str = "sidebar-toggle";
+/// The round button back to the page, in the sidebar button's place.
+const BACK_BUTTON: &str = "back";
 /// The status bar.
 const STATUS: &str = "status";
 
@@ -237,12 +239,19 @@ pub struct Shown<'a> {
     pub waiting: usize,
     /// What the status bar says; `None` for the app's name and version.
     pub status: Option<&'a Status>,
+    /// The title of a screen a page went on to (the forks of a repository): the top row then has a round button back
+    /// in the sidebar button's place, and this title in place of the page's name.
+    pub back: Option<&'a str>,
 }
+
+/// What the round button back to the page says on hover.
+const BACK: &str = "Back to the repositories";
 
 /// Draws the frame's text, icons and buttons over the pictures of [`wants`] for `layout`. A press on the sidebar
 /// button flips `sidebar_shown`, a press on a page's row in the sidebar chooses `page`; the new layout is drawn from
-/// the next frame on. The panel is the screen's to draw.
-pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut Page, shown: Shown<'_>) {
+/// the next frame on. The panel is the screen's to draw. With [`Shown::back`] the sidebar button's place holds the
+/// button back instead (the sidebar keeps its state); gives back whether it was pressed.
+pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut Page, shown: Shown<'_>) -> bool {
     let palette = theme::palette(shown.mode);
     let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
     let (drag, captions) = top_row(ui, layout, maximized);
@@ -266,13 +275,28 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
 
     let painter = ui.painter().clone();
     let toggle = layout.toggle;
-    if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked() && !stale {
-        *sidebar_shown = !*sidebar_shown;
-        ui.ctx().request_repaint();
+    let mut back = false;
+    if shown.back.is_some() {
+        let response = ui.interact(toggle, ui.scope_id().with(BACK_BUTTON), Sense::CLICK).on_hover_text(BACK);
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, BACK));
+        if response.hovered() {
+            painter.circle_filled(toggle.center(), toggle.height() / 2.0, palette.on_glass.gamma_multiply(HOVER_OPACITY));
+        }
+        back = response.clicked() && !stale;
+        if back {
+            ui.ctx().request_repaint();
+        }
+        draw_icon(&painter, toggle.center(), Icon::ArrowLeft, ICON, palette.on_glass);
+    } else {
+        if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked() && !stale {
+            *sidebar_shown = !*sidebar_shown;
+            ui.ctx().request_repaint();
+        }
+        draw_icon(&painter, toggle.center(), Icon::PanelLeft, ICON, palette.on_glass);
     }
-    draw_icon(&painter, toggle.center(), Icon::PanelLeft, ICON, palette.on_glass);
     let title = layout.title;
-    painter.with_clip_rect(title).text(pos2(title.left(), title.center().y), Align2::LEFT_CENTER, page.name(), title_font(), palette.on_glass);
+    let words = shown.back.unwrap_or(page.name());
+    painter.with_clip_rect(title).text(pos2(title.left(), title.center().y), Align2::LEFT_CENTER, words, title_font(), palette.on_glass);
     for (icon, command, rect, response) in captions {
         let (fill, mark) = match (response.hovered(), icon == Icon::X) {
             (true, true) => (palette.danger, palette.on_dark_glass),
@@ -287,6 +311,7 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
     }
 
     draw_status(ui, layout.status, shown.status, palette);
+    back
 }
 
 /// One of the window's own buttons: its icon, what it asks of the window, where it is and what it heard.
@@ -340,23 +365,58 @@ pub fn placeholder(ui: &Ui, panel: Rect, sheet: Option<&Sheet>, palette: Palette
     ui.painter().with_clip_rect(panel).text(panel.center(), Align2::CENTER_CENTER, PANEL_TEXT, font(TEXT, FontFamily::Proportional), palette.quiet);
 }
 
+/// The room each of the status bar's notes keeps for its words when the bar has `room` points inside its padding,
+/// its message is `text` wide and kept whole, and the notes' words are `words` wide: all of them while they fit;
+/// else they give way from the last, the folder's path at `path` cut to what is left as long as that is at least
+/// [`STATUS_PATH_LEAST`]. `None` for a note that gave way. Each note takes its icon and [`STATUS_GAP`] before it too.
+#[must_use]
+pub fn notes_fit(room: f32, text: f32, words: &[f32], path: Option<usize>) -> Vec<Option<f32>> {
+    let mut shown: Vec<Option<f32>> = words.iter().copied().map(Some).collect();
+    let used = |shown: &[Option<f32>]| shown.iter().flatten().map(|words| STATUS_GAP + STATUS_ICON + STATUS_ICON_GAP + words).sum::<f32>();
+    for at in (0..shown.len()).rev() {
+        let over = text + used(&shown) - room;
+        if over <= 0.0 {
+            break;
+        }
+        let words = shown[at].unwrap_or_default();
+        shown[at] = (Some(at) == path && words - over >= STATUS_PATH_LEAST).then_some(words - over);
+    }
+    shown
+}
+
 /// Draws the status bar's text at `status`: the screen's message at the left (in the danger colour when it is an
-/// error), what is switched on at the right, each with its icon.
+/// error), what is switched on at the right, each with its icon. Unless the message is kept whole
+/// ([`Status::keep_text`], where the notes give way: [`notes_fit`]), the notes are kept and the message is cut. A
+/// folder's path among the notes is cut from its left, and shows all of it on hover.
 fn draw_status(ui: &Ui, status: Rect, shown: Option<&Status>, palette: Palette) {
     let painter = ui.painter().with_clip_rect(status);
     let small = font(TEXT_SMALL, FontFamily::Proportional);
     let y = status.center().y;
-    let mut right = status.right() - STATUS_PADDING;
-    for (icon, words) in shown.map_or(&[][..], |status| status.notes.as_slice()).iter().rev() {
-        let text = painter.text(pos2(right, y), Align2::RIGHT_CENTER, words, small.clone(), palette.quiet);
-        widgets::draw_icon(&painter, pos2(text.left() - STATUS_ICON_GAP - STATUS_ICON / 2.0, y), *icon, STATUS_ICON, palette.quiet);
-        right = text.left() - STATUS_ICON_GAP - STATUS_ICON - STATUS_GAP;
-    }
     let left = status.left() + STATUS_PADDING;
     let (text, colour) = match shown {
         Some(status) => (status.text.clone(), if status.error { palette.danger } else { palette.quiet }),
         None => (idle_status(), palette.quiet),
     };
+    let notes = shown.map_or(&[][..], |status| status.notes.as_slice());
+    let path = shown.and_then(|status| status.path);
+    let words: Vec<f32> = notes.iter().map(|(_, words)| widgets::width(&painter, words, &small)).collect();
+    let room = status.width() - 2.0 * STATUS_PADDING;
+    let fit = if shown.is_some_and(|status| status.keep_text) {
+        notes_fit(room, widgets::width(&painter, &text, &small), &words, path)
+    } else {
+        words.iter().copied().map(Some).collect()
+    };
+    let mut right = status.right() - STATUS_PADDING;
+    for (at, ((icon, words), fit)) in notes.iter().zip(fit).enumerate().rev() {
+        let Some(fit) = fit else { continue };
+        let said = if Some(at) == path { widgets::path_tail(words, &small, fit, ui) } else { words.clone() };
+        let drawn = painter.text(pos2(right, y), Align2::RIGHT_CENTER, &said, small.clone(), palette.quiet);
+        widgets::draw_icon(&painter, pos2(drawn.left() - STATUS_ICON_GAP - STATUS_ICON / 2.0, y), *icon, STATUS_ICON, palette.quiet);
+        if Some(at) == path {
+            ui.interact(drawn.intersect(status), Id::unique(("status-path", at)), Sense::hover()).on_hover_text(words);
+        }
+        right = drawn.left() - STATUS_ICON_GAP - STATUS_ICON - STATUS_GAP;
+    }
     let text = widgets::ellipsis(&text, &small, right - left, ui);
     painter.text(pos2(left, y), Align2::LEFT_CENTER, text, small, colour);
 }
@@ -524,7 +584,7 @@ mod tests {
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| {
-                draw(ui, &layout, &mut shown, &mut page, Shown { mode: Mode::Light, waiting: 0, status: None });
+                let _ = draw(ui, &layout, &mut shown, &mut page, Shown { mode: Mode::Light, waiting: 0, status: None, back: None });
                 if dialog {
                     overlay::show(ui.ctx(), |ui| {
                         let window = ui.ctx().content_rect();
@@ -608,7 +668,7 @@ mod tests {
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| {
-                draw(ui, &layout, &mut shown, &mut page, Shown { mode: Mode::Light, waiting: 0, status: None });
+                let _ = draw(ui, &layout, &mut shown, &mut page, Shown { mode: Mode::Light, waiting: 0, status: None, back: None });
                 // The first click's release opens the dialog, after the shell is drawn, as the screen's button does.
                 if index == 3 {
                     overlay::open(ui.ctx(), None);

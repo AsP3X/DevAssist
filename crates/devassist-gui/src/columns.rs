@@ -169,7 +169,144 @@ pub fn rule(behind: u32, ahead: u32) -> Rule {
 /// [`theme::RULE_HALF`] behind to [`theme::RULE_HALF`] ahead, the middle one included.
 #[must_use]
 pub fn ticks() -> Vec<(f32, bool)> {
-    (0..=2 * theme::RULE_HALF).map(|place| (points(place), place.abs_diff(theme::RULE_HALF) % 5 == 0)).collect()
+    scale(2 * theme::RULE_HALF)
+}
+
+/// The ticks of a rule with room for `commits` commits from its left edge: one at each commit, the left edge's
+/// included, each with its left edge and whether it is a fifth (every fifth from the left edge, which is one).
+#[must_use]
+pub fn scale(commits: u32) -> Vec<(f32, bool)> {
+    (0..=commits).map(|place| (points(place), place % 5 == 0)).collect()
+}
+
+/// How wide a rule with room for `commits` commits is: the commits at [`theme::RULE_UNIT`] and the point of its
+/// mark.
+#[must_use]
+pub fn rule_length(commits: u32) -> f32 {
+    points(commits) + theme::RULE_ZERO_WIDTH
+}
+
+/// The forks table's rule of how far a fork is ahead of the original: from the origin mark at its left edge, a bar
+/// to the right.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Forward {
+    /// The bar's left edge and width from the rule's left edge, or `None` for nothing ahead.
+    pub bar: Option<(f32, f32)>,
+    /// Whether more commits are ahead than the rule has room for: the bar is then drawn broken.
+    pub over: bool,
+}
+
+/// The forks table's rule for `ahead` commits on a rule with room for `room`: the bar starts just after the origin
+/// mark, [`theme::RULE_UNIT`] points a commit, held at `room` commits.
+#[must_use]
+pub fn forward(ahead: u32, room: u32) -> Forward {
+    Forward { bar: (ahead > 0).then(|| (theme::RULE_ZERO_WIDTH, points(ahead.min(room)))), over: ahead > room }
+}
+
+/// The columns of a forks table row, each with its left edge and width inside the row, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ForkColumns {
+    /// The fork's `owner/name`; it takes what the others leave.
+    pub fork: Span,
+    /// Its branches, when there is room.
+    pub branches: Option<Span>,
+    /// Its pull requests, when there is room.
+    pub pulls: Option<Span>,
+    /// How far it is ahead: the rule and its words.
+    pub ahead: Span,
+    /// How many commits the ahead rule has room for: [`theme::FORK_RULE_COMMITS`] unless a narrow row shrank it.
+    pub room: u32,
+    /// The date of its newest commit, when there is room.
+    pub newest: Option<Span>,
+    /// Its state.
+    pub state: Span,
+    /// The room of the row's two buttons.
+    pub actions: Span,
+}
+
+/// How many of the forks table's optional columns a narrow row can give up, one at a time: the newest commit,
+/// branches, pull requests.
+const FORK_GIVEN_UP: usize = 3;
+
+/// What a forks table row has given up: how many optional columns, and the ahead rule's room in commits.
+#[derive(Clone, Copy)]
+struct ForkFit {
+    given: usize,
+    room: u32,
+}
+
+impl ForkFit {
+    fn newest(self) -> bool {
+        self.given < 1
+    }
+
+    fn branches(self) -> bool {
+        self.given < 2
+    }
+
+    fn pulls(self) -> bool {
+        self.given < FORK_GIVEN_UP
+    }
+
+    /// The ahead column's width: the drawing's, less the commits its rule gave up.
+    fn ahead(self) -> f32 {
+        theme::FORK_COLUMN_AHEAD - (rule_length(theme::FORK_RULE_COMMITS) - rule_length(self.room))
+    }
+
+    /// The fork column's width in a row of `row_width`, before it is held at zero.
+    fn fork_width(self, row_width: f32) -> f32 {
+        let others = [
+            self.branches().then_some(theme::FORK_COLUMN_BRANCHES),
+            self.pulls().then_some(theme::FORK_COLUMN_PULLS),
+            Some(self.ahead()),
+            self.newest().then_some(theme::FORK_COLUMN_NEWEST),
+            Some(theme::FORK_COLUMN_STATE),
+            Some(theme::FORK_COLUMN_ACTIONS),
+        ];
+        let (mut taken, mut gaps) = (theme::ROW_PAD_LEFT + theme::ROW_PAD_RIGHT, 0.0);
+        for width in others.into_iter().flatten() {
+            taken += width;
+            gaps += 1.0;
+        }
+        row_width - taken - gaps * theme::COLUMN_GAP
+    }
+
+    /// What a row of `row_width` gives up: the newest commit, then branches, then pull requests, then commits of the
+    /// ahead rule's room down to [`theme::FORK_RULE_LEAST`], until the fork column keeps [`theme::FORK_NAME_LEAST`].
+    fn fitting(row_width: f32) -> ForkFit {
+        let mut fit = ForkFit { given: 0, room: theme::FORK_RULE_COMMITS };
+        while fit.given < FORK_GIVEN_UP && fit.fork_width(row_width) < theme::FORK_NAME_LEAST {
+            fit.given += 1;
+        }
+        while fit.room > theme::FORK_RULE_LEAST && fit.fork_width(row_width) < theme::FORK_NAME_LEAST {
+            fit.room -= 1;
+        }
+        fit
+    }
+}
+
+/// The columns of a forks table row `row_width` points wide. The fork column starts at the row's left padding and
+/// the others are anchored to the right padding, so a wider row only gives the fork more. A row too narrow for even
+/// the columns that stay gets a fork column of no width; nothing is negative. A width that is no number, or an
+/// infinite one, is taken as no width.
+#[must_use]
+pub fn fork_columns(row_width: f32) -> ForkColumns {
+    let row_width = if row_width.is_finite() { row_width } else { 0.0 };
+    let fit = ForkFit::fitting(row_width);
+    let mut edge = row_width - theme::ROW_PAD_RIGHT;
+    let mut place = |width: f32| {
+        let span = Span { left: edge - width, width };
+        edge = span.left - theme::COLUMN_GAP;
+        span
+    };
+    let actions = place(theme::FORK_COLUMN_ACTIONS);
+    let state = place(theme::FORK_COLUMN_STATE);
+    let newest = fit.newest().then(|| place(theme::FORK_COLUMN_NEWEST));
+    let ahead = place(fit.ahead());
+    let pulls = fit.pulls().then(|| place(theme::FORK_COLUMN_PULLS));
+    let branches = fit.branches().then(|| place(theme::FORK_COLUMN_BRANCHES));
+    let fork = Span { left: theme::ROW_PAD_LEFT, width: fit.fork_width(row_width).max(0.0) };
+    ForkColumns { fork, branches, pulls, ahead, room: fit.room, newest, state, actions }
 }
 
 #[cfg(test)]
@@ -331,6 +468,93 @@ mod tests {
         assert!(eleven.behind_over && eleven.ahead_over);
         assert_eq!(rule(u32::MAX, u32::MAX).ahead, ten.ahead);
         assert_eq!(ten.ahead.map(|(left, width)| left + width), Some(theme::RULE_WIDTH));
+    }
+
+    /// Every shown span of a forks row, left to right, by name.
+    fn forks_in_order(c: &ForkColumns) -> Vec<(&'static str, Span)> {
+        let optional = [("branches", c.branches), ("pulls", c.pulls)];
+        let mut all = vec![("fork", c.fork)];
+        all.extend(optional.into_iter().filter_map(|(name, span)| span.map(|span| (name, span))));
+        all.push(("ahead", c.ahead));
+        all.extend(c.newest.map(|span| ("newest", span)));
+        all.extend([("state", c.state), ("actions", c.actions)]);
+        all
+    }
+
+    #[test]
+    fn at_the_design_width_the_forks_columns_are_the_drawings() {
+        let c = fork_columns(DESIGN);
+        let widths: Vec<(&str, f32)> = forks_in_order(&c).into_iter().map(|(name, span)| (name, span.width)).collect();
+        assert_eq!(
+            widths,
+            [("fork", 256.0), ("branches", 80.0), ("pulls", 104.0), ("ahead", 264.0), ("newest", 112.0), ("state", 168.0), ("actions", 72.0)]
+        );
+        assert_eq!(c.room, theme::FORK_RULE_COMMITS);
+        assert_eq!((c.fork.left, c.actions.right()), (theme::ROW_PAD_LEFT, DESIGN - theme::ROW_PAD_RIGHT));
+        for pair in forks_in_order(&c).windows(2) {
+            assert!((pair[1].1.left - (pair[0].1.right() + theme::COLUMN_GAP)).abs() < 1e-3, "{pair:?}");
+        }
+        // The rule has room for twenty commits from its left edge, the words the rest of the column.
+        assert_eq!(rule_length(c.room), 161.0);
+    }
+
+    #[test]
+    fn columns_give_way_before_the_fork_name_is_squeezed() {
+        let mut lost = Vec::new();
+        let mut before = [true; 3]; // newest, branches, pulls
+        let mut room_before = theme::FORK_RULE_COMMITS;
+        let mut shrank_at = None;
+        for sidebar in [true, false] {
+            for width in (960..=2000).rev() {
+                #[expect(clippy::cast_precision_loss, reason = "window sizes of a few thousand points")]
+                let size = egui::vec2(width as f32, 600.0);
+                let panel = crate::shell::layout(size, sidebar, false).panel.width();
+                let c = fork_columns(panel);
+                let now = [c.newest.is_some(), c.branches.is_some(), c.pulls.is_some()];
+                for (index, name) in ["newest", "branches", "pulls"].into_iter().enumerate() {
+                    assert!(!now[index] || before[index], "{name} came back at {width} (sidebar {sidebar})");
+                    if before[index] && !now[index] {
+                        lost.push(name);
+                    }
+                }
+                // The rule shrinks only once the three are gone, and never under its least.
+                assert!(c.room == theme::FORK_RULE_COMMITS || now == [false; 3], "{width}: {c:?}");
+                assert!(c.room >= theme::FORK_RULE_LEAST && c.room <= room_before, "{width}: {c:?}");
+                if c.room < theme::FORK_RULE_COMMITS && shrank_at.is_none() {
+                    shrank_at = Some((width, sidebar));
+                }
+                // In every window the app allows, the fork keeps its least.
+                assert!(c.fork.width >= theme::FORK_NAME_LEAST, "{width} (sidebar {sidebar}): the fork is {} wide", c.fork.width);
+                assert_eq!(c.ahead.width, theme::FORK_COLUMN_AHEAD - 8.0 * f32::from(u16::try_from(theme::FORK_RULE_COMMITS - c.room).unwrap()));
+                let spans = forks_in_order(&c);
+                for pair in spans.windows(2) {
+                    assert!(pair[1].1.left >= pair[0].1.right() + theme::COLUMN_GAP - 1e-3, "{width}: {pair:?} overlap");
+                }
+                assert!((c.actions.right() - (panel - theme::ROW_PAD_RIGHT)).abs() < 1e-3);
+                (before, room_before) = (now, c.room);
+            }
+            (before, room_before) = ([true; 3], theme::FORK_RULE_COMMITS);
+        }
+        assert_eq!(lost, ["newest", "branches", "pulls", "newest"], "in order with the sidebar; only the newest without it");
+        assert_eq!(shrank_at.map(|(_, sidebar)| sidebar), Some(true), "the rule shrinks in the narrowest windows with the sidebar");
+        // A row narrower than anything the app allows holds nothing negative.
+        for width in [0.0, 300.0, f32::NAN, f32::INFINITY] {
+            let c = fork_columns(width);
+            assert!(forks_in_order(&c).iter().all(|(_, span)| span.width >= 0.0 && span.left.is_finite()), "{width}: {c:?}");
+        }
+    }
+
+    #[test]
+    fn the_forks_rule_starts_at_its_left_edge_and_breaks_past_its_room() {
+        assert_eq!(forward(0, 20), Forward { bar: None, over: false });
+        assert_eq!(forward(9, 20), Forward { bar: Some((1.0, 72.0)), over: false });
+        assert_eq!(forward(20, 20), Forward { bar: Some((1.0, 160.0)), over: false });
+        assert_eq!(forward(47, 20), Forward { bar: Some((1.0, 160.0)), over: true });
+        assert_eq!(forward(13, 12), Forward { bar: Some((1.0, 96.0)), over: true });
+        let s = scale(20);
+        assert_eq!(s.len(), 21);
+        assert_eq!(s.iter().filter(|(_, fifth)| *fifth).map(|(x, _)| *x).collect::<Vec<_>>(), [0.0, 40.0, 80.0, 120.0, 160.0]);
+        assert_eq!(s, ticks(), "the table's rule has the same ticks");
     }
 
     #[test]
