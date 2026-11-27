@@ -2451,6 +2451,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_triple_click_on_back_goes_back_and_leaves_the_sidebar_alone() {
+        // Three and four quick clicks are one press too: every click after the first is the rest of it.
+        for clicks in [3, 4] {
+            let mut win = Win::demo();
+            win.step = 0.02;
+            let at = win.pages_layout().toggle.center();
+            for _ in 0..clicks {
+                win.click(at);
+            }
+            win.frame(Vec::new());
+            assert!(win.repos().forks.is_none(), "{clicks} clicks: back did nothing");
+            assert!(win.pages.sidebar_shown, "{clicks} clicks: a later click of the run hid the sidebar");
+            // A click of its own, later, is one.
+            win.step = 1.0;
+            win.frame(Vec::new());
+            win.step = 0.02;
+            win.click(at);
+            assert!(!win.pages.sidebar_shown, "{clicks} clicks: a click of its own on the sidebar's button did nothing");
+        }
+    }
+
+    #[test]
     fn a_quick_click_elsewhere_does_not_swallow_back_or_the_sidebars_button() {
         // egui counts a click as the second of a double click when it comes soon after another within a few points
         // of it. A click just beside the round button (on the top row), then quickly one on the button's edge: that is

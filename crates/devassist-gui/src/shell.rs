@@ -278,9 +278,9 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
     let painter = ui.painter().clone();
     let toggle = layout.toggle;
     let mut back = false;
-    // The second (or third) click of a double click whose first click was on back is the rest of that press: back put
-    // the sidebar's button in its place, which does not act on it. Remembered by this button alone: a quick click
-    // anywhere else before it is no first click of its own.
+    // The second, third and later clicks of a quick run whose first click was on back are the rest of that press: back
+    // put the sidebar's button in its place, which does not act on them. Remembered by this button alone: a quick click
+    // anywhere else before it is no first click of its own, and a click it swallowed keeps the run its own.
     let after_back = Id::unique("shell-back-clicked");
     let (second, clicked_now) = ui.input(|input| {
         let clicks = &input.pointer;
@@ -288,6 +288,7 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
     });
     let second = second && ui.ctx().data(|data| data.get_temp::<bool>(after_back).unwrap_or(false));
     let mut clicked_back = false;
+    let mut swallowed = false;
     if shown.back.is_some() {
         let response = ui.interact(toggle, ui.scope_id().with(BACK_BUTTON), Sense::CLICK).on_hover_text(BACK);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, BACK));
@@ -301,17 +302,16 @@ pub fn draw(ui: &mut Ui, layout: &Layout, sidebar_shown: &mut bool, page: &mut P
         }
         draw_icon(&painter, toggle.center(), Icon::ArrowLeft, ICON, palette.on_glass);
     } else {
-        if ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked()
-            && !stale
-            && !second
-        {
+        let clicked = ui.interact(toggle, ui.scope_id().with(SIDEBAR_TOGGLE), Sense::CLICK).on_hover_text("Show or hide the sidebar").clicked();
+        swallowed = clicked && second;
+        if clicked && !stale && !second {
             *sidebar_shown = !*sidebar_shown;
             ui.ctx().request_repaint();
         }
         draw_icon(&painter, toggle.center(), Icon::PanelLeft, ICON, palette.on_glass);
     }
     if clicked_now {
-        ui.ctx().data_mut(|data| data.insert_temp(after_back, clicked_back));
+        ui.ctx().data_mut(|data| data.insert_temp(after_back, clicked_back || swallowed));
     }
     let title = layout.title;
     let words = shown.back.unwrap_or(page.name());
