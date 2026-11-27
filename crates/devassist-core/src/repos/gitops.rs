@@ -1112,8 +1112,9 @@ impl MoveLeft {
 pub struct MoveFailed {
     /// What went wrong, as a clause.
     pub text: String,
-    /// It was a copy that was cancelled, and nothing of it is left at the
-    /// target.
+    /// The cancel stopped it: a copy stopped part way, or a move that did
+    /// not begin because the run was cancelled. What it left is in `left`
+    /// all the same.
     pub cancelled: bool,
     /// What the failed move left on the disk (boxed: a failure is passed
     /// around far more often than it has anything left).
@@ -1130,6 +1131,18 @@ impl MoveFailed {
             text.push_str(&left);
         }
         text
+    }
+}
+
+impl MoveFailed {
+    /// The move did not happen because the run was cancelled, and nothing
+    /// of it is left: said as "cancelled".
+    pub fn cancelled() -> Self {
+        MoveFailed {
+            text: "cancelled".into(),
+            cancelled: true,
+            left: Box::default(),
+        }
     }
 }
 
@@ -1192,10 +1205,11 @@ pub struct ForksFolderMoved {
 /// (Git worktrees of the collection, which name each other by their
 /// paths). None when the folder beside it is no forks collection
 /// (`forks_collection`): a folder that only has its name is left alone. An
-/// error, as a clause, when it cannot go: its configuration cannot be read
-/// (`cannot_read`), something is at the target already ("something is at
-/// D:\code\api-fork already"), the move failed, or it was cancelled
-/// ("cancelled"); the forks folder is then where it was, whole.
+/// error when it cannot go, whose `MoveFailed::says` is a clause: its
+/// configuration cannot be read (`cannot_read`), something is at the
+/// target already ("something is at D:\code\api-fork already"), the move
+/// failed, or it was cancelled ("cancelled", and `MoveFailed::cancelled`);
+/// the forks folder is then where it was, whole.
 ///
 /// Nothing else in a collection names a place the fetch of the forks
 /// reads: the checkout it was first filled from is read only when the
@@ -1205,27 +1219,27 @@ pub fn move_forks_folder(
     from_checkout: &Path,
     to_checkout: &Path,
     mut on_line: impl FnMut(&str, bool),
-) -> Result<Option<ForksFolderMoved>, String> {
+) -> Result<Option<ForksFolderMoved>, MoveFailed> {
     let from = match forks_collection(from_checkout) {
         ForksFolder::Collection(from) => from,
         ForksFolder::NotOne => return Ok(None),
-        ForksFolder::CannotTell(_, why) => return Err(cannot_read(&why)),
+        ForksFolder::CannotTell(_, why) => return Err(cannot_read(&why).into()),
     };
     let Some(to) = forks_folder(to_checkout) else {
         return Ok(None);
     };
     if stopped(&from) {
-        return Err("cancelled".into());
+        return Err(MoveFailed::cancelled());
     }
     if fs::symlink_metadata(&to).is_ok() {
-        return Err(format!("something is at {} already", to.display()));
+        return Err(format!("something is at {} already", to.display()).into());
     }
     let left = move_folder(&from, &to, &mut on_line).map_err(|failed| {
         // A cancelled copy whose partial copy was removed again.
-        if failed.cancelled {
-            "cancelled".to_string()
+        if failed.cancelled && failed.left.partial.is_none() {
+            MoveFailed::cancelled()
         } else {
-            failed.says()
+            failed
         }
     })?;
     on_line("Repairing the fork folders…", true);
@@ -1532,7 +1546,7 @@ fn copy_then_delete(
         }
         return Err(MoveFailed {
             text: format!("could not copy to {}: {err}", to.display()),
-            cancelled: matches!(err, CopyStop::Cancelled) && left.partial.is_none(),
+            cancelled: matches!(err, CopyStop::Cancelled),
             left: Box::new(left),
         });
     }
@@ -5343,7 +5357,7 @@ refs/remotes/fork/dev\tiii\t\t
             Ok(MoveLeft::default())
         );
         assert_eq!(
-            move_forks_folder(&old, &new, |_, _| {}),
+            move_forks_folder(&old, &new, |_, _| {}).map_err(|failed| failed.says()),
             Err(format!("something is at {} already", taken.display()))
         );
         assert_eq!(entries(&taken), ["mine"]);
@@ -5362,7 +5376,7 @@ refs/remotes/fork/dev\tiii\t\t
         seams::cancel_within(&new_forks);
         assert_eq!(
             move_forks_folder(&new, &other, |_, _| {}),
-            Err("cancelled".to_string())
+            Err(MoveFailed::cancelled())
         );
         assert_eq!(entries(&new_forks), before);
         assert!(!forks_folder(&other).unwrap().exists());
@@ -5380,7 +5394,7 @@ refs/remotes/fork/dev\tiii\t\t
         seams::cancel_within(&other_forks.join("bob"));
         assert_eq!(
             move_forks_folder(&other, &last, |_, _| {}),
-            Err("cancelled".to_string())
+            Err(MoveFailed::cancelled())
         );
         assert_eq!(entries(&other_forks), before);
         assert!(other_forks.join("bob").join("bobs").is_file());
@@ -5566,7 +5580,9 @@ refs/remotes/fork/dev\tiii\t\t
             assert!(!forks_cloned(&checkout(name)), "{name}");
             // A move leaves it where it is, whole, and says why.
             let to = root.join("moved").join(name);
-            let said = move_forks_folder(&checkout(name), &to, |_, _| {}).unwrap_err();
+            let said = move_forks_folder(&checkout(name), &to, |_, _| {})
+                .unwrap_err()
+                .says();
             assert_eq!(
                 said,
                 format!("its Git configuration could not be read ({why})")

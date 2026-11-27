@@ -651,6 +651,10 @@ pub enum Msg {
     /// A clone landed here, or a checkout that was already here was found.
     Cloned(PathBuf),
     JobFinished(Result<String, String>),
+    /// The running job did all it had to do, before its `JobFinished`: a
+    /// cancel that came after its last work does not make it end as
+    /// cancelled.
+    RanToTheEnd,
     /// The pull requests of the checkout at this path were just saved.
     PullsSaved(PathBuf),
     /// A checkout was moved to another folder.
@@ -785,6 +789,8 @@ pub struct Repos {
     /// The run is a push to another service: a cancel of it says what
     /// stays there.
     push_running: bool,
+    /// The running job said it did all it had to do (`Msg::RanToTheEnd`).
+    job_whole: bool,
     /// What the status line said before an automatic pull took it over.
     /// A pull that brings nothing puts it back.
     watch_status: Option<(String, bool)>,
@@ -950,6 +956,7 @@ impl Repos {
             job_stamp: 0,
             service_remotes: Vec::new(),
             push_running: false,
+            job_whole: false,
             watch_status: None,
             pulls: HashMap::new(),
             pulls_generation: 0,
@@ -2089,7 +2096,9 @@ impl Repos {
             let mut failed = Vec::new();
             // What was left on the disk that should not have been.
             let mut left: Vec<String> = Vec::new();
-            // A cancel stopped work that was still to do.
+            // The cancel itself stopped work that was still to do: a copy,
+            // or a forks folder that was to follow (`MoveFailed::cancelled`).
+            // An error of its own while a cancel is up does not count.
             let mut cut_short = false;
             for (index, (name, from)) in repos.iter().enumerate() {
                 if process::was_cancelled() {
@@ -2137,11 +2146,14 @@ impl Repos {
                             (_, Some(why)) => Err(why),
                             (_, None) => gitops::move_forks_folder(from, &to, |line, progress| {
                                 send_line(tx, line, progress)
+                            })
+                            .map_err(|failed| {
+                                cut_short |= failed.cancelled;
+                                failed.says()
                             }),
                         };
                         if forks.is_err() {
                             note = "moved, its forks folder stayed";
-                            cut_short |= process::was_cancelled();
                         }
                         for (words, stays) in forks_moved_words(name, from, &to, forks) {
                             send_line(tx, &words, false);
@@ -2152,20 +2164,19 @@ impl Repos {
                         send(tx, JobEvent::Done(index, note.into()));
                     }
                     Err(err) => {
-                        cut_short |= process::was_cancelled();
+                        cut_short |= err.cancelled;
                         left.extend(err.left.sentences());
                         failed.push(name.clone());
                         send(tx, JobEvent::Failed(index, err.says()));
                     }
                 }
             }
-            let ended = move_ended(cut_short, &named, &dir, (moved, stayed), &failed, &left);
             if !cut_short {
-                // Done: a cancel that came when nothing was still to do (while
-                // the last old folder was deleted) does not undo it.
-                process::clear_cancel();
+                // Nothing was still to do: a cancel that came while the last
+                // old folder was deleted does not make it end as cancelled.
+                let _ = tx.send(Msg::RanToTheEnd);
             }
-            ended
+            move_ended(cut_short, &named, &dir, (moved, stayed), &failed, &left)
         });
     }
 
@@ -4494,6 +4505,7 @@ impl Repos {
     {
         process::clear_cancel();
         self.busy = true;
+        self.job_whole = false;
         self.job_close_at = None;
         self.fork_watch = None;
         if let Some(job) = job {
@@ -4899,9 +4911,10 @@ impl Repos {
                     self.save_config();
                 }
             }
+            Msg::RanToTheEnd => self.job_whole = true,
             Msg::JobFinished(result) => {
                 self.busy = false;
-                let cancelled = result.is_err() && process::was_cancelled();
+                let cancelled = ended_cancelled(&result, process::was_cancelled(), self.job_whole);
                 if let Some(job) = self.job.as_mut().filter(|job| job.running()) {
                     job.finish(result.clone(), cancelled);
                     if self.mode == Mode::Progress && result.is_ok() {
@@ -5127,6 +5140,13 @@ fn forks_moved_words(
             true,
         )],
     }
+}
+
+/// Whether a run that ended with `result` ended as cancelled: it failed
+/// while a cancel was up (`cancel_up`), unless it said it did all it had to
+/// do (`whole`, `Msg::RanToTheEnd`) and the cancel came after its last work.
+fn ended_cancelled(result: &Result<String, String>, cancel_up: bool, whole: bool) -> bool {
+    result.is_err() && cancel_up && !whole
 }
 
 /// The error of a run that was cancelled with something `left` on the
@@ -7762,17 +7782,17 @@ mod tests {
             "The forks folder of api stayed at {}: cancelled.",
             from.display()
         );
+        // The cancel stopped the forks folder: the run ends as cancelled,
+        // and says what stays.
         assert_eq!(
-            app.status,
-            format!("Moved api to {}. {stayed}", there.display())
+            app.job.as_ref().unwrap().result,
+            Some(Err(cancelled_leaving(std::slice::from_ref(&stayed))))
         );
+        assert!(!app.job_whole);
+        assert!(first_lines(&app).contains(&stayed));
         assert!(from.join("bob").is_file() && !there.join("api-fork").exists());
         assert_eq!(
-            finished_words(
-                Err(cancelled_leaving(std::slice::from_ref(&stayed))),
-                true,
-                false
-            ),
+            said_with_a_cancel_up(&app),
             (format!("Cancelled. {stayed}"), true)
         );
     }
@@ -8899,35 +8919,98 @@ mod tests {
         );
     }
 
+    /// What the status line says of the run on screen had a cancel been
+    /// up as it ended: the core's tests never raise the process's cancel,
+    /// so its effect is fed through the same decision `Msg::JobFinished`
+    /// makes, with what the run itself said (`Msg::RanToTheEnd`).
+    fn said_with_a_cancel_up(app: &Repos) -> (String, bool) {
+        let result = app.job.as_ref().unwrap().result.clone().unwrap();
+        let cancelled = ended_cancelled(&result, true, app.job_whole);
+        finished_words(result, cancelled, false)
+    }
+
     #[test]
     fn a_cancel_after_the_last_work_leaves_the_move_finished() {
-        let dir = Path::new("/srv/new");
-        let old = "The old folder /srv/old/api could not be deleted: busy.".to_string();
-        let left = std::slice::from_ref(&old);
-        // Pressed while the last old folder was deleted: nothing was still
-        // to do, so the run says the finished move's own words, and the
-        // move clears the cancel, so the run does not end as cancelled.
-        let finished = move_ended(false, "api", dir, (1, 0), &[], left);
-        assert_eq!(finished, Err(format!("Moved api to /srv/new. {old}")));
-        assert_eq!(
-            finished_words(finished, false, false),
-            (format!("Moved api to /srv/new. {old}"), true)
+        let temp = Temp::new("move-late-cancel");
+        let root = temp.0.clone();
+
+        // The last checkout's forks folder is blocked for its own reason:
+        // a cancel pressed while its old folder is deleted stops nothing.
+        let case = root.join("blocked");
+        let (mut app, api) = api_with_forks(&case);
+        gitops::seams::as_if_another_drive(&api);
+        let there = case.join("there");
+        std::fs::create_dir_all(there.join("api-fork")).unwrap();
+        app.move_checkouts(vec![("api".into(), api)], there.clone());
+        finish(&mut app);
+        let words = format!(
+            "Moved api to {}. The forks folder of api stayed at {}: something is at {} already.",
+            there.display(),
+            case.join("here").join("api-fork").display(),
+            there.join("api-fork").display()
         );
+        assert!(app.job_whole, "the move did not say it ran to the end");
+        assert_eq!(said_with_a_cancel_up(&app), (words, true));
+
+        // The last checkout fails for its own reason: its place is taken.
+        let case = root.join("taken");
+        let mut app = Repos::empty(Settings {
+            config_path: case.join("devassist.toml"),
+            ..test_settings()
+        });
+        let api = far_checkout(&mut app, &case, "api");
+        let web = far_checkout(&mut app, &case, "web");
+        let there = case.join("there");
+        std::fs::create_dir_all(there.join("web")).unwrap();
+        let repos = vec![("api".into(), api), ("web".into(), web)];
+        app.move_checkouts(repos, there.clone());
+        finish(&mut app);
+        assert!(app.job_whole, "the move did not say it ran to the end");
+        assert_eq!(
+            said_with_a_cancel_up(&app),
+            ("Moved 1, 1 failed: web".into(), true)
+        );
+
+        // The cancel itself stopped the copy, and its partial copy stays:
+        // there was work still to do, so it stays "Cancelled.".
+        let case = root.join("stopped");
+        let mut app = Repos::empty(Settings {
+            config_path: case.join("devassist.toml"),
+            ..test_settings()
+        });
+        let web = far_checkout(&mut app, &case, "web");
+        gitops::seams::cancel_within(&web);
+        let there = case.join("there");
+        gitops::seams::refuse(&there.join("web"));
+        app.move_checkouts(vec![("web".into(), web)], there.clone());
+        finish(&mut app);
+        let partial = format!(
+            "The partial copy at {} could not be removed: refused by the test.",
+            there.join("web").display()
+        );
+        assert!(
+            !app.job_whole,
+            "a move the cancel stopped said it ran to the end"
+        );
+        assert_eq!(
+            said_with_a_cancel_up(&app),
+            (format!("Cancelled. {partial}"), true)
+        );
+
+        // The pure ends, for the record.
+        let dir = Path::new("/srv/new");
         assert_eq!(
             move_ended(false, "api", dir, (1, 0), &[], &[]),
             Ok("Moved api to /srv/new.".into())
         );
-        // A cancel that stopped work still to do stays "Cancelled.", with
-        // what was left.
-        let cut = move_ended(true, "api", dir, (1, 0), &[], left);
         assert_eq!(
-            finished_words(cut, true, false),
-            (format!("Cancelled. {old}"), true)
+            move_ended(true, "api", dir, (0, 0), &[], &[]),
+            Err("cancelled".into())
         );
-        assert_eq!(
-            finished_words(move_ended(true, "api", dir, (0, 0), &[], &[]), true, false),
-            ("Cancelled.".into(), false)
-        );
+        assert!(ended_cancelled(&Err("x".into()), true, false));
+        assert!(!ended_cancelled(&Err("x".into()), true, true));
+        assert!(!ended_cancelled(&Err("x".into()), false, false));
+        assert!(!ended_cancelled(&Ok("x".into()), true, false));
     }
 
     #[test]

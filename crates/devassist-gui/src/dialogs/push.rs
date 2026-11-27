@@ -289,33 +289,35 @@ enum Scroll {
 
 /// Takes this frame's keys that scroll the facts in a box `height` points tall, also their repeats while held: Up
 /// and Down a list row, Page Up and Page Down the box less a row, and, unless the address field has the keys
-/// (`in_field`, where they move the cursor), Home and End to the first and the last fact. Only presses without
-/// modifiers, as the other dialogs take keys (`take_press`): Shift with them is left to the field, which selects.
+/// (`in_field`, where they move the cursor), Home and End to the first and the last fact. In the field, Shift with
+/// Up, Down, Page Up or Page Down is left to it (it selects); every other press acts as egui matches it.
 fn scroll_keys(ui: &Ui, in_field: bool, height: f32) -> Option<Scroll> {
     let page = (height - LIST_ROW).max(LIST_ROW);
     let mut by = 0.0;
     for (key, step) in [(Key::ArrowDown, LIST_ROW), (Key::ArrowUp, -LIST_ROW), (Key::PageDown, page), (Key::PageUp, -page)] {
-        by += step * f32::from(u16::try_from(take_presses(ui, key)).unwrap_or(u16::MAX));
+        by += step * f32::from(u16::try_from(take_presses(ui, key, in_field)).unwrap_or(u16::MAX));
     }
     let mut scroll = (by != 0.0).then_some(Scroll::By(by));
     if !in_field {
-        if take_presses(ui, Key::Home) > 0 {
+        if ui.input_mut(|input| input.count_and_consume_key(egui::Modifiers::NONE, Key::Home)) > 0 {
             scroll = Some(Scroll::Top);
         }
-        if take_presses(ui, Key::End) > 0 {
+        if ui.input_mut(|input| input.count_and_consume_key(egui::Modifiers::NONE, Key::End)) > 0 {
             scroll = Some(Scroll::End);
         }
     }
     scroll
 }
 
-/// Takes every press of `key` without modifiers from this frame's input, also its repeats while it is held, and
-/// says how many there were. A press with a modifier stays for whoever wants it.
-fn take_presses(ui: &Ui, key: Key) -> usize {
+/// Takes every press of `key` egui matches without modifiers (`count_and_consume_key`: Shift and Alt pass), also
+/// its repeats while it is held, and says how many there were; with `leave_shift`, a press with Shift stays.
+fn take_presses(ui: &Ui, key: Key, leave_shift: bool) -> usize {
     ui.input_mut(|input| {
         let mut presses = 0;
         input.events.retain(|event| match event {
-            egui::Event::Key { key: pressed_key, pressed: true, modifiers, .. } if *pressed_key == key && modifiers.is_none() => {
+            egui::Event::Key { key: pressed_key, pressed: true, modifiers, .. }
+                if *pressed_key == key && modifiers.matches_logically(egui::Modifiers::NONE) && !(leave_shift && modifiers.shift) =>
+            {
                 presses += 1;
                 false
             }
@@ -774,6 +776,25 @@ mod tests {
             tap(&mut window, code, None);
             assert!((window.dialogs.list_scroll - scrolled).abs() > 1e-3, "{code:?} without Shift did not scroll");
         }
+        // Everything else acts as before. Alt with Down scrolls, from the field.
+        let mut window = push_dialog(MIN_WINDOW);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(field_id()));
+        window.frame(vec![key(Key::ArrowDown, true, false, Modifiers::ALT)]);
+        window.frame(vec![key(Key::ArrowDown, false, false, Modifiers::ALT)]);
+        assert!(window.dialogs.list_scroll > 0.0, "Alt with Down did not scroll");
+        // Without the keyboard in the field, Shift with End goes to the last fact, and Shift with Down scrolls.
+        let facts = state(&window).facts.clone();
+        let mut window = push_dialog(MIN_WINDOW);
+        window.key(Key::Tab);
+        assert_eq!(window.ctx.memory(Memory::focused), Some(cancel_id()));
+        window.frame(vec![key(Key::End, true, false, Modifiers::SHIFT)]);
+        window.frame(vec![key(Key::End, false, false, Modifiers::SHIFT)]);
+        assert!(fact_in_view(&window, &facts[6].words), "Shift with End did not bring the last fact into view");
+        let mut window = push_dialog(MIN_WINDOW);
+        window.key(Key::Tab);
+        window.frame(vec![key(Key::ArrowDown, true, false, Modifiers::SHIFT)]);
+        window.frame(vec![key(Key::ArrowDown, false, false, Modifiers::SHIFT)]);
+        assert!(window.dialogs.list_scroll > 0.0, "Shift with Down on a button did not scroll");
     }
 
     #[test]
