@@ -772,6 +772,11 @@ pub struct Repos {
     /// Where a token for GitHub comes from: `github::token`, or a test's own
     /// (`testing::token_source`). Never asked while GitHub is held.
     token_source: fn() -> Option<String>,
+    /// A fetch of forks takes these accounts and addresses (the
+    /// original's among them) in place of GitHub's list of forks, and
+    /// asks for no token: set only by `testing::local_forks`, for tests
+    /// whose forks are folders on this disk. None otherwise.
+    local_forks: Option<Vec<(String, String)>>,
     /// The remotes of the checkout the service dialog is open for, with
     /// their addresses: read once when it opens.
     service_remotes: Vec<(String, String)>,
@@ -939,6 +944,7 @@ impl Repos {
             work_held: false,
             github_held: false,
             token_source: github::token,
+            local_forks: None,
             service_remotes: Vec::new(),
             push_running: false,
             watch_status: None,
@@ -3552,8 +3558,13 @@ impl Repos {
         };
         let job = gitprogress::job(format!("{verb} the forks of {named}"), names, 0);
         let label = format!("{verb} the forks of {named}…");
+        let local = self.local_forks.clone();
         self.start_fork_job(label, job, move |tx| {
-            let token = github::token();
+            let token = if local.is_some() {
+                None
+            } else {
+                github::token()
+            };
             let mut fetched = 0;
             let mut kept = 0;
             let mut gone = 0;
@@ -3565,7 +3576,14 @@ impl Repos {
                     return Err("cancelled".into());
                 }
                 send(tx, JobEvent::Start(index));
-                match forks_of(tx, &work.path, &work.original, &work.origin, &token) {
+                match forks_of(
+                    tx,
+                    &work.path,
+                    &work.original,
+                    &work.origin,
+                    &token,
+                    local.as_deref(),
+                ) {
                     Ok(None) => send(tx, JobEvent::Done(index, "no forks".into())),
                     Ok(Some((dest, saved))) => {
                         fetched += saved.fetched;
@@ -5109,38 +5127,60 @@ fn forks_of(
     original: &(String, String),
     origin: &str,
     token: &Option<String>,
+    local: Option<&[(String, String)]>,
 ) -> Result<Option<(PathBuf, gitops::ForksSaved)>, String> {
     let (owner, name) = original;
     if owner.is_empty() || name.is_empty() {
         return Err("is not a repository on GitHub".into());
     }
     let dest = gitops::forks_folder(path).ok_or("has no folder name")?;
-    send_line(
-        tx,
-        &format!("Asking GitHub for the forks of {owner}/{name}."),
-        false,
-    );
-    let listed = github::fetch_forks(owner, name, token.as_deref(), |line, progress| {
-        send_line(tx, line, progress)
-    })?;
-    if let Some(warning) = &listed.warning {
-        send_line(tx, &format!("The list is not complete: {warning}."), false);
-    }
-    if listed.forks.is_empty() {
+    let forks: Vec<gitops::ForkSource> = match local {
+        // A test's own forks, folders on this disk: GitHub is not asked.
+        Some(local) => local
+            .iter()
+            .filter(|(account, _)| account != owner)
+            .map(|(account, _)| gitops::ForkSource {
+                owner: account.clone(),
+                name: name.clone(),
+                stamp: String::new(),
+            })
+            .collect(),
+        None => {
+            send_line(
+                tx,
+                &format!("Asking GitHub for the forks of {owner}/{name}."),
+                false,
+            );
+            let listed = github::fetch_forks(owner, name, token.as_deref(), |line, progress| {
+                send_line(tx, line, progress)
+            })?;
+            if let Some(warning) = &listed.warning {
+                send_line(tx, &format!("The list is not complete: {warning}."), false);
+            }
+            listed
+                .forks
+                .into_iter()
+                .map(|fork| gitops::ForkSource {
+                    owner: fork.owner,
+                    name: fork.name,
+                    stamp: fork.stamp,
+                })
+                .collect()
+        }
+    };
+    if forks.is_empty() {
         send_line(tx, "It has no forks.", false);
         return Ok(None);
     }
-    send_line(tx, &forklines::total(listed.forks.len(), &dest), false);
-    let forks: Vec<gitops::ForkSource> = listed
-        .forks
-        .into_iter()
-        .map(|fork| gitops::ForkSource {
-            owner: fork.owner,
-            name: fork.name,
-            stamp: fork.stamp,
-        })
-        .collect();
-    let url_of = |owner: &str, name: &str| gitops::fork_url(origin, owner, name);
+    send_line(tx, &forklines::total(forks.len(), &dest), false);
+    let url_of = |owner: &str, name: &str| {
+        local
+            .and_then(|local| local.iter().find(|(account, _)| account == owner))
+            .map_or_else(
+                || gitops::fork_url(origin, owner, name),
+                |(_, url)| url.clone(),
+            )
+    };
     let saved = gitops::save_forks(
         path,
         &dest,
@@ -5415,6 +5455,19 @@ pub mod testing {
         view.take(list);
         repos.forks = Some(view);
         repos.mode = Mode::List;
+    }
+
+    /// Makes a fetch of forks in `repos` take `remotes` (account, and the
+    /// folder of its repository on this disk; the original's account among
+    /// them) in place of GitHub's list of forks, without a token: for the
+    /// tests that fetch forks for real from local repositories.
+    pub fn local_forks(repos: &mut Repos, remotes: &[(&str, &Path)]) {
+        repos.local_forks = Some(
+            remotes
+                .iter()
+                .map(|(account, folder)| ((*account).to_string(), folder.display().to_string()))
+                .collect(),
+        );
     }
 
     /// Makes `source` where `repos` gets a token for GitHub from, in place
@@ -5973,7 +6026,7 @@ mod tests {
         let token = github::token();
         gitops::clone_repo(&origin, &path, token.as_deref(), |_, _| {}).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let (dest, saved) = forks_of(&tx, &path, &original, &origin, &token)
+        let (dest, saved) = forks_of(&tx, &path, &original, &origin, &token, None)
             .unwrap()
             .expect("it has forks");
         drop(tx);
@@ -5994,7 +6047,7 @@ mod tests {
         assert_eq!(folders, saved.folders as usize + 1);
         // Again at once: no fork has changed, so none is fetched.
         let (tx, _rx) = std::sync::mpsc::channel();
-        let (_, again) = forks_of(&tx, &path, &original, &origin, &token)
+        let (_, again) = forks_of(&tx, &path, &original, &origin, &token, None)
             .unwrap()
             .expect("it has forks");
         println!("{again:?}");
@@ -8331,6 +8384,57 @@ mod tests {
         app.show_job();
         assert!(app.mode == Mode::Progress);
         assert_eq!(app.fork_progress(), fork_fetch(0, 38, None));
+    }
+
+    #[test]
+    fn a_tests_own_forks_are_fetched_without_asking_github() {
+        let root = scratch("local-forks");
+        let commit = |dir: &Path, name: &str| {
+            std::fs::write(dir.join(name), name).unwrap();
+            git(dir, &["add", name]);
+            git(dir, &["commit", "-q", "-m", name]);
+        };
+        let ada = root.join("ada");
+        std::fs::create_dir_all(&ada).unwrap();
+        git(&ada, &["init", "-q", "-b", "main"]);
+        commit(&ada, "one");
+        git(&root, &["clone", "-q", ada.to_str().unwrap(), "bob"]);
+        let bob = root.join("bob");
+        commit(&bob, "bobs");
+        git(&root, &["clone", "-q", ada.to_str().unwrap(), "api"]);
+        let api = root.join("api");
+        let mut app = Repos::empty(test_settings());
+        let mut repo = installed("ada", "api");
+        repo.path = api.clone();
+        app.checkouts.push(api.clone());
+        app.installed.push(repo);
+        // Without them a fetch of forks asks GitHub for the list.
+        testing::local_forks(&mut app, &[("ada", &ada), ("bob", &bob)]);
+        testing::token_source(&mut app, || panic!("a token was asked for"));
+
+        app.clone_forks(&["api".to_string()]);
+        let until = Instant::now() + Duration::from_secs(60);
+        while app.busy {
+            assert!(Instant::now() < until, "the fetch did not finish");
+            app.drain();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let job = app.job.as_ref().unwrap();
+        let output = &job.items[0].output;
+        assert!(
+            matches!(job.result, Some(Ok(_))),
+            "{:?} {output:?}",
+            job.result
+        );
+        let dest = root.join("api-fork");
+        assert!(output.contains(&forklines::total(1, &dest)), "{output:?}");
+        assert!(
+            !output.iter().any(|line| line.contains("GitHub")),
+            "{output:?}"
+        );
+        assert!(gitops::forks_cloned(&api));
+        assert!(dest.join("bob").join("bobs").exists(), "{output:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

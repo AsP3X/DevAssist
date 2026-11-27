@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use devassist_core::config::Settings;
+use devassist_core::repos::forklines;
 use devassist_core::repos::forks::ForkState;
 use devassist_core::repos::github::{PullCounts, RemoteRepo};
 use devassist_core::repos::gitops::{self, ForkInfo, ForkList, LocalRepo, PendingPulls};
@@ -228,7 +229,7 @@ fn forks() -> ForkList {
 
 /// The overlays `--show` can open in a demo, by name, each with what sets it up in the demo's repositories.
 /// Another overlay is one more line here.
-pub const SHOWS: [(&str, Opener); 11] = [
+pub const SHOWS: [(&str, Opener); 12] = [
     ("progress", show_progress),
     ("remove", show_remove),
     ("group", show_group),
@@ -240,10 +241,54 @@ pub const SHOWS: [(&str, Opener); 11] = [
     ("move", show_move),
     ("push", show_push),
     (FORKS_SCREEN, show_forks),
+    (FORKS_FETCHING, show_forks_fetching),
 ];
 
 /// The name `--show` opens the forks of api by: a screen of the Repositories page, not an overlay.
 pub const FORKS_SCREEN: &str = "forks";
+
+/// The name `--show` opens the forks of api by with the drawing's fetch of them running in the progress dialog.
+pub const FORKS_FETCHING: &str = "forks-fetching";
+/// How many forks the drawing's fetch has to fetch. (The demo's forks screen keeps its thirteen.)
+const FETCH_TOTAL: usize = 38;
+/// How many of them it has fetched.
+const FETCH_DONE: usize = 24;
+/// Why the drawing's fetch pauses, without its full stop.
+const FETCH_PAUSE_WHY: &str = "The fetch timed out";
+/// How long it pauses, in seconds.
+const FETCH_PAUSE: u64 = 30;
+/// How much of the pause is left, in seconds.
+const FETCH_LEFT: u64 = 12;
+/// The drawing's fork that is gone from GitHub: one of the demo's forks.
+const FETCH_GONE: &str = "old-contrib";
+
+/// The lines the drawing's fetch of the forks of api into `into` has said so far, each with whether it is a progress
+/// line, as the core's fetch says them: the fork lines in the core's own writers, the others in its words. (The
+/// progress lines stand in the dialog's count and its pause, not among the output's lines.)
+fn fetch_lines(into: &std::path::Path) -> Vec<(String, bool)> {
+    let original = format!("{OWNER}/{FORKS_OF}");
+    vec![
+        (format!("Asking GitHub for the forks of {original}."), false),
+        (format!("Listing forks: {FETCH_TOTAL}"), true),
+        (forklines::total(FETCH_TOTAL, into), false),
+        (format!("Fetching {original}, the original."), false),
+        (format!("{FETCH_GONE}/{FORKS_OF} is no longer on GitHub. What was fetched from it stays."), false),
+        (forklines::fetching(FETCH_DONE, FETCH_TOTAL), true),
+        (forklines::paused(FETCH_PAUSE_WHY, FETCH_PAUSE), false),
+        (forklines::countdown(FETCH_LEFT), true),
+    ]
+}
+
+/// The forks of api as [`show_forks`] opens them, with the drawing's fetch of them held in the progress dialog (the
+/// core's `hold_fork_job`): 24 of 38 fetched into api's forks folder, paused after a timeout with 0:12 left. Nothing
+/// runs it; its pause stands still.
+fn show_forks_fetching(repos: &mut Repos) {
+    show_forks(repos);
+    let into = repos.forks.as_ref().map_or_default(|view| view.dest.clone());
+    let lines = fetch_lines(&into);
+    let said: Vec<(&str, bool)> = lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect();
+    repos.hold_fork_job(FORKS_OF, &said);
+}
 
 /// The forks of api as the drawing has them, opened through the core (`open_forks_plain`) from api highlighted
 /// alone (the ticks are cleared: the core shows the forks of one repository), bob highlighted.
@@ -471,8 +516,48 @@ mod tests {
         assert!(repos.mode == Mode::Progress && !repos.waiting());
         assert_eq!(
             show(&mut repos, "nothing").unwrap_err(),
-            "--show knows progress, remove, group, menu, migrate, add, add-folder, import, move, push, forks, not nothing"
+            "--show knows progress, remove, group, menu, migrate, add, add-folder, import, move, push, forks, forks-fetching, not nothing"
         );
+    }
+
+    #[test]
+    fn the_demos_fetch_of_forks_is_the_drawings_and_stands_still() {
+        let _live = crate::session::tests::live_git();
+        let before = reached_now();
+        let reads = devassist_core::sys::disk_reads_here();
+        let mut repos = repos();
+        show(&mut repos, FORKS_FETCHING).unwrap();
+        // The forks screen under the progress dialog of a held fetch, into api's forks folder.
+        assert!(repos.mode == Mode::Progress);
+        let dest = repos.forks.as_ref().expect("the forks of api are open").dest.clone();
+        assert_eq!(repos.forks.as_ref().unwrap().forks.len(), 13, "the demo's forks screen keeps its thirteen");
+        assert_eq!(repos.fork_job_into(), Some(dest.clone()));
+        let paused = Some("The fetch timed out. Paused, going on in 0:12.".to_owned());
+        let progress = repos.fork_progress().expect("no count");
+        assert_eq!((progress.done, progress.total, progress.at_a_time, progress.pause.clone()), (24, 38, 8, paused.clone()));
+        let job = repos.job.as_ref().unwrap();
+        assert!(job.running() && !repos.busy && !repos.waiting() && repos.work_held());
+        assert_eq!(job.title, "Updating the forks of api");
+        // The drawing's five lines of output, in the core's words.
+        assert_eq!(
+            job.items[0].output.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "Asking GitHub for the forks of acme/api.",
+                format!("38 forks, into {}", dest.display()).as_str(),
+                "Fetching acme/api, the original.",
+                "old-contrib/api is no longer on GitHub. What was fetched from it stays.",
+                "The fetch timed out. Paused for 0:30.",
+            ]
+        );
+        // Held, it never moves: the same picture every time.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        for _ in 0..3 {
+            repos.drain();
+        }
+        assert_eq!(repos.fork_progress().and_then(|progress| progress.pause), paused);
+        assert!(repos.mode == Mode::Progress && repos.job.as_ref().is_some_and(devassist_core::task::job::Job::running));
+        assert_eq!(devassist_core::sys::disk_reads_here(), reads, "the demo read the disk");
+        assert_eq!(reached_now(), before, "the fetch reached a program, the clipboard, the network or the disk");
     }
 
     #[test]
@@ -680,7 +765,7 @@ mod tests {
     /// What the status line may say after a press.
     #[derive(Clone, Copy, Debug)]
     enum Says<'a> {
-        /// The demo's own line, or that the held core refused what was asked (`HELD`).
+        /// The demo's own line, or that the held core refused what was asked (`HELD`), or that its held run runs.
         HeldOrNothing,
         /// That too, or this refusal of the core's in its own words: a press meant to be refused.
         OrRefused(&'a str),
@@ -690,7 +775,9 @@ mod tests {
     /// only where the press is meant to be refused, and then in the core's exact words, and never an error otherwise.
     fn check_said(window: &Window, what: &str, says: Says<'_>) {
         let repos = window.repos();
-        let quiet = (repos.status == STATUS || repos.status == devassist_core::repos::state::HELD) && !repos.status_error;
+        // A held fetch of forks (`--show forks-fetching`) says it runs, as the core says a run it starts.
+        let running = repos.job.as_ref().is_some_and(|job| job.running() && repos.status == format!("{}…", job.title));
+        let quiet = (repos.status == STATUS || repos.status == devassist_core::repos::state::HELD || running) && !repos.status_error;
         let refused = matches!(says, Says::OrRefused(words) if repos.status == words && repos.status_error);
         assert!(quiet || refused, "{what}: the status line says {:?} (an error: {}), allowed {says:?}", repos.status, repos.status_error);
     }
@@ -832,7 +919,7 @@ mod tests {
     /// the Add dialog's folder field its rows; each dialog its own kind.
     fn shows_what_it_claims(window: &Window, name: &str) {
         let dialog = match name {
-            "progress" => Which::Progress,
+            "progress" | FORKS_FETCHING => Which::Progress,
             "remove" => Which::Remove,
             "group" => Which::Group,
             "menu" | "migrate" => Which::Menu,

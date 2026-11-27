@@ -51,6 +51,15 @@ pub(crate) fn session_with(job: Job) -> Session {
     session
 }
 
+/// The demo's repositories with a held fetch of the forks of api that has said `lines` (each with whether it is a
+/// progress line), its dialog open: as the core's `testing::fork_job` gives it.
+pub(crate) fn fetch_session(lines: &[(String, bool)]) -> Session {
+    let mut session = Session::demo(crate::demo::repos());
+    let said: Vec<(&str, bool)> = lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect();
+    devassist_core::repos::state::testing::fork_job(session.repos_mut().unwrap(), "api", &said);
+    session
+}
+
 fn sheet() -> Sheet {
     Sheet { texture: TextureId::User(0), uv: Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), edge: Stroke::NONE }
 }

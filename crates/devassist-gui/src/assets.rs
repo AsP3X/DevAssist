@@ -138,6 +138,7 @@ icons! {
     CloudUpload => 0xe091, "cloud-upload",
     ArrowLeft => 0xe048, "arrow-left",
     CloudOff => 0xe08d, "cloud-off",
+    Pause => 0xe12e, "pause",
 }
 
 /// The JPEG bytes of the backdrop picture for `key`, one of `devassist_core::config::BACKDROPS`.
@@ -244,8 +245,10 @@ mod tests {
         assert!(!codes.contains(&char::REPLACEMENT_CHARACTER), "an icon has no valid code point");
         // The README lists 16 icons beyond the 14 the sidebar and bar already had, the group dialog's, and the
         // row menu's five, the folder field's, the top row's two, the Move dialog's arrow and drive, and the Push dialog's
-        // link, the Migrate line's truck and its side menu's two, and the forks screen's back button and gone state.
-        assert_eq!(Icon::ALL.len(), 47);
+        // link, the Migrate line's truck and its side menu's two, the forks screen's back button and gone state, and
+        // the fetch dialog's pause.
+        assert_eq!(Icon::ALL.len(), 48);
+        assert_eq!(Icon::Pause.name(), "pause");
         assert_eq!((Icon::Truck.name(), Icon::FolderOutput.name(), Icon::CloudUpload.name()), ("truck", "folder-output", "cloud-upload"));
         assert_eq!(Icon::X.name(), "x");
         assert_eq!(Icon::FolderGit2.name(), "folder-git-2");

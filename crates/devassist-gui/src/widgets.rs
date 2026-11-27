@@ -75,7 +75,13 @@ pub fn box_rect(rect: Rect) -> Rect {
 /// even the "…" fits.
 #[must_use]
 pub fn ellipsis(text: &str, font: &FontId, room: f32, ui: &Ui) -> String {
-    let fits = |candidate: &str| width(ui.painter(), candidate, font) <= room;
+    ellipsis_in(ui.painter(), text, font, room)
+}
+
+/// [`ellipsis`], measured with `painter`'s faces: for a plan made before anything is drawn.
+#[must_use]
+pub fn ellipsis_in(painter: &Painter, text: &str, font: &FontId, room: f32) -> String {
+    let fits = |candidate: &str| width(painter, candidate, font) <= room;
     if fits(text) {
         return text.to_owned();
     }
@@ -529,7 +535,13 @@ fn taken_text(folder: &str) -> String {
 /// even the "…" fits.
 #[must_use]
 pub(crate) fn path_tail(path: &str, font: &FontId, room: f32, ui: &Ui) -> String {
-    let fits = |candidate: &str| width(ui.painter(), candidate, font) <= room;
+    path_tail_in(ui.painter(), path, font, room)
+}
+
+/// [`path_tail`], measured with `painter`'s faces: for a plan made before anything is drawn.
+#[must_use]
+pub(crate) fn path_tail_in(painter: &Painter, path: &str, font: &FontId, room: f32) -> String {
+    let fits = |candidate: &str| width(painter, candidate, font) <= room;
     if fits(path) {
         return path.to_owned();
     }

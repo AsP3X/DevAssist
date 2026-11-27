@@ -386,6 +386,17 @@ pub const OUTPUT_LINE: f32 = 14.0;
 pub const OUTPUT_ROWS: usize = 7;
 /// The size of the output's text (`mono`'s `fontSize: 12`).
 pub const OUTPUT_TEXT: f32 = 12.0;
+/// The width of the progress dialog while it counts a fetch of forks (`dialog("Fetch the forks", 640, …)`).
+pub const FETCH_WIDTH: f32 = 640.0;
+/// The room inside the count of a fetch of forks at every side (`Count`'s `padding: 12`).
+pub const COUNT_PAD: f32 = 12.0;
+/// The gap between the count's words, its bar and its pause (`Count`'s `gap: 12`).
+pub const COUNT_GAP: f32 = 12.0;
+/// The gap between the pause's icon and its words (`Pause`'s `gap: 8`).
+pub const PAUSE_ICON_GAP: f32 = 8.0;
+/// How many lines the line under a fetch's title takes at most: its folder is cut from the left before it takes more
+/// (the drawing's takes two).
+pub const INTO_LINES: usize = 2;
 /// The width of the remove dialog (`dialog("Remove", 480, …)`), and of the group dialog, which the design does not
 /// draw and which is built to the remove dialog's pattern.
 pub const DIALOG_WIDTH: f32 = 480.0;
@@ -991,6 +1002,10 @@ mod tests {
             ("OUTPUT_GAP", OUTPUT_GAP, 8.0),
             ("OUTPUT_LINE", OUTPUT_LINE, 14.0),
             ("OUTPUT_TEXT", OUTPUT_TEXT, 12.0),
+            ("FETCH_WIDTH", FETCH_WIDTH, 640.0),
+            ("COUNT_PAD", COUNT_PAD, 12.0),
+            ("COUNT_GAP", COUNT_GAP, 12.0),
+            ("PAUSE_ICON_GAP", PAUSE_ICON_GAP, 8.0),
             ("DIALOG_WIDTH", DIALOG_WIDTH, 480.0),
             ("LIST_ROW", LIST_ROW, 36.0),
             ("LIST_GAP", LIST_GAP, 8.0),
@@ -1000,6 +1015,7 @@ mod tests {
             ("FOLDER_ROW", FOLDER_ROW, 32.0),
         ];
         assert_eq!(FOLDER_ROWS, 6);
+        assert_eq!(INTO_LINES, 2);
         assert_eq!(LIST_PAD, [4.0, 12.0]);
         for (constant, got, expected) in want {
             assert!((got - expected).abs() < f32::EPSILON, "{constant} is {got}, the design has {expected}");

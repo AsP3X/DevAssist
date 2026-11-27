@@ -110,6 +110,9 @@ pub struct Dialogs {
     shown: Option<usize>,
     /// The wheel turned over the output that does not come to a whole line yet, in points.
     wheel: f32,
+    /// The fetch of forks the progress dialog counted last: a run that has ended keeps its last count while the dialog
+    /// shows it.
+    fetch: Option<progress::Fetch>,
     /// How far the remove dialog's paths, the group dialog's groups or the Move dialog's rows are moved up, in points.
     list_scroll: f32,
     /// The group the group dialog's list showed picked last, so the list follows Up and Down.
@@ -385,7 +388,7 @@ impl Plan {
 pub fn plan(painter: &Painter, window: Rect, repos: Option<&Repos>, anchor: Option<Rect>, dialogs: &Dialogs) -> Option<Plan> {
     let repos = repos?;
     match which(repos)? {
-        Which::Progress => progress::plan(painter, window, repos),
+        Which::Progress => progress::plan(painter, window, repos, dialogs.fetch.as_ref()),
         Which::Remove => Some(remove::plan(painter, window, repos)),
         Which::Group => group::plan(painter, window, repos),
         Which::Add => dialogs.add.as_ref().map(|state| add::plan(painter, window, repos, state)),

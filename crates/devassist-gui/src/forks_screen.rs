@@ -2123,6 +2123,116 @@ mod tests {
         assert!(win.drew(&widgets::capitalised(detail.trim())), "no hover text with the whole error");
     }
 
+    /// Whether the progress dialog is open over the screen.
+    fn dialog_open(win: &Win) -> bool {
+        dialogs::which(win.repos()) == Some(dialogs::Which::Progress) && overlay::is_open(&win.ctx)
+    }
+
+    #[test]
+    fn hide_returns_to_the_forks_and_l_shows_the_run_again() {
+        use devassist_core::repos::forklines;
+        let mut win = Win::demo();
+        let into = view(win.repos()).dest.clone();
+        let lines = [forklines::total(38, &into), forklines::fetching(24, 38)];
+        testing::fork_job(win.repos_mut(), "api", &[(lines[0].as_str(), false), (lines[1].as_str(), true)]);
+        win.frame(Vec::new());
+        win.frame(Vec::new());
+        assert!(dialog_open(&win), "the fetch's dialog did not open over the forks");
+        assert!(win.drew("24 of 38 forks, 8 at a time"));
+        let (chosen, stamp) = (win.chosen(), win.repos().status_stamp());
+        // Enter presses Hide, which has the focus; the forks under it open nothing.
+        win.key(Key::Enter, None);
+        win.frame(Vec::new());
+        assert!(!dialog_open(&win) && win.repos().job.as_ref().is_some_and(devassist_core::task::job::Job::running), "Hide did not hide it");
+        assert!(win.repos().forks.is_some(), "the forks went with the dialog");
+        assert_eq!((win.chosen(), win.repos().status_stamp()), (chosen, stamp), "the Enter that hid the dialog acted on the forks");
+        // `l` on the forks shows the run again, with its count.
+        win.letter('l');
+        win.frame(Vec::new());
+        assert!(dialog_open(&win), "l did not show the run again");
+        assert!(win.drew("24 of 38 forks, 8 at a time"));
+        // Esc hides it again, and goes no further: the forks stay.
+        win.key(Key::Escape, None);
+        win.frame(Vec::new());
+        assert!(!dialog_open(&win) && win.repos().forks.is_some());
+    }
+
+    #[test]
+    fn the_forks_are_read_again_when_the_fetch_ends() {
+        use crate::dialogs::testing::{Temp, git};
+        use devassist_core::config::Settings;
+        let _live = crate::session::tests::live_git();
+        let root = Temp(std::env::temp_dir().join(format!("devassist-gui-forks-fetch-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&root.0);
+        std::fs::create_dir_all(&root.0).unwrap();
+        let commit = |dir: &std::path::Path, name: &str| {
+            std::fs::write(dir.join(name), name).unwrap();
+            git(dir, &["add", name]);
+            git(dir, &["commit", "-q", "-m", name]);
+        };
+        // The original "on GitHub", two forks with commits of their own, and the checkout of the original.
+        let ada = root.0.join("ada");
+        std::fs::create_dir_all(&ada).unwrap();
+        git(&ada, &["init", "-q", "-b", "main"]);
+        commit(&ada, "one");
+        for fork in ["bob", "eve"] {
+            git(&root.0, &["clone", "-q", ada.to_str().unwrap(), fork]);
+            commit(&root.0.join(fork), &format!("{fork}s"));
+        }
+        git(&root.0, &["clone", "-q", ada.to_str().unwrap(), "api"]);
+        let api = root.0.join("api");
+        // Its origin names GitHub, for the core to know the original; git is sent to the folder instead.
+        let github = "https://github.com/ada/api.git";
+        git(&api, &["remote", "set-url", "origin", github]);
+        git(&api, &["config", &format!("url.{}.insteadOf", ada.display().to_string().replace('\\', "/")), github]);
+        // The collection as an earlier fetch left it: bob alone.
+        let original = ("ada".to_owned(), "api".to_owned());
+        let source =
+            |owner: &str| devassist_core::repos::gitops::ForkSource { owner: owner.to_owned(), name: "api".to_owned(), stamp: String::new() };
+        let url_of = |owner: &str, _: &str| root.0.join(owner).display().to_string();
+        let dest = root.0.join("api-fork");
+        // A window another test closed asked its git to stop: that ask is not this test's (the core's runs clear it too).
+        devassist_core::sys::process::clear_cancel();
+        devassist_core::repos::gitops::save_forks(&api, &dest, &original, &[source("bob")], &url_of, None, |_, _| {}).unwrap();
+
+        let settings = Settings {
+            owners_explicit: true,
+            update_check: false,
+            update_check_now: false,
+            ..Settings::for_folder(vec![api.clone()], root.0.join("devassist.toml"))
+        };
+        let mut repos = Repos::new(settings);
+        testing::hold_github(&mut repos);
+        testing::local_forks(&mut repos, &[("ada", &ada), ("bob", &root.0.join("bob")), ("eve", &root.0.join("eve"))]);
+        let mut win = Win::new(Session::Live(Box::new(repos)));
+        let wait = |win: &mut Win, what: &str, done: &dyn Fn(&Win) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+            while !done(win) {
+                assert!(std::time::Instant::now() < deadline, "still not {what}");
+                win.session.tick();
+                win.frame(Vec::new());
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait(&mut win, "read", &|win| !win.repos().waiting() && win.repos().installed.len() == 1);
+        win.repos_mut().pick("api");
+        win.repos_mut().open_forks_plain();
+        wait(&mut win, "the forks read", &|win| win.repos().forks.as_ref().is_some_and(|view| !view.loading));
+        let owners = |win: &Win| win.plan().rows.iter().map(|row| row.owner.clone()).collect::<Vec<_>>();
+        assert_eq!(owners(&win), ["bob"]);
+
+        // Fetch the forks: the dialog counts them, and the rows are read again when the run ends.
+        win.press(FETCH_THE_FORKS);
+        wait(&mut win, "ended", &|win| win.repos().job.as_ref().is_some_and(|job| !job.running()) && !win.repos().busy);
+        let job = win.repos().job.as_ref().unwrap();
+        assert!(matches!(job.result, Some(Ok(_))), "{:?} {:?}", job.result, job.items[0].output);
+        wait(&mut win, "read again", &|win| win.plan.as_ref().is_some_and(|plan| plan.rows.len() == 2));
+        let mut after = owners(&win);
+        after.sort();
+        assert_eq!(after, ["bob", "eve"], "the rows did not change after the fetch");
+        win.session.close();
+    }
+
     #[test]
     fn the_filter_does_not_take_the_tables_filter_or_stay_behind() {
         let mut win = Win::demo();

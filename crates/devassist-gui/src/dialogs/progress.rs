@@ -2,21 +2,123 @@
 //! summary, its tasks with their bars, the picked task's output, and its buttons. Esc hides it while the run goes
 //! on and closes it once it has ended; a click on the scrim does nothing while the run goes on and closes it once
 //! it has ended. The core closes a run that went well by itself, a moment after its end.
+//!
+//! While the run is a fetch of forks whose task has said how many there are (`Repos::fork_progress`), the dialog is
+//! [`FETCH_WIDTH`] wide and counts them above its output, as drawn: "24 of 38 forks, 8 at a time", one bar, and
+//! under it, while the fetch pauses, a pause icon with the core's sentence. The line under its title says where they
+//! go (`Repos::fork_job_into`), its folder cut from the left when it would take more than [`INTO_LINES`] lines. A
+//! fetch of one repository's forks shows no task list (the count stands in its place); a run of several keeps it,
+//! above the count of the one fetched now. A run that has ended keeps its last count while its dialog shows it.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
 
+use devassist_core::repos::forklines::ForkProgress;
 use devassist_core::repos::state::Repos;
 use devassist_core::task::job::{Item, ItemState, Job};
-use egui::{CornerRadius, FontFamily, Id, Key, Modifiers, Painter, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Color32, CornerRadius, FontFamily, Galley, Id, Key, Modifiers, Painter, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use super::{Dialogs, Header, Parts, Plan, inset, main_id, rows};
-use crate::assets;
+use crate::assets::{self, Icon};
 use crate::overlay::{self, Kind};
 use crate::theme::{
-    BUTTON_HEIGHT, DIALOG_GAP, DIALOG_PAD, HAIRLINE, INSET_RADIUS, LINE_OPACITY, OUTPUT_GAP, OUTPUT_LINE, OUTPUT_PAD, OUTPUT_ROWS, OUTPUT_TEXT,
-    PROGRESS_HEIGHT, PROGRESS_LEAST, PROGRESS_TRACK_OPACITY, PROGRESS_WIDTH, Palette, TASK_BAR, TASK_HEIGHT, TASK_NAME, TASK_PAD, TASK_ROWS, TEXT,
+    BUTTON_HEIGHT, COUNT_GAP, COUNT_PAD, DIALOG_GAP, DIALOG_PAD, FETCH_WIDTH, HAIRLINE, HEADER_GAP, ICON, INSET_RADIUS, INTO_LINES, LINE_OPACITY,
+    OUTPUT_GAP, OUTPUT_LINE, OUTPUT_PAD, OUTPUT_ROWS, OUTPUT_TEXT, PAUSE_ICON_GAP, PROGRESS_HEIGHT, PROGRESS_LEAST, PROGRESS_TRACK_OPACITY,
+    PROGRESS_WIDTH, Palette, TASK_BAR, TASK_HEIGHT, TASK_NAME, TASK_PAD, TASK_ROWS, TEXT,
 };
-use crate::widgets::{self, font};
+use crate::widgets::{self, draw_icon, font};
+
+/// The start of the line under a fetch's title, before the folder.
+const INTO: &str = "Into ";
+/// The rest of that line, after the folder.
+const INTO_REST: &str = ". What the checkout has already is taken from disk, so only what the forks added is downloaded.";
+
+/// The line under the title of a fetch of forks into `folder`.
+fn into_words(folder: &str) -> String {
+    format!("{INTO}{folder}{INTO_REST}")
+}
+
+/// The count of a fetch of forks: "24 of 38 forks, 8 at a time".
+fn counted(progress: &ForkProgress) -> String {
+    format!("{} of {} forks, {} at a time", progress.done, progress.total, progress.at_a_time)
+}
+
+/// What the progress dialog shows of a fetch of forks: how far it is, and the collection the forks go into.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Fetch {
+    /// How far it is, in the core's numbers and words.
+    progress: ForkProgress,
+    /// The collection, once the core knows it.
+    into: Option<PathBuf>,
+}
+
+/// The fetch of forks `repos`'s run is, as the core says it now.
+fn fetch_now(repos: &Repos) -> Option<Fetch> {
+    repos.fork_progress().map(|progress| Fetch { progress, into: repos.fork_job_into() })
+}
+
+/// The fetch of forks the dialog of `repos`'s run shows: the core's now, or, once the run has ended (the core says no
+/// more of it), `kept`, the last one the dialog showed.
+fn fetch_shown(repos: &Repos, kept: Option<&Fetch>) -> Option<Fetch> {
+    let job = repos.job.as_ref()?;
+    fetch_now(repos).or_else(|| kept.filter(|_| !job.running()).cloned())
+}
+
+/// Keeps in `dialogs` the fetch of forks `repos`'s run is now, so the dialog of a run that has ended shows its last
+/// count until it closes.
+fn keep_fetch(repos: &Repos, dialogs: &mut Dialogs) {
+    if let Some(now) = fetch_now(repos) {
+        dialogs.fetch = Some(now);
+    }
+}
+
+/// The face of the count's words and its pause's.
+fn count_face() -> egui::FontId {
+    font(TEXT, assets::medium_family())
+}
+
+/// The count's words laid out with `painter`'s faces in `width`.
+fn count_galley(painter: &Painter, progress: &ForkProgress, width: f32) -> Arc<Galley> {
+    painter.layout(counted(progress), count_face(), Color32::PLACEHOLDER, width)
+}
+
+/// The pause's words laid out with `painter`'s faces beside its icon, in a count `width` wide inside.
+fn pause_galley(painter: &Painter, words: &str, width: f32) -> Arc<Galley> {
+    painter.layout(words.to_owned(), count_face(), Color32::PLACEHOLDER, width - ICON - PAUSE_ICON_GAP)
+}
+
+/// How tall the count of `progress` is in a dialog whose inside is `width` wide, laid out with `painter`'s faces: its
+/// words, its bar and, while the fetch pauses, the pause's line, with the room around them.
+fn count_height(painter: &Painter, progress: &ForkProgress, width: f32) -> f32 {
+    let inner = width - 2.0 * COUNT_PAD;
+    let words = count_galley(painter, progress, inner).size().y;
+    let pause = progress.pause.as_deref().map_or(0.0, |pause| COUNT_GAP + pause_galley(painter, pause, inner).size().y.max(ICON));
+    2.0 * COUNT_PAD + words + COUNT_GAP + PROGRESS_HEIGHT + pause
+}
+
+/// The line under the title of a fetch into `folder`, laid out with `painter`'s faces in `width`: whole when it takes
+/// [`INTO_LINES`] lines at most, else with as much of the folder's end as keeps it to them ([`widgets::path_tail_in`]).
+fn into_line(painter: &Painter, folder: &str, width: f32) -> String {
+    let face = font(TEXT, FontFamily::Proportional);
+    let fits = |words: &str| painter.layout(words.to_owned(), face.clone(), Color32::PLACEHOLDER, width).rows.len() <= INTO_LINES;
+    let whole = into_words(folder);
+    if fits(&whole) {
+        return whole;
+    }
+    // The most room the folder may take, found by halving: a folder given more room takes more lines.
+    let cut = |room: f32| into_words(&widgets::path_tail_in(painter, folder, &face, room));
+    let (mut low, mut high) = (0.0, widgets::width(painter, folder, &face));
+    for _ in 0..INTO_STEPS {
+        let mid = f32::midpoint(low, high);
+        if fits(&cut(mid)) { low = mid } else { high = mid }
+    }
+    cut(low)
+}
+
+/// How many times [`into_line`] halves the room it looks in: to well under a character of a folder of a few
+/// thousand points.
+const INTO_STEPS: usize = 14;
 
 /// The progress dialog's button that stops the run. The drawing says "Cancel the update"; one dialog serves every
 /// kind of run, so it says what the button does to any of them.
@@ -42,6 +144,8 @@ pub(super) struct Places {
     pub(super) header: Rect,
     /// The box of the tasks.
     pub(super) tasks: Rect,
+    /// The count of a fetch of forks, while the run is one.
+    pub(super) count: Option<Rect>,
     /// The box of the output.
     pub(super) output: Rect,
     /// The row of the buttons.
@@ -63,29 +167,59 @@ fn output_rows(height: f32) -> usize {
 /// header at the top, the buttons at the bottom, between them the tasks (up to [`TASK_ROWS`] rows; more scroll)
 /// and the output ([`OUTPUT_ROWS`] lines). In a window too short for all of it, the tasks keep one row and the
 /// output gives up lines first, then the tasks; the buttons stay inside the pane.
+#[cfg(test)]
 fn progress_places(window: Rect, header: f32, tasks: usize) -> Places {
-    let tasks_want = TASK_HEIGHT * rows(tasks.min(TASK_ROWS));
+    places_with(window, header, Some(tasks), None)
+}
+
+/// [`progress_places`] with `tasks` rows of tasks (`None`: no task list) and, for a fetch of forks, a count `count`
+/// points tall between the tasks and the output, the dialog [`FETCH_WIDTH`] wide. The count keeps its whole height
+/// while there is room; the output gives up lines first, then the tasks; the buttons stay inside the pane. Without a
+/// count it is the progress dialog as it always was.
+fn places_with(window: Rect, header: f32, tasks: Option<usize>, count: Option<f32>) -> Places {
+    let tasks_want = TASK_HEIGHT * rows(tasks.unwrap_or(0).min(TASK_ROWS));
     let output_want = output_height(OUTPUT_ROWS);
-    let height = 2.0 * DIALOG_PAD + header + 3.0 * DIALOG_GAP + tasks_want + output_want + BUTTON_HEIGHT;
-    let pane = overlay::dialog_rect(window, vec2(PROGRESS_WIDTH, height));
+    let count_want = count.unwrap_or(0.0);
+    // The boxes between the header and the buttons, each with the gap above it, and the gap above the buttons.
+    let boxes = 1 + usize::from(tasks.is_some()) + usize::from(count.is_some());
+    let width = if count.is_some() { FETCH_WIDTH } else { PROGRESS_WIDTH };
+    let height = 2.0 * DIALOG_PAD + header + rows(boxes + 1) * DIALOG_GAP + tasks_want + count_want + output_want + BUTTON_HEIGHT;
+    let pane = overlay::dialog_rect(window, vec2(width, height));
     let inside = pane.shrink(DIALOG_PAD);
     let buttons = Rect::from_min_max(pos2(inside.left(), (inside.bottom() - BUTTON_HEIGHT).max(inside.top())), inside.max);
     let header = Rect::from_min_size(inside.min, vec2(inside.width(), header.min(inside.height())));
     let top = header.bottom() + DIALOG_GAP;
-    let room = (buttons.top() - DIALOG_GAP - top - DIALOG_GAP).max(0.0);
-    let tasks_height = tasks_want.min((room - output_want).max(TASK_HEIGHT.min(tasks_want))).min(room);
-    let output_height = (room - tasks_height).clamp(0.0, output_want);
-    let tasks = Rect::from_min_size(pos2(inside.left(), top), vec2(inside.width(), tasks_height));
-    let output = Rect::from_min_size(pos2(inside.left(), tasks.bottom() + DIALOG_GAP), vec2(inside.width(), output_height));
-    Places { pane, header, tasks, output, buttons }
+    let room = (buttons.top() - DIALOG_GAP - top - rows(boxes - 1) * DIALOG_GAP).max(0.0);
+    let count_height = count_want.min(room);
+    let left = room - count_height;
+    let tasks_height = if tasks.is_some() { tasks_want.min((left - output_want).max(TASK_HEIGHT.min(tasks_want))).min(left) } else { 0.0 };
+    let output_height = (left - tasks_height).clamp(0.0, output_want);
+    let tasks_rect = Rect::from_min_size(pos2(inside.left(), top), vec2(inside.width(), tasks_height));
+    let mut next = if tasks.is_some() { tasks_rect.bottom() + DIALOG_GAP } else { top };
+    let count = count.map(|_| {
+        let rect = Rect::from_min_size(pos2(inside.left(), next), vec2(inside.width(), count_height));
+        next = rect.bottom() + DIALOG_GAP;
+        rect
+    });
+    let output = Rect::from_min_size(pos2(inside.left(), next), vec2(inside.width(), output_height));
+    Places { pane, header, tasks: tasks_rect, count, output, buttons }
 }
 
-/// Where the progress dialog of `repos`'s run stands in `window`, its header laid out with `painter`'s faces;
-/// `None` without a run.
-pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos) -> Option<Plan> {
+/// Where the progress dialog of `repos`'s run stands in `window`, its header laid out with `painter`'s faces; `kept`
+/// is the fetch of forks the dialog showed last. `None` without a run.
+pub(super) fn plan(painter: &Painter, window: Rect, repos: &Repos, kept: Option<&Fetch>) -> Option<Plan> {
     let job = repos.job.as_ref()?;
-    let header = Header::new(painter, &job.title, &job.summary().to_string(), PROGRESS_WIDTH - 2.0 * DIALOG_PAD);
-    let places = progress_places(window, header.height(), job.items.len());
+    let fetch = fetch_shown(repos, kept);
+    let width = if fetch.is_some() { FETCH_WIDTH } else { PROGRESS_WIDTH } - 2.0 * DIALOG_PAD;
+    let line = match fetch.as_ref().and_then(|fetch| fetch.into.as_ref()) {
+        Some(folder) => into_line(painter, &folder.display().to_string(), width),
+        None => job.summary().to_string(),
+    };
+    let header = Header::new(painter, &job.title, &line, width);
+    // A fetch of one repository's forks shows its count in the task list's place.
+    let tasks = (fetch.is_none() || job.items.len() > 1).then_some(job.items.len());
+    let count = fetch.as_ref().map(|fetch| count_height(painter, &fetch.progress, width));
+    let places = places_with(window, header.height(), tasks, count);
     Some(Plan::dialog(header, Parts::Progress(places)))
 }
 
@@ -176,13 +310,27 @@ struct Done {
 /// The progress dialog at `places`, with `header`, for `repos`'s run, on the overlay in `ui`; `scrim` is whether
 /// the scrim was clicked in this frame.
 pub(super) fn show(ui: &mut Ui, header: &Header, places: Places, repos: &mut Repos, palette: Palette, dialogs: &mut Dialogs, scrim: bool) {
+    keep_fetch(repos, dialogs);
+    let fetch = fetch_shown(repos, dialogs.fetch.as_ref());
     let Some(job) = repos.job.as_ref() else { return };
     let running = job.running();
     let buttons = progress_buttons(job);
     let ids: Vec<Id> = buttons.iter().filter(|button| button.press.is_some()).map(|button| button.id()).collect();
     overlay::walk(ui, &ids);
     header.draw(ui, places.header, palette);
-    let mut done = Done { picked: tasks(ui, places.tasks, job, palette, dialogs), ..Done::default() };
+    let mut done = Done::default();
+    if let Some(fetch) = &fetch {
+        if let Some(folder) = &fetch.into {
+            whole_folder_on_hover(ui, header, places.header, &folder.display().to_string());
+        }
+        if let Some(rect) = places.count {
+            count(ui, rect, &fetch.progress, palette);
+        }
+    }
+    // A fetch of one repository's forks has no task list: its count stands there.
+    if places.count.is_none() || job.items.len() > 1 {
+        done.picked = tasks(ui, places.tasks, job, palette, dialogs);
+    }
     (done.view, done.scrolled) = output(ui, places.output, job, palette, dialogs);
     let widths: Vec<f32> = buttons.iter().map(|button| widgets::button_width(ui, button.words)).collect();
     for (place, button) in overlay::buttons(places.buttons, &widths).into_iter().zip(&buttons) {
@@ -277,13 +425,7 @@ fn task(ui: &Ui, painter: &Painter, row: Rect, item: &Item, palette: Palette) {
     painter.text(pos2(left, y), egui::Align2::LEFT_CENTER, widgets::ellipsis(&item.name, &medium, TASK_NAME, ui), medium.clone(), palette.on_glass);
     let bar = Rect::from_min_size(pos2(left + TASK_NAME + TASK_PAD, y - PROGRESS_HEIGHT / 2.0), vec2(TASK_BAR, PROGRESS_HEIGHT));
     if item.state != ItemState::Waiting {
-        painter.rect_filled(bar, PROGRESS_HEIGHT / 2.0, palette.on_glass.gamma_multiply(PROGRESS_TRACK_OPACITY));
-        if let Some(share) = item.bar_fill() {
-            #[expect(clippy::cast_possible_truncation, reason = "a share between 0 and 1 of the bar's width")]
-            let filled = (f64::from(TASK_BAR) * share.clamp(0.0, 1.0)).round() as f32;
-            let filled = filled.clamp(PROGRESS_LEAST, TASK_BAR);
-            painter.rect_filled(Rect::from_min_size(bar.min, vec2(filled, PROGRESS_HEIGHT)), PROGRESS_HEIGHT / 2.0, palette.progress);
-        }
+        draw_bar(painter, bar.min, TASK_BAR, item.bar_fill(), palette);
     }
     let colour = match item.state {
         ItemState::Waiting => palette.quiet,
@@ -295,6 +437,54 @@ fn task(ui: &Ui, painter: &Painter, row: Rect, item: &Item, palette: Palette) {
     let state_left = bar.right() + TASK_PAD;
     let room = row.right() - TASK_PAD - state_left;
     painter.text(pos2(state_left, y), egui::Align2::LEFT_CENTER, widgets::ellipsis(&item.short_state(), &words, room, ui), words, colour);
+}
+
+/// Draws one of the dialog's bars from `at`, `width` long: its track and, when it is known, `share` of it filled, at
+/// least [`PROGRESS_LEAST`].
+fn draw_bar(painter: &Painter, at: Pos2, width: f32, share: Option<f64>, palette: Palette) {
+    painter.rect_filled(
+        Rect::from_min_size(at, vec2(width, PROGRESS_HEIGHT)),
+        PROGRESS_HEIGHT / 2.0,
+        palette.on_glass.gamma_multiply(PROGRESS_TRACK_OPACITY),
+    );
+    if let Some(share) = share {
+        #[expect(clippy::cast_possible_truncation, reason = "a share between 0 and 1 of the bar's width")]
+        let filled = (f64::from(width) * share.clamp(0.0, 1.0)).round() as f32;
+        let filled = filled.clamp(PROGRESS_LEAST, width);
+        painter.rect_filled(Rect::from_min_size(at, vec2(filled, PROGRESS_HEIGHT)), PROGRESS_HEIGHT / 2.0, palette.progress);
+    }
+}
+
+/// Draws the count of a fetch of forks in the box at `rect`: its words, its bar filled as far as the forks are, and,
+/// while the fetch pauses, the pause icon and the core's sentence, wrapped when it does not fit.
+fn count(ui: &Ui, rect: Rect, progress: &ForkProgress, palette: Palette) {
+    let inset = inset(ui, rect, palette);
+    let inner = rect.shrink(COUNT_PAD);
+    let words = count_galley(&inset.painter, progress, inner.width());
+    let bar = pos2(inner.left(), inner.top() + words.size().y + COUNT_GAP);
+    inset.painter.galley(inner.min, words, palette.on_glass);
+    let share = if progress.total == 0 { 0.0 } else { f64::from(progress.done) / f64::from(progress.total) };
+    draw_bar(&inset.painter, bar, inner.width(), Some(share), palette);
+    if let Some(pause) = &progress.pause {
+        let top = bar.y + PROGRESS_HEIGHT + COUNT_GAP;
+        let said = pause_galley(&inset.painter, pause, inner.width());
+        let line = said.size().y.max(ICON);
+        draw_icon(&inset.painter, pos2(inner.left() + ICON / 2.0, top + line / 2.0), Icon::Pause, ICON, palette.on_glass);
+        let at = pos2(inner.left() + ICON + PAUSE_ICON_GAP, top + (line - said.size().y) / 2.0);
+        inset.painter.galley(at, said, palette.on_glass);
+    }
+}
+
+/// Gives the line under the title of `header` (at `rect`) the whole of `folder` as its hover text, when the line
+/// shows it cut.
+fn whole_folder_on_hover(ui: &Ui, header: &Header, rect: Rect, folder: &str) {
+    if header.line.text().contains(folder) {
+        return;
+    }
+    let line = Rect::from_min_size(pos2(rect.left(), rect.top() + header.title.size().y + HEADER_GAP), header.line.size()).intersect(rect);
+    if line.is_positive() {
+        ui.interact(line, Id::unique("progress-into"), Sense::hover()).on_hover_text(folder);
+    }
 }
 
 /// Draws the shown task's output in the box at `rect`, the newest line at the bottom, in the 12-point monospaced
@@ -322,17 +512,32 @@ fn output(ui: &Ui, rect: Rect, job: &Job, palette: Palette, dialogs: &mut Dialog
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::Instant;
 
-    use devassist_core::repos::state::{JOB_LINGER, Mode as CoreMode};
-    use egui::{Event, Memory, Pos2};
+    use devassist_core::repos::forklines;
+    use devassist_core::repos::state::{JOB_LINGER, Mode as CoreMode, Msg};
+    use devassist_core::task::job::JobEvent;
+    use egui::{Event, Memory, Pos2, RawInput};
 
     use super::super::Which;
-    use super::super::testing::{Window, behind, live, run, session_with, until, wheel, window};
+    use super::super::testing::{Window, behind, fetch_session, live, run, session_with, until, wheel, window};
     use super::*;
+    use crate::assets::Icon;
     use crate::repos_view;
     use crate::shell;
-    use crate::theme::{MIN_WINDOW, WINDOW};
+    use crate::theme::{COUNT_PAD, FETCH_WIDTH, MIN_WINDOW, WINDOW};
+    use crate::widgets::tests::context;
+
+    /// How tall the progress dialog's header of `title` and `line` is, laid out as the dialog lays it out.
+    fn header_height(_: &Window, title: &str, line: &str) -> f32 {
+        let mut height = 0.0;
+        let input = RawInput { screen_rect: Some(window()), ..Default::default() };
+        context()
+            .run_ui(input, |ui| height = Header::new(ui.painter(), title, line, PROGRESS_WIDTH - 2.0 * DIALOG_PAD).height())
+            .drop_without_applying_deltas();
+        height
+    }
 
     /// The progress dialog's places in the window's last frame.
     fn parts(window: &Window) -> Places {
@@ -690,6 +895,169 @@ mod tests {
         assert!(places.tasks.height() >= TASK_HEIGHT, "the tasks are squeezed to {}", places.tasks.height());
         assert!(output_rows(places.output.height()) >= 3, "the output is squeezed to {}", places.output.height());
         assert!(places.header.height() < places.pane.height() / 3.0, "the summary takes {places:?}");
+    }
+
+    /// The collection the tests' fetch of forks goes into: the demo's api-fork.
+    fn into() -> PathBuf {
+        PathBuf::from(crate::demo::CODE_DIR).join("work").join("api-fork")
+    }
+
+    /// The lines of a fetch of forks of 38 that has fetched 24, in the core's words; with `paused`, the drawing's pause
+    /// after a timeout, 12 seconds left.
+    fn fetched(paused: bool) -> Vec<(String, bool)> {
+        let mut lines = vec![(forklines::total(38, &into()), false), (forklines::fetching(24, 38), true)];
+        if paused {
+            lines.extend([(forklines::paused("The fetch timed out", 30), false), (forklines::countdown(12), true)]);
+        }
+        lines
+    }
+
+    /// The drawing's sentence under the title for the fetch into `folder`.
+    fn into_line(folder: &str) -> String {
+        format!("Into {folder}. What the checkout has already is taken from disk, so only what the forks added is downloaded.")
+    }
+
+    /// The texts the dialog drew inside `rect` in the last frame: those from its title on, not the table's under it.
+    fn texts_in(window: &Window, rect: Rect) -> Vec<String> {
+        let title = window.texts.iter().position(|(words, ..)| *words == window.job().title).expect("no title");
+        window.texts[title..].iter().filter(|(_, at, _)| rect.contains(at.center())).map(|(words, ..)| words.clone()).collect()
+    }
+
+    /// The bars filled with the progress colour inside `area` in the last frame: the dialog's, not the table's under it.
+    fn filled_bars(window: &Window, area: Rect) -> Vec<Rect> {
+        let progress = crate::theme::palette(crate::theme::Mode::Light).progress;
+        window.fills.iter().filter(|(rect, fill)| *fill == progress && area.contains_rect(*rect)).map(|(rect, _)| *rect).collect()
+    }
+
+    #[test]
+    fn a_fetch_of_forks_counts_them_in_one_bar() {
+        let mut window = Window::new(fetch_session(&fetched(false)));
+        window.frame(Vec::new());
+        assert!(window.shows(Which::Progress));
+        let places = parts(&window);
+        assert!((places.pane.width() - FETCH_WIDTH).abs() < 1e-3, "{places:?}");
+        let count = places.count.expect("no count");
+        assert!(places.header.bottom() <= count.top() && count.bottom() <= places.output.top(), "{places:?}");
+        // One repository: the count stands in the task list's place, as drawn.
+        assert!(places.tasks.height().abs() < 1e-3, "{places:?}");
+        assert_eq!(texts_in(&window, count), ["24 of 38 forks, 8 at a time"]);
+        // One bar, the progress dialog's, filled 24 of 38 of its 568 points.
+        let bars = filled_bars(&window, count);
+        assert_eq!(bars.len(), 1, "{bars:?}");
+        let track = count.width() - 2.0 * COUNT_PAD;
+        assert!((track - 568.0).abs() < 1e-3);
+        assert!((bars[0].width() - (track * 24.0 / 38.0).round()).abs() < 1e-3, "{bars:?}");
+        assert!(count.contains_rect(bars[0]));
+        // The line under the title says where they go.
+        let line = into_line(&into().display().to_string());
+        assert!(window.texts.iter().any(|(words, ..)| *words == line), "{:?}", window.texts);
+        assert_eq!(window.said(), ["Cancel", "Hide"]);
+
+        // A run that ends keeps its last numbers while its dialog shows it.
+        window.session.repos_mut().unwrap().job.as_mut().unwrap().finish(Ok("Updated the forks of api.".to_owned()), false);
+        assert_eq!(window.repos().fork_progress(), None, "the core says nothing more of it");
+        window.frame(Vec::new());
+        let ended = parts(&window);
+        assert_eq!(ended.count, Some(count));
+        assert_eq!(texts_in(&window, count), ["24 of 38 forks, 8 at a time"]);
+        assert_eq!(window.said(), ["Close"]);
+        // Shown again later, it is the plain dialog of how the run ended.
+        window.press("Close");
+        window.session.repos_mut().unwrap().show_job();
+        window.frame(Vec::new());
+        window.frame(Vec::new());
+        assert!(window.open() && parts(&window).count.is_none());
+    }
+
+    #[test]
+    fn a_pause_is_said_under_the_bar_and_goes_when_the_fetch_goes_on() {
+        let mut window = Window::new(fetch_session(&fetched(true)));
+        window.frame(Vec::new());
+        let places = parts(&window);
+        let count = places.count.expect("no count");
+        let pause = "The fetch timed out. Paused, going on in 0:12.";
+        let icon = assets::icon(Icon::Pause).to_string();
+        assert_eq!(texts_in(&window, count), ["24 of 38 forks, 8 at a time".to_owned(), icon.clone(), pause.to_owned()]);
+        let bar = filled_bars(&window, count)[0];
+        let said = window.texts.iter().find(|(words, ..)| words == pause).unwrap().1;
+        assert!(said.top() >= bar.bottom(), "the pause is under the bar");
+        // The pause goes on: its line goes, and the count is as tall as it was without it.
+        window.session.repos_mut().unwrap().on_msg(Msg::Job(JobEvent::Line(forklines::going_on(), false)));
+        window.frame(Vec::new());
+        let without = parts(&window).count.expect("no count");
+        assert_eq!(texts_in(&window, without), ["24 of 38 forks, 8 at a time"]);
+        assert!(without.height() < count.height());
+        let plain = Window::new(fetch_session(&fetched(false)));
+        let mut plain = plain;
+        plain.frame(Vec::new());
+        assert!((parts(&plain).count.unwrap().height() - without.height()).abs() < 1e-3);
+        assert!(window.buttons().iter().all(|(place, _)| parts(&window).pane.contains_rect(*place)));
+    }
+
+    #[test]
+    fn another_run_keeps_the_plain_progress_dialog() {
+        let mut window = Window::new(session_with(run(&["api", "web"], 3)));
+        window.frame(Vec::new());
+        let places = parts(&window);
+        assert_eq!(places.count, None);
+        let job = window.job();
+        let header = header_height(&window, &job.title, &job.summary().to_string());
+        assert_eq!(places, progress_places(super::super::testing::window(), header, 2), "the dialog as it was");
+        assert!(window.texts.iter().any(|(words, ..)| *words == job.summary().to_string()));
+        assert_eq!(filled_bars(&window, places.tasks).len(), 1, "the running task's bar alone");
+    }
+
+    #[test]
+    fn the_count_and_the_buttons_stay_in_view_at_the_smallest_window() {
+        let mut lines = fetched(false);
+        lines.extend((0..40).map(|fork| (format!("Fetching owner-{fork}/api."), false)));
+        lines.extend(fetched(true).into_iter().skip(2));
+        for size in [MIN_WINDOW, [MIN_WINDOW[0], 400.0]] {
+            let mut window = Window::new(fetch_session(&lines));
+            window.size = size;
+            window.frame(Vec::new());
+            let places = parts(&window);
+            let whole = Rect::from_min_size(Pos2::ZERO, vec2(size[0], size[1]));
+            assert!(whole.contains_rect(places.pane), "{size:?}: {places:?}");
+            let count = places.count.expect("no count");
+            for part in [places.header, count, places.output, places.buttons] {
+                assert!(places.pane.contains_rect(part), "{size:?}: {part:?} leaves {:?}", places.pane);
+            }
+            assert!((places.buttons.height() - BUTTON_HEIGHT).abs() < 1e-3, "{size:?}: {places:?}");
+            assert!(count.bottom() <= places.output.top() && places.output.bottom() <= places.buttons.top(), "{size:?}: {places:?}");
+            // The whole count, its pause too; the output gives up its lines first.
+            assert_eq!(texts_in(&window, count).len(), 3, "{size:?}: {:?}", texts_in(&window, count));
+            assert!(output_rows(places.output.height()) >= 1, "{size:?}: {places:?}");
+            assert!(window.buttons().iter().all(|(place, _)| places.pane.contains_rect(*place)), "{size:?}");
+            window.press("Hide");
+            assert!(!window.open(), "{size:?}: Hide was out of reach");
+        }
+    }
+
+    #[test]
+    fn a_long_folder_is_cut_from_its_left_and_shown_whole_on_hover() {
+        let deep: PathBuf = (0..12).fold(PathBuf::from(crate::demo::CODE_DIR), |path, at| path.join(format!("a-rather-long-folder-{at}")));
+        let into = deep.join("api-fork");
+        let mut window = Window::new(fetch_session(&[(forklines::total(38, &into), false)]));
+        window.frame(Vec::new());
+        let full = into_line(&into.display().to_string());
+        let header = parts(&window).header;
+        let (line, at, _) = window.texts.iter().find(|(words, ..)| words.starts_with("Into ")).cloned().expect("no line under the title");
+        assert_ne!(line, full, "the folder is not cut");
+        assert!(
+            line.starts_with("Into …")
+                && line.ends_with("api-fork. What the checkout has already is taken from disk, so only what the forks added is downloaded."),
+            "{line}"
+        );
+        assert!(at.height() < 3.0 * TEXT * crate::theme::HEADER_LINE_HEIGHT - 1.0, "more than two lines: {at:?}");
+        assert!(header.contains_rect(at));
+        // On hover, the whole folder.
+        let folder = into.display().to_string();
+        window.frame_at(vec![Event::PointerMoved(at.center())], Some(10.0));
+        for step in 1..=10 {
+            window.frame_at(Vec::new(), Some(10.0 + 0.2 * f64::from(step)));
+        }
+        assert!(window.texts.iter().any(|(words, ..)| *words == folder), "no hover text with the whole folder");
     }
 
     #[test]

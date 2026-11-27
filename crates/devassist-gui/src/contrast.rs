@@ -24,8 +24,10 @@ use std::rc::Rc;
 use std::thread;
 
 use devassist_core::config::BACKDROPS;
+use devassist_core::repos::forklines;
 use devassist_core::repos::gitops::{ForkInfo, ForkList};
-use devassist_core::repos::state::{MenuItem, MigrateItem, Repos};
+use devassist_core::repos::state::{MenuItem, MigrateItem, Msg, Repos};
+use devassist_core::task::job::JobEvent;
 use devassist_glass::raster::{self, Bitmap, Pixel};
 use egui::epaint::text::LayoutSection;
 use egui::epaint::{ClippedShape, Mesh, RectShape, Shape, TessellationOptions, Tessellator, TextShape};
@@ -700,8 +702,8 @@ struct Shot {
 /// opens it (its label, address, note, facts with their checks and crosses, buttons), with no address (the field's
 /// hint, "Push" off), and with an address the core refused (its reason in the danger colour where the note was); the
 /// Add and the Import dialog with their folder field's rows shown on their own glass, the first row lit and under
-/// the pointer.
-const SHOTS: [Shot; 57] = [
+/// the pointer; the progress dialog of a fetch of forks paused, counting, ended, and into a folder it cuts.
+const SHOTS: [Shot; 61] = [
     Shot {
         name: "screen",
         over: Over::Nothing,
@@ -719,6 +721,22 @@ const SHOTS: [Shot; 57] = [
             repos.job.as_mut().unwrap().cancelling = true;
         },
     },
+    // The fetch of the forks of api as `--show forks-fetching` opens it: its count, its bar and its pause (icon and
+    // sentence), the line under the title, the output.
+    Shot { name: "forks fetching", over: Over::Dialog, set_up: |repos| demo::show(repos, demo::FORKS_FETCHING).unwrap() },
+    // The same once the fetch goes on: no pause.
+    Shot {
+        name: "forks fetching counting",
+        over: Over::Dialog,
+        set_up: |repos| {
+            demo::show(repos, demo::FORKS_FETCHING).unwrap();
+            repos.on_msg(Msg::Job(JobEvent::Line(forklines::going_on(), false)));
+        },
+    },
+    // The same, ended while its dialog shows it (see `FETCH_FINISHED`): the last count, and Close.
+    Shot { name: FETCH_FINISHED, over: Over::Dialog, set_up: |repos| demo::show(repos, demo::FORKS_FETCHING).unwrap() },
+    // A fetch into a folder so deep that the line under the title cuts it from its left.
+    Shot { name: "forks fetching long folder", over: Over::Dialog, set_up: set_up_fetch_long_folder },
     Shot {
         name: "remove",
         over: Over::Dialog,
@@ -1002,6 +1020,25 @@ const SHOTS: [Shot; 57] = [
         },
     },
 ];
+
+/// The shot of the fetch of the forks of api that ends while its dialog shows it: the run is ended after the first
+/// frame drew it running (a dialog keeps the last count it showed, not one it never drew).
+const FETCH_FINISHED: &str = "forks fetching finished";
+
+/// The demo's forks of api open, with a held fetch of them into a folder so deep that the line under the dialog's title
+/// cuts it, paused as `--show forks-fetching` has it.
+fn set_up_fetch_long_folder(repos: &mut Repos) {
+    set_up_forks(repos);
+    let into = (0..12).fold(std::path::PathBuf::from(demo::CODE_DIR), |path, at| path.join(format!("a-rather-long-folder-{at}"))).join("api-fork");
+    let lines = [
+        (forklines::total(38, &into), false),
+        (forklines::fetching(24, 38), true),
+        (forklines::paused("The fetch timed out", 30), false),
+        (forklines::countdown(12), true),
+    ];
+    let said: Vec<(&str, bool)> = lines.iter().map(|(line, progress)| (line.as_str(), *progress)).collect();
+    repos.hold_fork_job("api", &said);
+}
 
 /// The demo's forks of api open, as `--show forks` opens them.
 fn set_up_forks(repos: &mut Repos) {
@@ -1432,6 +1469,9 @@ fn draw_shot(shot: &Shot, stage: &Stage, textures: &mut HashMap<TextureId, Color
     let mut rows: Vec<(Rect, bool)> = Vec::new();
     let mut forks = ForksShot::default();
     for frame in 0..=SETTLE {
+        if shot.name == FETCH_FINISHED && frame == 1 {
+            session.repos_mut().unwrap().job.as_mut().unwrap().finish(Ok("Updated the forks of api.".to_owned()), false);
+        }
         let mut drew = None;
         let events = [shot_events(shot.over, frame, pointer, found, main, field), forks.events(frame)].concat();
         let input = RawInput { screen_rect: Some(window), events, ..Default::default() };
